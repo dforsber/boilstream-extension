@@ -4,20 +4,17 @@
 
 # Before we load the extension, this will fail
 statement error
-SELECT boilstream('Sam');
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:443/secrets:ffe14a7a000000010000000168e4f9a5bcca736c3adaaf0f63e735f881adc397db6da85f1b9e231f70bbf6f71db4ef9fad837bc8');
 ----
-Catalog Error: Scalar Function with name boilstream does not exist!
+Catalog Error:
+Pragma Function with name duckdb_secrets_boilstream_endpoint does not exist!
+Did you mean "disable_checkpoint_on_shutdown"?
 
 # Require statement will ensure this test is run with this extension loaded
 require boilstream
 
 # Confirm the extension works
 query I
-SELECT boilstream('Sam');
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:443/secrets:ffe14a7a000000010000000168e4f9a5bcca736c3adaaf0f63e735f881adc397db6da85f1b9e231f70bbf6f71db4ef9fad837bc8');
 ----
-Boilstream Sam 🐥
-
-query I
-SELECT boilstream_openssl_version('Michael') ILIKE 'Boilstream Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
+Boilstream endpoint configured successfully
