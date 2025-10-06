@@ -332,7 +332,7 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 			return true;
 		};
 		auto content_handler = [&](const_data_ptr_t data, idx_t size) {
-			response_body.append(reinterpret_cast<const char*>(data), size);
+			response_body.append(reinterpret_cast<const char *>(data), size);
 			return true;
 		};
 
@@ -371,7 +371,8 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 
 	// Check if URL is empty
 	if (url.empty()) {
-		throw IOException("HTTP POST failed: No endpoint URL configured. Use PRAGMA duckdb_secrets_rest_endpoint() first.");
+		throw IOException(
+		    "HTTP POST failed: No endpoint URL configured. Use PRAGMA duckdb_secrets_rest_endpoint() first.");
 	}
 
 	// Prevent recursive lookups during HTTP operations
@@ -406,7 +407,7 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 	// Use a hash of the request body - same content always gets same key for idempotency
 	// Note: Hash collisions are unlikely for typical secret payloads but theoretically possible
 	// Backend should validate secret name matches to detect collisions
-	auto idempotency_key = std::to_string(std::hash<string>{}(body));
+	auto idempotency_key = std::to_string(std::hash<string> {}(body));
 	headers.Insert("Idempotency-Key", idempotency_key);
 
 	// Retry configuration: 3 retries with short exponential backoff
@@ -417,8 +418,7 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 	string last_error;
 
 	for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-		PostRequestInfo request(url, headers, *params,
-		                        const_data_ptr_cast(body.c_str()), body.size());
+		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
 		auto response = http_util.Request(request);
 
 		// Check if we should retry (only on transient errors)
@@ -571,7 +571,8 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 	}
 
 	if (url.empty()) {
-		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
+		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
+		                            "duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Serialize secret
@@ -916,7 +917,8 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 	}
 
 	if (url.empty()) {
-		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
+		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
+		                            "duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Delete from REST API first (source of truth)

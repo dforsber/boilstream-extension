@@ -46,8 +46,7 @@ public:
 	                         optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Override to get secret by name from REST API
-	unique_ptr<SecretEntry> GetSecretByName(const string &name,
-	                                        optional_ptr<CatalogTransaction> transaction) override;
+	unique_ptr<SecretEntry> GetSecretByName(const string &name, optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Override to store secret to REST API
 	unique_ptr<SecretEntry> StoreSecret(unique_ptr<const BaseSecret> secret, OnCreateConflict on_conflict,

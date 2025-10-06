@@ -63,7 +63,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	// Find the start of the path (first '/' after protocol)
 	auto path_start = input.find('/', protocol_end + 3);
 	if (path_start == string::npos) {
-		throw InvalidInputException("rest_set_endpoint: URL must contain a path (e.g., https://host:port/secrets/:TOKEN)");
+		throw InvalidInputException(
+		    "rest_set_endpoint: URL must contain a path (e.g., https://host:port/secrets/:TOKEN)");
 	}
 
 	// Find the token delimiter ':' after the path starts
@@ -71,7 +72,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	// For https://localhost:4332/secrets/:TOKEN, we want the ':' before TOKEN
 	auto token_delimiter = input.find(':', path_start);
 	if (token_delimiter == string::npos) {
-		throw InvalidInputException("rest_set_endpoint: URL must include token after ':' (e.g., https://host:port/path/:TOKEN)");
+		throw InvalidInputException(
+		    "rest_set_endpoint: URL must include token after ':' (e.g., https://host:port/path/:TOKEN)");
 	}
 
 	// Split into endpoint and token
@@ -88,8 +90,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	}
 
 	// Require HTTPS for security (unless localhost for testing)
-	bool is_localhost = endpoint_url.find("://localhost") != string::npos ||
-	                    endpoint_url.find("://127.0.0.1") != string::npos;
+	bool is_localhost =
+	    endpoint_url.find("://localhost") != string::npos || endpoint_url.find("://127.0.0.1") != string::npos;
 	if (!is_localhost && endpoint_url.find("https://") != 0) {
 		throw InvalidInputException("rest_set_endpoint: URL must use HTTPS (or localhost for testing)");
 	}
@@ -102,7 +104,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	if (storage) {
 		storage->SetEndpoint(endpoint_url);
 		storage->SetAuthToken(token);
-		std::cerr << "[BOILSTREAM] SetEndpoint: endpoint_url=" << endpoint_url << ", token_len=" << token.size() << std::endl;
+		std::cerr << "[BOILSTREAM] SetEndpoint: endpoint_url=" << endpoint_url << ", token_len=" << token.size()
+		          << std::endl;
 	} else {
 		std::cerr << "[BOILSTREAM] SetEndpoint: WARNING - storage is NULL!" << std::endl;
 	}
@@ -138,7 +141,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_manager.SetDefaultStorage("boilstream");
 
 	// Register PRAGMA duckdb_secrets_boilstream_endpoint to set the REST API endpoint URL
-	auto set_endpoint_pragma = PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
+	auto set_endpoint_pragma =
+	    PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
 	loader.RegisterFunction(set_endpoint_pragma);
 
 	loader.SetDescription("REST API-based secret storage for multi-tenant DuckDB deployments");
@@ -167,5 +171,4 @@ extern "C" {
 DUCKDB_CPP_EXTENSION_ENTRY(boilstream, loader) {
 	duckdb::LoadInternal(loader);
 }
-
 }
