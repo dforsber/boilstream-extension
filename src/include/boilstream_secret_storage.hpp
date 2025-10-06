@@ -19,9 +19,9 @@ class SecretManager;
 
 //! REST API-based secret storage that communicates with an external service
 //! for multi-tenant secret management
-class BoilStreamSecretStorage : public CatalogSetSecretStorage {
+class RestApiSecretStorage : public CatalogSetSecretStorage {
 public:
-	BoilStreamSecretStorage(DatabaseInstance &db, const string &api_base_url, const string &auth_token);
+	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url, const string &auth_token);
 
 	//! Set the endpoint URL (without token)
 	void SetEndpoint(const string &endpoint);
@@ -46,7 +46,12 @@ public:
 	                         optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Override to get secret by name from REST API
-	unique_ptr<SecretEntry> GetSecretByName(const string &name, optional_ptr<CatalogTransaction> transaction) override;
+	unique_ptr<SecretEntry> GetSecretByName(const string &name,
+	                                        optional_ptr<CatalogTransaction> transaction) override;
+
+	//! Override to store secret to REST API
+	unique_ptr<SecretEntry> StoreSecret(unique_ptr<const BaseSecret> secret, OnCreateConflict on_conflict,
+	                                    optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Override to drop secret from REST API
 	void DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
