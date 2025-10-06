@@ -1,0 +1,23 @@
+# name: test/sql/boilstream.test
+# description: test boilstream extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT boilstream('Sam');
+----
+Catalog Error: Scalar Function with name boilstream does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require boilstream
+
+# Confirm the extension works
+query I
+SELECT boilstream('Sam');
+----
+Boilstream Sam 🐥
+
+query I
+SELECT boilstream_openssl_version('Michael') ILIKE 'Boilstream Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
