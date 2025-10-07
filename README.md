@@ -2,6 +2,8 @@
 
 This extension allows you to use [boilstream](https://github.com/boilingdata/boilstream) server as a remote secure Secrets Storage.
 
+> You can also create your own server that implements the required [REST API](src/README.md) to work with `boilstream` extension.
+
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)
