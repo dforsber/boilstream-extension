@@ -7,7 +7,7 @@ This extension allows you to use [boilstream](https://github.com/boilingdata/boi
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)
-2. Open BoilStream [web auth console](https://localhost/), register, and generate web token
+2. Open BoilStream [web auth console](https://docs.boilstream.com/guide/auth/postgresql-web-auth.html#_2-login-options), register, and generate web token
 3. Load the extension and provide token using PRAGMA as below
 
 ```
