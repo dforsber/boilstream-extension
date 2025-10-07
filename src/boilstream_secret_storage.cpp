@@ -20,7 +20,15 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+
+// Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
+// To enable: add -DBOILSTREAM_DEBUG to compiler flags
+#ifdef BOILSTREAM_DEBUG
 #include <iostream>
+#define BOILSTREAM_LOG(msg) std::cerr << "[BOILSTREAM] " << msg << std::endl
+#else
+#define BOILSTREAM_LOG(msg) ((void)0)
+#endif
 
 using namespace duckdb_yyjson;
 
@@ -291,11 +299,11 @@ void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> sec
 }
 
 string RestApiSecretStorage::HttpGet(const string &url) {
-	std::cerr << "[BOILSTREAM] HttpGet: url=" << url << std::endl;
+	BOILSTREAM_LOG("HttpGet: url=" << url);
 
 	// Prevent recursive lookups during HTTP operations
 	if (in_http_operation) {
-		std::cerr << "[BOILSTREAM] HttpGet: BLOCKED by recursion guard" << std::endl;
+		BOILSTREAM_LOG("HttpGet: BLOCKED by recursion guard");
 		return "";
 	}
 
@@ -305,7 +313,7 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 	auto &http_util = HTTPUtil::Get(db);
 	auto params = http_util.InitializeParameters(db, url);
 	if (!params) {
-		std::cerr << "[BOILSTREAM] HttpGet: InitializeParameters FAILED" << std::endl;
+		BOILSTREAM_LOG("HttpGet: InitializeParameters FAILED");
 		return "";
 	}
 
@@ -347,27 +355,27 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 		}
 
 		if (!response->Success()) {
-			std::cerr << "[BOILSTREAM] HttpGet: Request failed (not successful)" << std::endl;
+			BOILSTREAM_LOG("HttpGet: Request failed (not successful)");
 			return "";
 		}
 
 		// Check HTTP status code - must be 2xx for success
 		auto status_code = static_cast<uint16_t>(response->status);
 		if (status_code < 200 || status_code >= 300) {
-			std::cerr << "[BOILSTREAM] HttpGet: HTTP " << status_code << " (non-2xx)" << std::endl;
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (non-2xx)");
 			return ""; // Return empty for non-success status codes
 		}
 
-		std::cerr << "[BOILSTREAM] HttpGet: SUCCESS, body_len=" << response_body.size() << std::endl;
+		BOILSTREAM_LOG("HttpGet: SUCCESS, body_len=" << response_body.size());
 		return response_body;
 	}
 
-	std::cerr << "[BOILSTREAM] HttpGet: All retries exhausted" << std::endl;
+	BOILSTREAM_LOG("HttpGet: All retries exhausted");
 	return ""; // All retries exhausted
 }
 
 string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
-	std::cerr << "[BOILSTREAM] HttpPost: url=" << url << ", body_len=" << body.size() << std::endl;
+	BOILSTREAM_LOG("HttpPost: url=" << url << ", body_len=" << body.size());
 
 	// Check if URL is empty
 	if (url.empty()) {
@@ -377,7 +385,7 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 
 	// Prevent recursive lookups during HTTP operations
 	if (in_http_operation) {
-		std::cerr << "[BOILSTREAM] HttpPost: BLOCKED by recursion guard" << std::endl;
+		BOILSTREAM_LOG("HttpPost: BLOCKED by recursion guard");
 		throw IOException("HTTP POST failed: Recursive secret lookup detected");
 	}
 
@@ -388,7 +396,7 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 	// Initialize parameters with nullptr to avoid looking up secrets (which could recurse)
 	auto params = http_util.InitializeParameters(db, url);
 	if (!params) {
-		std::cerr << "[BOILSTREAM] HttpPost: InitializeParameters FAILED" << std::endl;
+		BOILSTREAM_LOG("HttpPost: InitializeParameters FAILED");
 		throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 	}
 
@@ -437,11 +445,11 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 			if (request.buffer_out.size() > 200) {
 				error_body += "... (truncated)";
 			}
-			std::cerr << "[BOILSTREAM] HttpPost: HTTP " << status_code << " error" << std::endl;
+			BOILSTREAM_LOG("HttpPost: HTTP " << status_code << " error");
 			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_body);
 		}
 
-		std::cerr << "[BOILSTREAM] HttpPost: SUCCESS, body_len=" << request.buffer_out.size() << std::endl;
+		BOILSTREAM_LOG("HttpPost: SUCCESS, body_len=" << request.buffer_out.size());
 		return request.buffer_out;
 	}
 
@@ -450,11 +458,11 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 }
 
 void RestApiSecretStorage::HttpDelete(const string &url) {
-	std::cerr << "[BOILSTREAM] HttpDelete: url=" << url << std::endl;
+	BOILSTREAM_LOG("HttpDelete: url=" << url);
 
 	// Prevent recursive lookups during HTTP operations
 	if (in_http_operation) {
-		std::cerr << "[BOILSTREAM] HttpDelete: BLOCKED by recursion guard" << std::endl;
+		BOILSTREAM_LOG("HttpDelete: BLOCKED by recursion guard");
 		throw IOException("HTTP DELETE failed: Recursive secret lookup detected");
 	}
 
@@ -521,7 +529,7 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseSecret> secret,
                                                           OnCreateConflict on_conflict,
                                                           optional_ptr<CatalogTransaction> transaction) {
-	std::cerr << "[BOILSTREAM] StoreSecret: name=" << secret->GetName() << std::endl;
+	BOILSTREAM_LOG("StoreSecret: name=" << secret->GetName());
 
 	auto trans = GetTransactionOrDefault(transaction);
 	auto secret_name = secret->GetName();
@@ -605,11 +613,11 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 
 SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string &type,
                                                optional_ptr<CatalogTransaction> transaction) {
-	std::cerr << "[BOILSTREAM] LookupSecret: path=" << path << ", type=" << type << std::endl;
+	BOILSTREAM_LOG("LookupSecret: path=" << path << ", type=" << type);
 
 	// Prevent recursive lookups during HTTP operations
 	if (in_http_operation) {
-		std::cerr << "[BOILSTREAM] LookupSecret: BLOCKED by recursion guard" << std::endl;
+		BOILSTREAM_LOG("LookupSecret: BLOCKED by recursion guard");
 		return SecretMatch();
 	}
 
@@ -708,7 +716,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 
 unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name,
                                                               optional_ptr<CatalogTransaction> transaction) {
-	std::cerr << "[BOILSTREAM] GetSecretByName: name=" << name << std::endl;
+	BOILSTREAM_LOG("GetSecretByName: name=" << name);
 
 	// First, check local catalog using parent's implementation
 	auto local_entry = CatalogSetSecretStorage::GetSecretByName(name, transaction);
@@ -756,10 +764,10 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	try {
 		response = HttpPost(url, body);
 	} catch (const std::exception &e) {
-		std::cerr << "[BOILSTREAM] GetSecretByName: HttpPost exception: " << e.what() << std::endl;
+		BOILSTREAM_LOG("GetSecretByName: HttpPost exception: " << e.what());
 		return nullptr;
 	} catch (...) {
-		std::cerr << "[BOILSTREAM] GetSecretByName: HttpPost unknown exception" << std::endl;
+		BOILSTREAM_LOG("GetSecretByName: HttpPost unknown exception");
 		return nullptr;
 	}
 
@@ -803,7 +811,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 }
 
 vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransaction> transaction) {
-	std::cerr << "[BOILSTREAM] AllSecrets: called" << std::endl;
+	BOILSTREAM_LOG("AllSecrets: called");
 
 	// Build URL using the endpoint URL
 	string url;
@@ -812,11 +820,11 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 		url = endpoint_url;
 	}
 
-	std::cerr << "[BOILSTREAM] AllSecrets: endpoint_url=" << url << std::endl;
+	BOILSTREAM_LOG("AllSecrets: endpoint_url=" << url);
 
 	// If endpoint not configured, return what's in local catalog
 	if (url.empty()) {
-		std::cerr << "[BOILSTREAM] AllSecrets: endpoint empty, returning local catalog" << std::endl;
+		BOILSTREAM_LOG("AllSecrets: endpoint empty, returning local catalog");
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
 
@@ -907,7 +915,7 @@ void RestApiSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_e
 
 void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
                                             optional_ptr<CatalogTransaction> transaction) {
-	std::cerr << "[BOILSTREAM] DropSecretByName: name=" << name << std::endl;
+	BOILSTREAM_LOG("DropSecretByName: name=" << name);
 
 	// Check if endpoint is configured
 	string url;

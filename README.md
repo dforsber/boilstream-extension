@@ -1,19 +1,18 @@
 # BoilStream DuckDB Extension
 
-This `boilstream` extension allows you to use [boilstream](https://github.com/boilingdata/boilstream) server as a remote secure Secrets Storage.
+This extension allows you to use [boilstream](https://github.com/boilingdata/boilstream) server as a remote secure Secrets Storage.
 
 ## Running the extension
 
-To run the extension code,
-
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)
 2. Open BoilStream [web auth console](https://localhost/), register, and generate web token
-3. Start the duckdb shell with `./build/release/duckdb`
-4. Load the extension and provide token using PRAGMA as below
+3. Load the extension and provide token using PRAGMA as below
 
 ```
-% duckdb -unsigned
-D LOAD 'build/release/extension/boilstream/boilstream.duckdb_extension';
+% duckdb # -unsigned
+D -- LOAD 'build/release/extension/boilstream/boilstream.duckdb_extension';
+D INSTALL boilstream;
+D LOAD boilstream;
 D PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:443/secrets:ffe14a7a000000010000000168e4f9a5bcca736c3adaaf0f63e735f881adc397db6da85f1b9e231f70bbf6f71db4ef9fad837bc8');
 ┌─────────────────────────────────────────────┐
 │                   result                    │

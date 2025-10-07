@@ -13,7 +13,15 @@
 #include "duckdb/function/pragma_function.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
+
+// Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
+// To enable: add -DBOILSTREAM_DEBUG to compiler flags
+#ifdef BOILSTREAM_DEBUG
 #include <iostream>
+#define BOILSTREAM_LOG(msg) std::cerr << "[BOILSTREAM] " << msg << std::endl
+#else
+#define BOILSTREAM_LOG(msg) ((void)0)
+#endif
 
 namespace duckdb {
 
@@ -104,10 +112,9 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	if (storage) {
 		storage->SetEndpoint(endpoint_url);
 		storage->SetAuthToken(token);
-		std::cerr << "[BOILSTREAM] SetEndpoint: endpoint_url=" << endpoint_url << ", token_len=" << token.size()
-		          << std::endl;
+		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url << ", token_len=" << token.size());
 	} else {
-		std::cerr << "[BOILSTREAM] SetEndpoint: WARNING - storage is NULL!" << std::endl;
+		BOILSTREAM_LOG("SetEndpoint: WARNING - storage is NULL!");
 	}
 
 	// Return a query that will be executed (showing the result)
