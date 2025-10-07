@@ -4,6 +4,7 @@
 duckdb_extension_load(boilstream
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
+    REQUIRES httpfs
 )
 
 # Any extra extensions that should be built
