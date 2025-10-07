@@ -11,6 +11,7 @@
 #include "duckdb/main/secret/secret_storage.hpp"
 #include "duckdb/common/mutex.hpp"
 #include <string>
+#include <chrono>
 
 namespace duckdb {
 
