@@ -654,8 +654,8 @@ void RestApiSecretStorage::StoreExpiration(const string &secret_name, const stri
 		while (to_remove-- > 0 && it != secret_expiration.end()) {
 			it = secret_expiration.erase(it);
 		}
-		BOILSTREAM_LOG("StoreExpiration: WARNING - Secret expiration map exceeded limit, cleared "
-		               << (MAX_SECRETS / 2) << " entries");
+		BOILSTREAM_LOG("StoreExpiration: WARNING - Secret expiration map exceeded limit, cleared " << (MAX_SECRETS / 2)
+		                                                                                           << " entries");
 	}
 
 	secret_expiration[secret_name] = expiration_time;
@@ -808,8 +808,8 @@ skip_rotation_get:
 				continue; // Will retry with exponential backoff
 			} else {
 				// All retries exhausted
-				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
-				                  " - Server error after " + std::to_string(MAX_RETRIES + 1) + " attempts");
+				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - Server error after " +
+				                  std::to_string(MAX_RETRIES + 1) + " attempts");
 			}
 		}
 

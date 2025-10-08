@@ -52,8 +52,7 @@ else()
 endif()
 
 # Integration test executable
-add_executable(
-  boilstream_integration_test test_boilstream_integration.cpp)
+add_executable(boilstream_integration_test test_boilstream_integration.cpp)
 
 target_include_directories(
   boilstream_integration_test
@@ -62,7 +61,7 @@ target_include_directories(
 
 if(DUCKDB_LIB)
   target_link_libraries(boilstream_integration_test PRIVATE ${DUCKDB_LIB}
-                                                             Catch2::Catch2)
+                                                            Catch2::Catch2)
 else()
   target_link_libraries(boilstream_integration_test PRIVATE Catch2::Catch2)
   message(

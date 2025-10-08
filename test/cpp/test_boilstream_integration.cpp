@@ -38,20 +38,18 @@ using namespace std;
 // REQUIRED: Tests will fail if BOILSTREAM_TEST_ENDPOINT is not set
 
 static string GetTestEndpoint() {
-	const char* env_endpoint = std::getenv("BOILSTREAM_TEST_ENDPOINT");
+	const char *env_endpoint = std::getenv("BOILSTREAM_TEST_ENDPOINT");
 	if (!env_endpoint || strlen(env_endpoint) == 0) {
-		throw std::runtime_error(
-			"BOILSTREAM_TEST_ENDPOINT environment variable not set. "
-			"Set it to your boilstream endpoint with fresh bootstrap token: "
-			"export BOILSTREAM_TEST_ENDPOINT='https://localhost:4332/secrets:your_token_here'"
-		);
+		throw std::runtime_error("BOILSTREAM_TEST_ENDPOINT environment variable not set. "
+		                         "Set it to your boilstream endpoint with fresh bootstrap token: "
+		                         "export BOILSTREAM_TEST_ENDPOINT='https://localhost:4332/secrets:your_token_here'");
 	}
 	return string(env_endpoint);
 }
 
 // Get boilstream extension path from environment or default
 static string GetBoilstreamExtensionPath() {
-	const char* env_path = std::getenv("BOILSTREAM_EXTENSION_PATH");
+	const char *env_path = std::getenv("BOILSTREAM_EXTENSION_PATH");
 	if (env_path && strlen(env_path) > 0) {
 		return string(env_path);
 	}
@@ -154,9 +152,8 @@ static void InitializeTestDatabase() {
 	string load_sql = "LOAD '" + extension_path + "';";
 	auto load_result = con.Query(load_sql);
 	if (load_result->HasError()) {
-		throw std::runtime_error("Failed to load boilstream extension from " + extension_path +
-		                         ": " + load_result->GetError() +
-		                         "\nMake sure the extension is built first: GEN=ninja make");
+		throw std::runtime_error("Failed to load boilstream extension from " + extension_path + ": " +
+		                         load_result->GetError() + "\nMake sure the extension is built first: GEN=ninja make");
 	}
 	cout << "DEBUG: boilstream loaded successfully from local build" << endl;
 
@@ -218,10 +215,8 @@ TEST_CASE("Bootstrap Token Single-Use", "[boilstream][integration]") {
 		string error = result->GetError();
 
 		// Error should indicate token exchange failed (token already used or expired)
-		REQUIRE((error.find("Token exchange failed") != string::npos ||
-		         error.find("expired") != string::npos ||
-		         error.find("used") != string::npos ||
-		         error.find("invalid") != string::npos));
+		REQUIRE((error.find("Token exchange failed") != string::npos || error.find("expired") != string::npos ||
+		         error.find("used") != string::npos || error.find("invalid") != string::npos));
 
 		cout << "DEBUG: Reuse attempt correctly failed with: " << error << endl;
 	}
@@ -298,14 +293,12 @@ TEST_CASE("Secret CRUD Operations", "[boilstream][integration]") {
 	Connection con(*g_test_db);
 
 	SECTION("Create secret") {
-		auto result = con.Query(
-			"CREATE SECRET test_secret_crud_create ("
-			"    TYPE S3,"
-			"    KEY_ID 'test_access_key',"
-			"    SECRET 'test_secret_key',"
-			"    REGION 'us-east-1'"
-			");"
-		);
+		auto result = con.Query("CREATE SECRET test_secret_crud_create ("
+		                        "    TYPE S3,"
+		                        "    KEY_ID 'test_access_key',"
+		                        "    SECRET 'test_secret_key',"
+		                        "    REGION 'us-east-1'"
+		                        ");");
 
 		if (result->HasError()) {
 			WARN("Create secret failed: " << result->GetError());
@@ -315,13 +308,11 @@ TEST_CASE("Secret CRUD Operations", "[boilstream][integration]") {
 
 	SECTION("List secrets includes created secret") {
 		// Create a secret first
-		auto create_result = con.Query(
-			"CREATE SECRET test_secret_crud_list ("
-			"    TYPE S3,"
-			"    KEY_ID 'list_test_key',"
-			"    SECRET 'list_test_secret'"
-			");"
-		);
+		auto create_result = con.Query("CREATE SECRET test_secret_crud_list ("
+		                               "    TYPE S3,"
+		                               "    KEY_ID 'list_test_key',"
+		                               "    SECRET 'list_test_secret'"
+		                               ");");
 		if (create_result->HasError()) {
 			cout << "DEBUG: Create secret failed: " << create_result->GetError() << endl;
 		}
@@ -337,13 +328,11 @@ TEST_CASE("Secret CRUD Operations", "[boilstream][integration]") {
 
 	SECTION("Delete secret") {
 		// Create a secret first
-		con.Query(
-			"CREATE SECRET test_secret_crud_delete ("
-			"    TYPE S3,"
-			"    KEY_ID 'delete_test_key',"
-			"    SECRET 'delete_test_secret'"
-			");"
-		);
+		con.Query("CREATE SECRET test_secret_crud_delete ("
+		          "    TYPE S3,"
+		          "    KEY_ID 'delete_test_key',"
+		          "    SECRET 'delete_test_secret'"
+		          ");");
 
 		// Delete it
 		auto result = con.Query("DROP SECRET test_secret_crud_delete;");
@@ -356,23 +345,19 @@ TEST_CASE("Secret CRUD Operations", "[boilstream][integration]") {
 
 	SECTION("Update secret (drop and recreate)") {
 		// Create initial secret
-		con.Query(
-			"CREATE SECRET test_secret_crud_update ("
-			"    TYPE S3,"
-			"    KEY_ID 'old_key',"
-			"    SECRET 'old_secret'"
-			");"
-		);
+		con.Query("CREATE SECRET test_secret_crud_update ("
+		          "    TYPE S3,"
+		          "    KEY_ID 'old_key',"
+		          "    SECRET 'old_secret'"
+		          ");");
 
 		// Drop and recreate with new values
 		con.Query("DROP SECRET test_secret_crud_update;");
-		auto result = con.Query(
-			"CREATE SECRET test_secret_crud_update ("
-			"    TYPE S3,"
-			"    KEY_ID 'new_key',"
-			"    SECRET 'new_secret'"
-			");"
-		);
+		auto result = con.Query("CREATE SECRET test_secret_crud_update ("
+		                        "    TYPE S3,"
+		                        "    KEY_ID 'new_key',"
+		                        "    SECRET 'new_secret'"
+		                        ");");
 
 		REQUIRE_FALSE(result->HasError());
 	}
@@ -388,25 +373,21 @@ TEST_CASE("Token Rotation", "[boilstream][integration]") {
 
 	SECTION("Operations work after token rotation") {
 		// Create a secret (forces token usage)
-		con.Query(
-			"CREATE SECRET test_rotation_before ("
-			"    TYPE S3,"
-			"    KEY_ID 'before_rotation',"
-			"    SECRET 'before_secret'"
-			");"
-		);
+		con.Query("CREATE SECRET test_rotation_before ("
+		          "    TYPE S3,"
+		          "    KEY_ID 'before_rotation',"
+		          "    SECRET 'before_secret'"
+		          ");");
 
 		// TODO: Trigger rotation (currently automatic when <30min remain)
 		// For now, just verify operations still work
 
 		// Create another secret (should work with same or rotated token)
-		auto result = con.Query(
-			"CREATE SECRET test_rotation_after ("
-			"    TYPE S3,"
-			"    KEY_ID 'after_rotation',"
-			"    SECRET 'after_secret'"
-			");"
-		);
+		auto result = con.Query("CREATE SECRET test_rotation_after ("
+		                        "    TYPE S3,"
+		                        "    KEY_ID 'after_rotation',"
+		                        "    SECRET 'after_secret'"
+		                        ");");
 
 		REQUIRE_FALSE(result->HasError());
 	}
@@ -426,42 +407,34 @@ TEST_CASE("Error Handling", "[boilstream][integration]") {
 		REQUIRE(result->HasError());
 		string error = result->GetError();
 		// Error should mention secret name or "not found"
-		REQUIRE((error.find("nonexistent") != string::npos ||
-		         error.find("not found") != string::npos ||
+		REQUIRE((error.find("nonexistent") != string::npos || error.find("not found") != string::npos ||
 		         error.find("404") != string::npos));
 	}
 
 	SECTION("Invalid secret type rejected") {
-		auto result = con.Query(
-			"CREATE SECRET test_invalid_type ("
-			"    TYPE INVALID_TYPE,"
-			"    KEY_ID 'test'"
-			");"
-		);
+		auto result = con.Query("CREATE SECRET test_invalid_type ("
+		                        "    TYPE INVALID_TYPE,"
+		                        "    KEY_ID 'test'"
+		                        ");");
 		REQUIRE(result->HasError());
 	}
 
 	SECTION("Duplicate secret name rejected") {
 		// Create first secret
-		con.Query(
-			"CREATE SECRET test_duplicate ("
-			"    TYPE S3,"
-			"    KEY_ID 'first'"
-			");"
-		);
+		con.Query("CREATE SECRET test_duplicate ("
+		          "    TYPE S3,"
+		          "    KEY_ID 'first'"
+		          ");");
 
 		// Try to create duplicate
-		auto result = con.Query(
-			"CREATE SECRET test_duplicate ("
-			"    TYPE S3,"
-			"    KEY_ID 'second'"
-			");"
-		);
+		auto result = con.Query("CREATE SECRET test_duplicate ("
+		                        "    TYPE S3,"
+		                        "    KEY_ID 'second'"
+		                        ");");
 
 		REQUIRE(result->HasError());
 		string error = result->GetError();
-		REQUIRE((error.find("exists") != string::npos ||
-		         error.find("duplicate") != string::npos));
+		REQUIRE((error.find("exists") != string::npos || error.find("duplicate") != string::npos));
 	}
 }
 
@@ -478,18 +451,14 @@ TEST_CASE("Concurrent Operations", "[boilstream][integration]") {
 		Connection con2(*g_test_db);
 
 		// Both connections should be able to create secrets
-		auto result1 = con1.Query(
-			"CREATE SECRET test_concurrent_1 ("
-			"    TYPE S3,"
-			"    KEY_ID 'concurrent_1'"
-			");"
-		);
-		auto result2 = con2.Query(
-			"CREATE SECRET test_concurrent_2 ("
-			"    TYPE S3,"
-			"    KEY_ID 'concurrent_2'"
-			");"
-		);
+		auto result1 = con1.Query("CREATE SECRET test_concurrent_1 ("
+		                          "    TYPE S3,"
+		                          "    KEY_ID 'concurrent_1'"
+		                          ");");
+		auto result2 = con2.Query("CREATE SECRET test_concurrent_2 ("
+		                          "    TYPE S3,"
+		                          "    KEY_ID 'concurrent_2'"
+		                          ");");
 
 		REQUIRE_FALSE(result1->HasError());
 		REQUIRE_FALSE(result2->HasError());
