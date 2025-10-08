@@ -14,6 +14,8 @@
 #include "mbedtls_wrapper.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
+#include <ctime>
+#include <chrono>
 
 // Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
 // To enable: add -DBOILSTREAM_DEBUG to compiler flags
@@ -130,6 +132,31 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		throw InvalidInputException("rest_set_endpoint: Storage not initialized");
 	}
 
+	// Hash the bootstrap token to check for reuse
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state_check;
+	sha_state_check.AddString(bootstrap_token);
+	string incoming_token_hash = sha_state_check.Finalize();
+
+	// Check if this is the same bootstrap token from an existing valid session
+	if (storage->GetBootstrapTokenHash() == incoming_token_hash && !incoming_token_hash.empty() &&
+	    storage->IsSessionTokenValid()) {
+		BOILSTREAM_LOG("SetEndpoint: Bootstrap token matches existing session, skipping exchange");
+
+		// Get expiration timestamp and format it
+		auto expires_at = storage->GetTokenExpiresAt();
+		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
+		std::tm tm_utc;
+		#ifdef _WIN32
+		gmtime_s(&tm_utc, &expires_time_t);
+		#else
+		gmtime_r(&expires_time_t, &tm_utc);
+		#endif
+		char expires_str[64];
+		std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%d %H:%M:%S", &tm_utc);
+
+		return "SELECT 'Session already active' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at;";
+	}
+
 	// Clear any existing session before attempting new token exchange
 	// This ensures clean state and prevents sending old session_token during bootstrap exchange
 	storage->ClearSession();
@@ -142,6 +169,10 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 		storage->PerformTokenExchange(bootstrap_token);
 		BOILSTREAM_LOG("SetEndpoint: Token exchange successful");
+
+		// Store bootstrap token hash for reuse detection
+		storage->SetBootstrapTokenHash(incoming_token_hash);
+		BOILSTREAM_LOG("SetEndpoint: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
 		// Rollback endpoint on failure - ensure consistent state
 		storage->SetEndpoint("");
@@ -157,9 +188,21 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	string user_id = sha_state.Finalize().substr(0, 16); // First 16 hex chars of hash
 	SetUserContext(context, user_id);
 
+	// Get expiration timestamp and format it
+	auto expires_at = storage->GetTokenExpiresAt();
+	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
+	std::tm tm_utc;
+	#ifdef _WIN32
+	gmtime_s(&tm_utc, &expires_time_t);
+	#else
+	gmtime_r(&expires_time_t, &tm_utc);
+	#endif
+	char expires_str[64];
+	std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%d %H:%M:%S", &tm_utc);
+
 	// Return a query that will be executed (showing the result)
 	// Do NOT echo the token to prevent leakage in logs/query history
-	return "SELECT 'Boilstream session token obtained (expires in 8h)' as result;";
+	return "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at;";
 }
 
 //! Load the extension

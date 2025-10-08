@@ -70,6 +70,7 @@ void RestApiSecretStorage::ClearSession() {
 	lock_guard<mutex> lock(session_lock);
 	session_token = "";
 	code_verifier = "";
+	bootstrap_token_hash = "";
 	token_expires_at = std::chrono::system_clock::time_point::min();
 }
 
@@ -159,6 +160,21 @@ bool RestApiSecretStorage::ShouldRotateToken() {
 	const auto BUFFER = std::chrono::minutes(30);
 	auto now = std::chrono::system_clock::now();
 	return now >= (token_expires_at - BUFFER);
+}
+
+string RestApiSecretStorage::GetBootstrapTokenHash() {
+	lock_guard<mutex> lock(session_lock);
+	return bootstrap_token_hash;
+}
+
+void RestApiSecretStorage::SetBootstrapTokenHash(const string &hash) {
+	lock_guard<mutex> lock(session_lock);
+	bootstrap_token_hash = hash;
+}
+
+std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt() {
+	lock_guard<mutex> lock(session_lock);
+	return token_expires_at;
 }
 
 void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string &context) {

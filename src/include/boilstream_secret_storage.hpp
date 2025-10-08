@@ -60,6 +60,15 @@ public:
 	//! Check if session token should be rotated (< 30min remaining)
 	bool ShouldRotateToken();
 
+	//! Get stored bootstrap token hash (for reuse detection)
+	string GetBootstrapTokenHash();
+
+	//! Set bootstrap token hash (after successful exchange)
+	void SetBootstrapTokenHash(const string &hash);
+
+	//! Get session token expiration timestamp
+	std::chrono::system_clock::time_point GetTokenExpiresAt();
+
 	//! Override to fetch all secrets from REST API
 	vector<SecretEntry> AllSecrets(optional_ptr<CatalogTransaction> transaction) override;
 
@@ -145,6 +154,9 @@ private:
 
 	//! Flag indicating token exchange in progress
 	bool is_exchanging;
+
+	//! Hash of successful bootstrap token (to detect reuse attempts)
+	string bootstrap_token_hash;
 
 	//! Connection ID to user ID mapping
 	case_insensitive_map_t<string> connection_user_map;
