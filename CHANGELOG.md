@@ -5,7 +5,7 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2025-10-08
 
 ### Added
 
@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `RotateSessionToken()` method for session token renewal
 - PKCE helper functions: `GenerateCodeVerifier()`, `ComputeCodeChallenge()`, `ValidateTokenFormat()`
 - Session token validation with 30-minute expiry buffer
+- Integration C++ tests against running server for testing PKCE token exchange and secrets mgmt
 - Comprehensive C++ unit test suite (test/cpp/test_boilstream_security.cpp)
   - PKCE code verifier generation tests (uniqueness, entropy, character validity)
   - PKCE code challenge computation tests (RFC 7636 test vectors)
