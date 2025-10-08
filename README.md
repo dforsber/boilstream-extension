@@ -41,6 +41,11 @@ D FROM duckdb_secrets();
 └──────────────┴─────────┴──────────┴────────────┴────────────┴──────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## TODO
+
+- [_] Server TLS certificate validation and optional pinning
+- [_] Possibly making the bootstrap token more human friendly for easier copying, e.g. from cell phone screen as it is one-time password with very short lifetime anyway
+
 ## Security: PKCE Token Exchange Flows
 
 ### Bootstrap Token Exchange (Initial Authentication)
