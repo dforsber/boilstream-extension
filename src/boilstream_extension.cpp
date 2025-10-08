@@ -146,11 +146,11 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		auto expires_at = storage->GetTokenExpiresAt();
 		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 		std::tm tm_utc;
-		#ifdef _WIN32
+#ifdef _WIN32
 		gmtime_s(&tm_utc, &expires_time_t);
-		#else
+#else
 		gmtime_r(&expires_time_t, &tm_utc);
-		#endif
+#endif
 		char expires_str[64];
 		std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%d %H:%M:%S", &tm_utc);
 
@@ -192,11 +192,11 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	auto expires_at = storage->GetTokenExpiresAt();
 	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 	std::tm tm_utc;
-	#ifdef _WIN32
+#ifdef _WIN32
 	gmtime_s(&tm_utc, &expires_time_t);
-	#else
+#else
 	gmtime_r(&expires_time_t, &tm_utc);
-	#endif
+#endif
 	char expires_str[64];
 	std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%d %H:%M:%S", &tm_utc);
 
