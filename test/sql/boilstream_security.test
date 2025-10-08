@@ -1,0 +1,91 @@
+# name: test/sql/boilstream_security.test
+# description: Security tests for boilstream extension (PKCE, validation, etc.)
+# group: [sql]
+
+# Require the extension
+require boilstream
+
+# Test 1: Bootstrap token format validation (empty token)
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:443/secrets:');
+----
+rest_set_endpoint: Bootstrap token cannot be empty
+
+# Test 2: URL validation - must use HTTPS (non-localhost)
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://example.com/secrets:abc123def456');
+----
+rest_set_endpoint: URL must use HTTPS
+
+# Test 3: URL validation - localhost with HTTP is allowed
+# Note: This will fail on token exchange (no server), but URL validation passes
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://localhost:443/secrets:validtoken123456789012345678901234567890123');
+----
+Token exchange failed
+
+# Test 4: URL validation - 127.0.0.1 with HTTP is allowed
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://127.0.0.1:443/secrets:validtoken123456789012345678901234567890123');
+----
+Token exchange failed
+
+# Test 5: URL validation - IPv6 localhost with HTTP is allowed
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://[::1]:443/secrets:validtoken123456789012345678901234567890123');
+----
+Token exchange failed
+
+# Test 6: URL validation bypass prevention - subdomain localhost should require HTTPS
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://localhost.evil.com/secrets:validtoken123456789012345678901234567890123');
+----
+rest_set_endpoint: URL must use HTTPS
+
+# Test 7: URL validation bypass prevention - path containing localhost should require HTTPS
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://evil.com/localhost/secrets:validtoken123456789012345678901234567890123');
+----
+rest_set_endpoint: URL must use HTTPS
+
+# Test 8: URL validation bypass prevention - query param containing localhost should require HTTPS
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('http://evil.com/secrets?redirect=localhost:validtoken123456789012345678901234567890123');
+----
+rest_set_endpoint: URL must use HTTPS
+
+# Test 9: Valid HTTPS URL format (will fail on token exchange - no server)
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com/secrets:validtoken123456789012345678901234567890123');
+----
+Token exchange failed
+
+# Test 10: Valid localhost HTTPS URL format (will fail on token exchange - no server)
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:4332/secrets:validtoken123456789012345678901234567890123');
+----
+Token exchange failed
+
+# Test 11: Test with realistic bootstrap token length (128 hex chars)
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:4332/secrets:ffe14a7a000000010000000168e4f9a5bcca736c3adaaf0f63e735f881adc397db6da85f1b9e231f70bbf6f71db4ef9fad837bc8abc123def456');
+----
+Token exchange failed
+
+# Test 12: URL missing protocol
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('localhost:443/secrets:token123');
+----
+rest_set_endpoint: URL must start with http:// or https://
+
+# Test 13: URL missing path
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:token123');
+----
+rest_set_endpoint: URL must contain a path
+
+# Test 14: URL missing token delimiter
+statement error
+PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost:443/secrets');
+----
+rest_set_endpoint: URL must include token after ':'

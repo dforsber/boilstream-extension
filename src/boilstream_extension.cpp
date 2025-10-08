@@ -11,6 +11,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/function/pragma_function.hpp"
+#include "mbedtls_wrapper.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
 
@@ -84,42 +85,81 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		    "rest_set_endpoint: URL must include token after ':' (e.g., https://host:port/path/:TOKEN)");
 	}
 
-	// Split into endpoint and token
+	// Split into endpoint and bootstrap token
 	string endpoint_url = input.substr(0, token_delimiter);
-	string token = input.substr(token_delimiter + 1);
+	string bootstrap_token = input.substr(token_delimiter + 1);
 
 	// Remove trailing slash from endpoint if present (from /path/:token format)
 	if (!endpoint_url.empty() && endpoint_url.back() == '/') {
 		endpoint_url = endpoint_url.substr(0, endpoint_url.length() - 1);
 	}
 
-	if (token.empty()) {
-		throw InvalidInputException("rest_set_endpoint: Token cannot be empty");
+	if (bootstrap_token.empty()) {
+		throw InvalidInputException("rest_set_endpoint: Bootstrap token cannot be empty");
 	}
 
 	// Require HTTPS for security (unless localhost for testing)
-	bool is_localhost =
-	    endpoint_url.find("://localhost") != string::npos || endpoint_url.find("://127.0.0.1") != string::npos;
+	// Properly extract and validate hostname to prevent bypass
+	bool is_localhost = false;
+	auto proto_end = endpoint_url.find("://");
+	if (proto_end != string::npos) {
+		auto host_start = proto_end + 3;
+		auto host_end = endpoint_url.find('/', host_start);
+		auto port_pos = endpoint_url.find(':', host_start);
+
+		// Port comes before path
+		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
+			host_end = port_pos;
+		}
+
+		string hostname =
+		    endpoint_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
+
+		// Check for localhost variants (including IPv6)
+		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
+	}
+
 	if (!is_localhost && endpoint_url.find("https://") != 0) {
 		throw InvalidInputException("rest_set_endpoint: URL must use HTTPS (or localhost for testing)");
 	}
 
-	// Set context for this connection (use token as user identifier)
-	SetUserContext(context, token);
-
-	// Update the REST API storage with endpoint and token
+	// Update the REST API storage with endpoint first
 	auto storage = GetGlobalStorage();
-	if (storage) {
-		storage->SetEndpoint(endpoint_url);
-		storage->SetAuthToken(token);
-		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url << ", token_len=" << token.size());
-	} else {
+	if (!storage) {
 		BOILSTREAM_LOG("SetEndpoint: WARNING - storage is NULL!");
+		throw InvalidInputException("rest_set_endpoint: Storage not initialized");
 	}
+
+	// Clear any existing session before attempting new token exchange
+	// This ensures clean state and prevents sending old session_token during bootstrap exchange
+	storage->ClearSession();
+
+	// Perform PKCE token exchange BEFORE setting endpoint (for consistent state on failure)
+	try {
+		// Temporarily set endpoint for exchange (will be cleared on failure)
+		storage->SetEndpoint(endpoint_url);
+		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
+
+		storage->PerformTokenExchange(bootstrap_token);
+		BOILSTREAM_LOG("SetEndpoint: Token exchange successful");
+	} catch (const std::exception &e) {
+		// Rollback endpoint on failure - ensure consistent state
+		storage->SetEndpoint("");
+		storage->ClearSession();
+		BOILSTREAM_LOG("SetEndpoint: Token exchange failed, rolled back: " << e.what());
+		throw InvalidInputException("Token exchange failed: %s", e.what());
+	}
+
+	// Set context for this connection (use hash of bootstrap token, not the token itself)
+	// This prevents leaking token material in connection map
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state;
+	sha_state.AddString(bootstrap_token);
+	string user_id = sha_state.Finalize().substr(0, 16); // First 16 hex chars of hash
+	SetUserContext(context, user_id);
 
 	// Return a query that will be executed (showing the result)
 	// Do NOT echo the token to prevent leakage in logs/query history
-	return "SELECT 'Boilstream endpoint configured successfully' as result;";
+	return "SELECT 'Boilstream session token obtained (expires in 8h)' as result;";
 }
 
 //! Load the extension
@@ -132,7 +172,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	string api_url = api_url_env ? string(api_url_env) : "";
 
 	// Register the REST API secret storage
-	auto storage = make_uniq<RestApiSecretStorage>(db, api_url, "");
+	auto storage = make_uniq<RestApiSecretStorage>(db, api_url);
 	// Keep a raw pointer for PRAGMA access - lifetime managed by SecretManager
 	// NOTE: This is safe because SecretManager keeps the storage alive for the database lifetime
 	auto storage_ptr = storage.get();
@@ -167,7 +207,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.1.0";
+	return "0.2.0";
 #endif
 }
 

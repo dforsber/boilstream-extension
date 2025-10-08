@@ -16,6 +16,8 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/random_engine.hpp"
+#include "mbedtls_wrapper.hpp"
 #include "yyjson.hpp"
 #include <sstream>
 #include <thread>
@@ -51,12 +53,12 @@ struct HttpOperationGuard {
 	HttpOperationGuard &operator=(const HttpOperationGuard &) = delete;
 };
 
-RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p,
-                                           const string &auth_token_p)
+RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p)
     : CatalogSetSecretStorage(db_p, "boilstream", 5), // offset=5 for higher priority than built-in storages (10, 20)
-      endpoint_url(endpoint_url_p), auth_token(auth_token_p) {
+      endpoint_url(endpoint_url_p), is_rotating(false), is_exchanging(false) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
-	persistent = true; // Acts as persistent storage
+	persistent = true;                                               // Acts as persistent storage
+	token_expires_at = std::chrono::system_clock::time_point::min(); // Initialize as expired
 }
 
 void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
@@ -64,13 +66,386 @@ void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
 	endpoint_url = endpoint;
 }
 
-void RestApiSecretStorage::SetAuthToken(const string &token) {
-	lock_guard<mutex> lock(endpoint_lock);
-	auth_token = token;
+void RestApiSecretStorage::ClearSession() {
+	lock_guard<mutex> lock(session_lock);
+	session_token = "";
+	code_verifier = "";
+	token_expires_at = std::chrono::system_clock::time_point::min();
+}
+
+string RestApiSecretStorage::GenerateCodeVerifier() {
+	// Generate 64-char base64url random string for PKCE
+	// Base64url alphabet: A-Z, a-z, 0-9, -, _
+	const char base64url_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+	const idx_t alphabet_size = 64;
+	const idx_t verifier_length = 64;
+
+	RandomEngine random;
+	string verifier;
+	verifier.reserve(verifier_length);
+
+	// Use rejection sampling to avoid modulo bias
+	// alphabet_size is 64 (power of 2), so we can use simple rejection
+	const uint64_t max_valid = (UINT64_MAX / alphabet_size) * alphabet_size;
+
+	for (idx_t i = 0; i < verifier_length; i++) {
+		uint64_t rand_val;
+
+		// Rejection sampling: reject values >= max_valid to ensure uniform distribution
+		do {
+			rand_val = random.NextRandomInteger();
+		} while (rand_val >= max_valid);
+
+		auto rand_idx = rand_val % alphabet_size;
+		verifier += base64url_chars[rand_idx];
+	}
+
+	return verifier;
+}
+
+string RestApiSecretStorage::ComputeCodeChallenge(const string &verifier) {
+	// Compute SHA256 hash of code_verifier using mbedtls
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state;
+	sha_state.AddString(verifier);
+
+	// Get binary hash (Finalize() returns raw bytes, not hex)
+	auto binary_hash = sha_state.Finalize();
+
+	// Convert binary to base64url
+	auto base64 = Blob::ToBase64(string_t(binary_hash));
+
+	// Convert base64 to base64url (replace +/= with -/_ and remove padding)
+	string base64url = base64;
+	for (auto &c : base64url) {
+		if (c == '+')
+			c = '-';
+		else if (c == '/')
+			c = '_';
+		else if (c == '=') {
+			base64url = base64url.substr(0, base64url.find('='));
+			break;
+		}
+	}
+
+	return base64url;
+}
+
+bool RestApiSecretStorage::IsSessionTokenValid() {
+	lock_guard<mutex> lock(session_lock);
+
+	// If exchange is in progress, wait for it
+	if (is_exchanging) {
+		return false;
+	}
+
+	if (session_token.empty()) {
+		return false;
+	}
+
+	// Check if token is expired (with 30min buffer)
+	const auto BUFFER = std::chrono::minutes(30);
+	auto now = std::chrono::system_clock::now();
+	return now < (token_expires_at - BUFFER);
+}
+
+bool RestApiSecretStorage::ShouldRotateToken() {
+	lock_guard<mutex> lock(session_lock);
+
+	if (session_token.empty()) {
+		return false;
+	}
+
+	// Rotate if less than 30 minutes remaining
+	const auto BUFFER = std::chrono::minutes(30);
+	auto now = std::chrono::system_clock::now();
+	return now >= (token_expires_at - BUFFER);
+}
+
+void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string &context) {
+	// Validate token is not empty
+	if (token.empty()) {
+		throw IOException(context + ": Empty token received from server");
+	}
+
+	// Validate token length (must be between 32 and 512 characters)
+	if (token.length() < 32 || token.length() > 512) {
+		throw IOException(context + ": Invalid token length (" + std::to_string(token.length()) + " chars)");
+	}
+
+	// Validate token contains only valid characters (alphanumeric, -, _)
+	for (char c : token) {
+		if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+			throw IOException(context + ": Token contains invalid characters");
+		}
+	}
+}
+
+void RestApiSecretStorage::PerformTokenExchange(const string &bootstrap_token) {
+	BOILSTREAM_LOG("PerformTokenExchange: starting exchange");
+
+	// Mark exchange as in progress
+	{
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = true;
+	}
+
+	// Generate PKCE parameters
+	auto new_verifier = GenerateCodeVerifier();
+	auto challenge = ComputeCodeChallenge(new_verifier);
+
+	// Build exchange URL
+	string url;
+	{
+		lock_guard<mutex> lock(endpoint_lock);
+		url = endpoint_url;
+	}
+
+	if (url.empty()) {
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		throw InvalidInputException("Boilstream endpoint not configured");
+	}
+
+	// Remove trailing /secrets if present (endpoint should be base URL)
+	auto secrets_pos = url.find("/secrets");
+	if (secrets_pos != string::npos) {
+		url = url.substr(0, secrets_pos);
+	}
+
+	url += "/auth/api/token-exchange";
+
+	// Prepare request body using yyjson
+	auto doc = yyjson_mut_doc_new(nullptr);
+	auto obj = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, obj);
+
+	yyjson_mut_obj_add_strcpy(doc, obj, "bootstrap_token", bootstrap_token.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge", challenge.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge_method", "S256");
+
+	auto body_str = yyjson_mut_write(doc, 0, nullptr);
+	string body(body_str);
+	free(body_str);
+	yyjson_mut_doc_free(doc);
+
+	// Make HTTP POST request (without Authorization header - bootstrap token is in body)
+	string response;
+	try {
+		response = HttpPost(url, body);
+	} catch (const std::exception &e) {
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		BOILSTREAM_LOG("PerformTokenExchange: HttpPost exception: " << e.what());
+		throw IOException("Token exchange failed: " + string(e.what()));
+	}
+
+	// Parse response
+	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
+	if (!response_doc) {
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		throw IOException("Token exchange failed: Invalid JSON response");
+	}
+
+	auto response_root = yyjson_doc_get_root(response_doc);
+	if (!response_root || !yyjson_is_obj(response_root)) {
+		yyjson_doc_free(response_doc);
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		throw IOException("Token exchange failed: Invalid response format");
+	}
+
+	// Extract session_token
+	auto token_val = yyjson_obj_get(response_root, "session_token");
+	if (!token_val || !yyjson_is_str(token_val)) {
+		yyjson_doc_free(response_doc);
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		throw IOException("Token exchange failed: No session_token in response");
+	}
+	string new_session_token = yyjson_get_str(token_val);
+
+	// Validate token format before storing
+	try {
+		ValidateTokenFormat(new_session_token, "Token exchange");
+	} catch (const std::exception &e) {
+		yyjson_doc_free(response_doc);
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		throw;
+	}
+
+	// Extract expires_at
+	auto expires_val = yyjson_obj_get(response_root, "expires_at");
+	std::chrono::system_clock::time_point new_expires_at;
+	if (expires_val && yyjson_is_int(expires_val)) {
+		// Unix timestamp
+		auto expires_timestamp = yyjson_get_int(expires_val);
+		new_expires_at = std::chrono::system_clock::from_time_t(expires_timestamp);
+	} else if (expires_val && yyjson_is_str(expires_val)) {
+		// ISO 8601 string
+		string expires_str = yyjson_get_str(expires_val);
+		new_expires_at = ParseExpiresAt(expires_str);
+	} else {
+		// Default to 8 hours from now
+		new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
+	}
+
+	yyjson_doc_free(response_doc);
+
+	// Store session state atomically and clear exchange flag
+	{
+		lock_guard<mutex> lock(session_lock);
+		session_token = new_session_token;
+		code_verifier = new_verifier;
+		token_expires_at = new_expires_at;
+		is_exchanging = false; // Exchange complete
+	}
+
+	BOILSTREAM_LOG(
+	    "PerformTokenExchange: SUCCESS, token expires in "
+	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
+	    << " hours");
+}
+
+void RestApiSecretStorage::RotateSessionToken() {
+	BOILSTREAM_LOG("RotateSessionToken: starting rotation");
+
+	// Get current verifier and session token
+	string current_token;
+	string current_verifier;
+	{
+		lock_guard<mutex> lock(session_lock);
+		current_token = session_token;
+		current_verifier = code_verifier;
+	}
+
+	if (current_token.empty() || current_verifier.empty()) {
+		throw IOException("Token rotation failed: No active session");
+	}
+
+	// Build rotation URL
+	string url;
+	{
+		lock_guard<mutex> lock(endpoint_lock);
+		url = endpoint_url;
+	}
+
+	if (url.empty()) {
+		throw InvalidInputException("Boilstream endpoint not configured");
+	}
+
+	// Remove trailing /secrets if present
+	auto secrets_pos = url.find("/secrets");
+	if (secrets_pos != string::npos) {
+		url = url.substr(0, secrets_pos);
+	}
+
+	url += "/auth/api/token-rotate";
+
+	// Generate new code_verifier for next rotation
+	auto new_verifier = GenerateCodeVerifier();
+	auto new_challenge = ComputeCodeChallenge(new_verifier);
+
+	// Prepare request body with new challenge for next rotation
+	auto doc = yyjson_mut_doc_new(nullptr);
+	auto obj = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, obj);
+
+	yyjson_mut_obj_add_strcpy(doc, obj, "session_token", current_token.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "code_verifier", current_verifier.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "new_code_challenge", new_challenge.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge_method", "S256");
+
+	auto body_str = yyjson_mut_write(doc, 0, nullptr);
+	string body(body_str);
+	free(body_str);
+	yyjson_mut_doc_free(doc);
+
+	// Make HTTP POST request
+	string response;
+	try {
+		response = HttpPost(url, body);
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("RotateSessionToken: HttpPost exception: " << e.what());
+		throw IOException("Token rotation failed: " + string(e.what()));
+	}
+
+	// Parse response
+	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
+	if (!response_doc) {
+		throw IOException("Token rotation failed: Invalid JSON response");
+	}
+
+	auto response_root = yyjson_doc_get_root(response_doc);
+	if (!response_root || !yyjson_is_obj(response_root)) {
+		yyjson_doc_free(response_doc);
+		throw IOException("Token rotation failed: Invalid response format");
+	}
+
+	// Extract new session_token
+	auto token_val = yyjson_obj_get(response_root, "session_token");
+	if (!token_val || !yyjson_is_str(token_val)) {
+		yyjson_doc_free(response_doc);
+		throw IOException("Token rotation failed: No session_token in response");
+	}
+	string new_session_token = yyjson_get_str(token_val);
+
+	// Validate token format before storing
+	try {
+		ValidateTokenFormat(new_session_token, "Token rotation");
+	} catch (const std::exception &e) {
+		yyjson_doc_free(response_doc);
+		throw;
+	}
+
+	// Extract expires_at
+	auto expires_val = yyjson_obj_get(response_root, "expires_at");
+	std::chrono::system_clock::time_point new_expires_at;
+	if (expires_val && yyjson_is_int(expires_val)) {
+		auto expires_timestamp = yyjson_get_int(expires_val);
+		new_expires_at = std::chrono::system_clock::from_time_t(expires_timestamp);
+	} else if (expires_val && yyjson_is_str(expires_val)) {
+		string expires_str = yyjson_get_str(expires_val);
+		new_expires_at = ParseExpiresAt(expires_str);
+	} else {
+		new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
+	}
+
+	yyjson_doc_free(response_doc);
+
+	// Update session state atomically with new verifier for next rotation
+	{
+		lock_guard<mutex> lock(session_lock);
+		session_token = new_session_token;
+		code_verifier = new_verifier; // Store new verifier - server has matching challenge
+		token_expires_at = new_expires_at;
+	}
+
+	BOILSTREAM_LOG(
+	    "RotateSessionToken: SUCCESS, new token expires in "
+	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
+	    << " hours");
 }
 
 void RestApiSecretStorage::SetUserContextForConnection(idx_t connection_id, const string &user_id) {
 	lock_guard<mutex> lock(connection_lock);
+
+	// Prevent unbounded map growth - limit to 10,000 connections
+	// In practice, DuckDB processes rarely have this many concurrent connections
+	const size_t MAX_CONNECTIONS = 10000;
+	if (connection_user_map.size() >= MAX_CONNECTIONS) {
+		// Clear oldest half of entries (simple LRU approximation)
+		// Note: This is not perfect LRU but prevents unbounded growth
+		auto it = connection_user_map.begin();
+		size_t to_remove = MAX_CONNECTIONS / 2;
+		while (to_remove-- > 0 && it != connection_user_map.end()) {
+			it = connection_user_map.erase(it);
+		}
+		BOILSTREAM_LOG("SetUserContextForConnection: WARNING - Connection map exceeded limit, cleared "
+		               << (MAX_CONNECTIONS / 2) << " entries");
+	}
+
 	connection_user_map[std::to_string(connection_id)] = user_id;
 }
 
@@ -269,6 +644,20 @@ void RestApiSecretStorage::StoreExpiration(const string &secret_name, const stri
 	auto expiration_time = ParseExpiresAt(expires_at_str);
 
 	lock_guard<mutex> lock(expiration_lock);
+
+	// Prevent unbounded map growth - limit to 10,000 secrets
+	const size_t MAX_SECRETS = 10000;
+	if (secret_expiration.size() >= MAX_SECRETS) {
+		// Clear oldest half of entries (simple LRU approximation)
+		auto it = secret_expiration.begin();
+		size_t to_remove = MAX_SECRETS / 2;
+		while (to_remove-- > 0 && it != secret_expiration.end()) {
+			it = secret_expiration.erase(it);
+		}
+		BOILSTREAM_LOG("StoreExpiration: WARNING - Secret expiration map exceeded limit, cleared "
+		               << (MAX_SECRETS / 2) << " entries");
+	}
+
 	secret_expiration[secret_name] = expiration_time;
 }
 
@@ -302,9 +691,10 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 	BOILSTREAM_LOG("HttpGet: url=" << url);
 
 	// Prevent recursive lookups during HTTP operations
+	// httpfs may try to look up secrets when making HTTP requests - return empty to avoid infinite loop
 	if (in_http_operation) {
 		BOILSTREAM_LOG("HttpGet: BLOCKED by recursion guard");
-		return "";
+		return ""; // Return empty - httpfs will proceed without credentials
 	}
 
 	// RAII guard automatically manages flag (exception-safe)
@@ -319,11 +709,44 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 
 	HTTPHeaders headers(db);
 
-	// Add Authorization header with token
+	// Rotate token if needed (before using it) - with race condition protection
 	{
-		lock_guard<mutex> lock(endpoint_lock);
-		if (!auth_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + auth_token);
+		lock_guard<mutex> lock(rotation_lock);
+		if (ShouldRotateToken() && !is_rotating) {
+			is_rotating = true;
+		} else {
+			// Another thread is rotating or no rotation needed
+			goto skip_rotation_get;
+		}
+	}
+
+	// Perform rotation outside lock (slow HTTP operation)
+	try {
+		RotateSessionToken();
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("HttpGet: Token rotation failed: " << e.what());
+
+		// If token is critically expired, fail the request
+		if (!IsSessionTokenValid()) {
+			lock_guard<mutex> lock(rotation_lock);
+			is_rotating = false;
+			throw IOException("Session expired and rotation failed. Please re-authenticate.");
+		}
+
+		BOILSTREAM_LOG("HttpGet: WARNING - Continuing with existing token");
+	}
+
+	{
+		lock_guard<mutex> lock(rotation_lock);
+		is_rotating = false;
+	}
+
+skip_rotation_get:
+	// Add Authorization header with session token
+	{
+		lock_guard<mutex> lock(session_lock);
+		if (!session_token.empty()) {
+			headers.Insert("Authorization", "Bearer " + session_token);
 		}
 	}
 
@@ -361,9 +784,39 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 
 		// Check HTTP status code - must be 2xx for success
 		auto status_code = static_cast<uint16_t>(response->status);
+
+		// 4xx Client Errors - fail fast, don't retry
+		if (status_code >= 400 && status_code < 500) {
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (client error)");
+			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
+			                  " - Client error (check authentication/permissions)");
+		}
+
+		// 5xx Server Errors - classify for retry decision
+		if (status_code >= 500 && status_code < 600) {
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (server error)");
+
+			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
+			if (status_code == 501 || status_code == 505) {
+				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
+				                  " - Server does not support this operation");
+			}
+
+			// 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+			// These are retryable - return empty to trigger retry logic
+			if (attempt < MAX_RETRIES) {
+				continue; // Will retry with exponential backoff
+			} else {
+				// All retries exhausted
+				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
+				                  " - Server error after " + std::to_string(MAX_RETRIES + 1) + " attempts");
+			}
+		}
+
+		// 3xx Redirects or other non-2xx
 		if (status_code < 200 || status_code >= 300) {
 			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (non-2xx)");
-			return ""; // Return empty for non-success status codes
+			return ""; // Return empty for redirects
 		}
 
 		BOILSTREAM_LOG("HttpGet: SUCCESS, body_len=" << response_body.size());
@@ -403,11 +856,44 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 	HTTPHeaders headers(db);
 	headers.Insert("Content-Type", "application/json");
 
-	// Add Authorization header with token
+	// Rotate token if needed (before using it) - with race condition protection
 	{
-		lock_guard<mutex> lock(endpoint_lock);
-		if (!auth_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + auth_token);
+		lock_guard<mutex> lock(rotation_lock);
+		if (ShouldRotateToken() && !is_rotating) {
+			is_rotating = true;
+		} else {
+			// Another thread is rotating or no rotation needed
+			goto skip_rotation_post;
+		}
+	}
+
+	// Perform rotation outside lock (slow HTTP operation)
+	try {
+		RotateSessionToken();
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("HttpPost: Token rotation failed: " << e.what());
+
+		// If token is critically expired, fail the request
+		if (!IsSessionTokenValid()) {
+			lock_guard<mutex> lock(rotation_lock);
+			is_rotating = false;
+			throw IOException("Session expired and rotation failed. Please re-authenticate.");
+		}
+
+		BOILSTREAM_LOG("HttpPost: WARNING - Continuing with existing token");
+	}
+
+	{
+		lock_guard<mutex> lock(rotation_lock);
+		is_rotating = false;
+	}
+
+skip_rotation_post:
+	// Add Authorization header with session token
+	{
+		lock_guard<mutex> lock(session_lock);
+		if (!session_token.empty()) {
+			headers.Insert("Authorization", "Bearer " + session_token);
 		}
 	}
 
@@ -439,8 +925,42 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 
 		// Check HTTP status code - must be 2xx for success
 		auto status_code = static_cast<uint16_t>(response->status);
+
+		// 4xx Client Errors - fail fast, don't retry
+		if (status_code >= 400 && status_code < 500) {
+			string error_body = request.buffer_out.substr(0, 200);
+			if (request.buffer_out.size() > 200) {
+				error_body += "... (truncated)";
+			}
+			BOILSTREAM_LOG("HttpPost: HTTP " << status_code << " (client error)");
+			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) +
+			                  " - Client error: " + error_body);
+		}
+
+		// 5xx Server Errors - classify for retry decision
+		if (status_code >= 500 && status_code < 600) {
+			BOILSTREAM_LOG("HttpPost: HTTP " << status_code << " (server error)");
+
+			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
+			if (status_code == 501 || status_code == 505) {
+				string error_body = request.buffer_out.substr(0, 200);
+				if (request.buffer_out.size() > 200) {
+					error_body += "... (truncated)";
+				}
+				throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) +
+				                  " - Server does not support this operation: " + error_body);
+			}
+
+			// 500, 502, 503, 504 - retryable server errors
+			if (attempt < MAX_RETRIES) {
+				last_error = "HTTP " + std::to_string(status_code) + " server error";
+				continue; // Will retry with exponential backoff
+			}
+			// Fall through to throw after all retries
+		}
+
+		// Non-2xx status (including exhausted 5xx retries)
 		if (status_code < 200 || status_code >= 300) {
-			// Truncate response body to avoid leaking sensitive data in logs
 			string error_body = request.buffer_out.substr(0, 200);
 			if (request.buffer_out.size() > 200) {
 				error_body += "... (truncated)";
@@ -477,11 +997,44 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 
 	HTTPHeaders headers(db);
 
-	// Add Authorization header with token
+	// Rotate token if needed (before using it) - with race condition protection
 	{
-		lock_guard<mutex> lock(endpoint_lock);
-		if (!auth_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + auth_token);
+		lock_guard<mutex> lock(rotation_lock);
+		if (ShouldRotateToken() && !is_rotating) {
+			is_rotating = true;
+		} else {
+			// Another thread is rotating or no rotation needed
+			goto skip_rotation_delete;
+		}
+	}
+
+	// Perform rotation outside lock (slow HTTP operation)
+	try {
+		RotateSessionToken();
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("HttpDelete: Token rotation failed: " << e.what());
+
+		// If token is critically expired, fail the request
+		if (!IsSessionTokenValid()) {
+			lock_guard<mutex> lock(rotation_lock);
+			is_rotating = false;
+			throw IOException("Session expired and rotation failed. Please re-authenticate.");
+		}
+
+		BOILSTREAM_LOG("HttpDelete: WARNING - Continuing with existing token");
+	}
+
+	{
+		lock_guard<mutex> lock(rotation_lock);
+		is_rotating = false;
+	}
+
+skip_rotation_delete:
+	// Add Authorization header with session token
+	{
+		lock_guard<mutex> lock(session_lock);
+		if (!session_token.empty()) {
+			headers.Insert("Authorization", "Bearer " + session_token);
 		}
 	}
 
@@ -508,10 +1061,44 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 			throw IOException("HTTP DELETE failed: " + response->GetError());
 		}
 
-		// Check HTTP status code - must be 2xx for success (404 is also OK for DELETE)
+		// Check HTTP status code - must be 2xx for success (404 is also OK for DELETE - already deleted)
 		auto status_code = static_cast<uint16_t>(response->status);
+
+		// 4xx Client Errors (except 404) - fail fast, don't retry
+		if (status_code >= 400 && status_code < 500 && status_code != 404) {
+			string error_body = response->body.substr(0, 200);
+			if (response->body.size() > 200) {
+				error_body += "... (truncated)";
+			}
+			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (client error)");
+			throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
+			                  " - Client error: " + error_body);
+		}
+
+		// 5xx Server Errors - classify for retry decision
+		if (status_code >= 500 && status_code < 600) {
+			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (server error)");
+
+			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
+			if (status_code == 501 || status_code == 505) {
+				string error_body = response->body.substr(0, 200);
+				if (response->body.size() > 200) {
+					error_body += "... (truncated)";
+				}
+				throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
+				                  " - Server does not support this operation: " + error_body);
+			}
+
+			// 500, 502, 503, 504 - retryable server errors
+			if (attempt < MAX_RETRIES) {
+				last_error = "HTTP " + std::to_string(status_code) + " server error";
+				continue; // Will retry with exponential backoff
+			}
+			// Fall through to throw after all retries
+		}
+
+		// Non-2xx status (except 404, including exhausted 5xx retries)
 		if (status_code < 200 || (status_code >= 300 && status_code != 404)) {
-			// Truncate response body to avoid leaking sensitive data in logs
 			string error_body = response->body.substr(0, 200);
 			if (response->body.size() > 200) {
 				error_body += "... (truncated)";

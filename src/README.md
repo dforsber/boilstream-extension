@@ -18,8 +18,9 @@ This extension replaces DuckDB's built-in file-based secret storage with a REST 
 -- 1. Load the extension
 LOAD 'build/release/extension/boilstream/boilstream.duckdb_extension';
 
--- 2. Set your BoilStream API endpoint with token
-PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com/secrets/:your_token_here');
+-- 2. Set your BoilStream API endpoint with BOOTSTRAP TOKEN (v0.2.0+)
+-- Bootstrap token is short-lived (5 min) and exchanged for 8-hour session token via PKCE
+PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com/secrets/:your_bootstrap_token_here');
 
 -- 3. Create and use secrets normally
 CREATE PERSISTENT SECRET my_s3 (
@@ -33,11 +34,17 @@ CREATE PERSISTENT SECRET my_s3 (
 SELECT * FROM 's3://my-bucket/data.parquet';
 ```
 
+**What's New in v0.2.0:**
+- Uses PKCE (Proof Key for Code Exchange, RFC 7636) for enhanced security
+- Bootstrap token (5-minute TTL, single-use) is exchanged for session token (8-hour TTL)
+- Session token automatically rotates before expiry
+- All tokens stored in-memory only (never persisted)
+
 ## Configuration
 
 ### Setting the Endpoint
 
-The endpoint format is: `<endpoint_url>:<token>`
+**v0.2.0+** The endpoint format is: `<endpoint_url>:<bootstrap_token>`
 
 ```sql
 -- Production (HTTPS required)
@@ -47,14 +54,24 @@ PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com/secrets/:mu2i
 PRAGMA duckdb_secrets_boilstream_endpoint('http://localhost:4332/secrets/:testtoken123');
 
 -- With port
-PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com:8443/secrets/:token');
+PRAGMA duckdb_secrets_boilstream_endpoint('https://api.example.com:8443/secrets/:bootstrap_token_here');
 ```
 
 **Security Notes:**
 
-- Token is sent via `Authorization: Bearer <token>` header (never in URL)
+- **Bootstrap token** is short-lived (5 minutes) and single-use
+- Automatically exchanged for **session token** (8 hours) via PKCE flow
+- Session token rotates automatically when <30 minutes remain
+- All tokens sent via `Authorization: Bearer <token>` header (never in URL)
 - HTTPS is enforced for production (non-localhost) endpoints
-- Each user should have a unique endpoint URL + token combination
+- Each user should have a unique endpoint URL + bootstrap token combination
+
+**Token Lifecycle:**
+1. User provides bootstrap token via PRAGMA
+2. Extension performs PKCE token exchange (generates code_verifier and code_challenge)
+3. Receives session token (valid for 8 hours)
+4. Uses session token for all API requests
+5. Automatically rotates session token before expiry
 
 ### Environment Variable (Optional)
 
@@ -66,9 +83,252 @@ export DUCKDB_REST_API_URL="http://localhost:8080/api"
 
 This is overridden by `PRAGMA duckdb_secrets_boilstream_endpoint()`.
 
+## PKCE Authentication (v0.2.0+)
+
+**Important:** v0.2.0 introduced PKCE (Proof Key for Code Exchange, RFC 7636) authentication. Your backend must implement these authentication endpoints in addition to the secret management endpoints below.
+
+### Overview
+
+PKCE provides enhanced security by ensuring that even if a token is intercepted, it cannot be used without the corresponding code_verifier. The flow works as follows:
+
+1. **Bootstrap → Session**: Extension exchanges short-lived bootstrap token (5 min) for session token (8 hours)
+2. **PKCE Proof**: Extension generates code_verifier (random 64-char string) and code_challenge (SHA256 hash)
+3. **Server Storage**: Server stores code_challenge (never sees code_verifier)
+4. **Rotation**: Before expiry, extension proves possession of code_verifier to rotate token
+5. **Chain of Trust**: Each rotation includes new_code_challenge for the next rotation
+
+### Authentication Endpoint 1: Token Exchange
+
+**Endpoint:** `POST /auth/api/token-exchange`
+
+**Purpose:** Exchange a short-lived bootstrap token for a long-lived session token.
+
+**Request Headers:**
+```
+Content-Type: application/json
+```
+
+**Note:** NO Authorization header is sent for token exchange (bootstrap token is in body).
+
+**Request Body:**
+```json
+{
+  "bootstrap_token": "mu2iteixe0fe9Um1Eimie0leNguv7Aic",
+  "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+  "code_challenge_method": "S256"
+}
+```
+
+**Fields:**
+- `bootstrap_token`: The short-lived (5 min) bootstrap token provided by user via PRAGMA
+- `code_challenge`: base64url(SHA256(code_verifier)) - proves client has a secret code_verifier
+- `code_challenge_method`: Always "S256" (SHA256 hashing)
+
+**Response Body:**
+```json
+{
+  "session_token": "Eechoh8ieb8uf5uo1eeG4ait4siexai7",
+  "expires_at": "2025-10-08T20:00:00Z"
+}
+```
+
+**Response Fields:**
+- `session_token`: The long-lived session token (8 hours recommended)
+- `expires_at`: ISO 8601 UTC timestamp OR Unix timestamp (seconds since epoch)
+
+**Server Implementation Requirements:**
+
+1. **Validate bootstrap token**
+   - Check bootstrap token is valid and not expired (5 min TTL)
+   - Mark bootstrap token as used (single-use only)
+   - Return 401 if invalid or expired
+
+2. **Store code_challenge**
+   - Associate code_challenge with the new session_token
+   - Store for verification during rotation
+   - Never store code_verifier (client keeps it secret)
+
+3. **Generate session token**
+   - Create new session_token with 8-hour expiration
+   - Use cryptographically secure random generation
+   - Recommended length: 32-64 characters
+
+4. **Error Handling**
+   - 400 Bad Request: Missing or invalid fields
+   - 401 Unauthorized: Invalid or expired bootstrap token
+   - 409 Conflict: Bootstrap token already used
+
+**Example (Node.js):**
+```javascript
+app.post('/auth/api/token-exchange', async (req, res) => {
+  const { bootstrap_token, code_challenge, code_challenge_method } = req.body;
+
+  // Validate bootstrap token
+  const bootstrapRecord = await db.bootstrapTokens.findOne({ token: bootstrap_token });
+  if (!bootstrapRecord || bootstrapRecord.used || Date.now() > bootstrapRecord.expires_at) {
+    return res.status(401).json({ error: 'Invalid or expired bootstrap token' });
+  }
+
+  // Mark as used
+  await db.bootstrapTokens.update({ token: bootstrap_token }, { used: true });
+
+  // Generate session token
+  const session_token = crypto.randomBytes(32).toString('base64url');
+  const expires_at = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours
+
+  // Store session with code_challenge
+  await db.sessions.insert({
+    token: session_token,
+    code_challenge: code_challenge,
+    expires_at: expires_at,
+    user_id: bootstrapRecord.user_id
+  });
+
+  res.json({
+    session_token: session_token,
+    expires_at: expires_at.toISOString()
+  });
+});
+```
+
+---
+
+### Authentication Endpoint 2: Token Rotation
+
+**Endpoint:** `POST /auth/api/token-rotate`
+
+**Purpose:** Rotate session token before expiry (automatic when <30 min remaining).
+
+**Request Headers:**
+```
+Content-Type: application/json
+Authorization: Bearer <current-session-token>
+```
+
+**Note:** Both Authorization header AND body contain session_token for verification.
+
+**Request Body:**
+```json
+{
+  "session_token": "Eechoh8ieb8uf5uo1eeG4ait4siexai7",
+  "code_verifier": "v8K_N7zDfE...64-char-random-string...pQmL4bXwR9",
+  "new_code_challenge": "t6K8uL2vN5rP...base64url-sha256...X9hZ3kJ1Y",
+  "code_challenge_method": "S256"
+}
+```
+
+**Fields:**
+- `session_token`: Current session token (also in Authorization header)
+- `code_verifier`: The secret 64-char random string from previous exchange/rotation
+- `new_code_challenge`: base64url(SHA256(new_code_verifier)) for next rotation
+- `code_challenge_method`: Always "S256"
+
+**Response Body:**
+```json
+{
+  "session_token": "Ohsh9OhV6rie0ahX0shaez0Quoo1eiph",
+  "expires_at": "2025-10-09T04:00:00Z"
+}
+```
+
+**Response Fields:**
+- `session_token`: New session token (8 hours from now)
+- `expires_at`: ISO 8601 UTC timestamp OR Unix timestamp
+
+**Server Implementation Requirements:**
+
+1. **Verify session token**
+   - Verify Authorization header matches session_token in body
+   - Check session token is valid and not expired
+   - Return 401 if invalid or expired
+
+2. **Verify PKCE proof**
+   - Retrieve stored code_challenge for this session
+   - Compute: base64url(SHA256(code_verifier))
+   - Verify computed challenge matches stored code_challenge
+   - Return 403 if verification fails (proves possession of code_verifier)
+
+3. **Generate new session token**
+   - Create new session_token with 8-hour expiration
+   - Replace old session_token (invalidate it)
+   - Store new_code_challenge for next rotation
+   - Maintain user_id association
+
+4. **Security Notes**
+   - CRITICAL: Verify code_verifier matches stored code_challenge
+   - This proves the client possesses the secret from original exchange
+   - Even if session_token is intercepted, attacker cannot rotate without code_verifier
+
+5. **Error Handling**
+   - 400 Bad Request: Missing or invalid fields
+   - 401 Unauthorized: Invalid or expired session token
+   - 403 Forbidden: code_verifier does not match code_challenge
+
+**Example (Node.js):**
+```javascript
+const crypto = require('crypto');
+
+app.post('/auth/api/token-rotate', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const { session_token, code_verifier, new_code_challenge, code_challenge_method } = req.body;
+
+  // Verify Authorization header matches body
+  if (!authHeader || !authHeader.startsWith('Bearer ') || authHeader.substring(7) !== session_token) {
+    return res.status(401).json({ error: 'Authorization mismatch' });
+  }
+
+  // Verify session token
+  const session = await db.sessions.findOne({ token: session_token });
+  if (!session || Date.now() > session.expires_at) {
+    return res.status(401).json({ error: 'Invalid or expired session' });
+  }
+
+  // Verify PKCE: compute challenge from verifier and compare
+  const computed_challenge = crypto
+    .createHash('sha256')
+    .update(code_verifier)
+    .digest('base64url');
+
+  if (computed_challenge !== session.code_challenge) {
+    return res.status(403).json({ error: 'PKCE verification failed' });
+  }
+
+  // Generate new session token
+  const new_session_token = crypto.randomBytes(32).toString('base64url');
+  const expires_at = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours
+
+  // Update session with new token and challenge
+  await db.sessions.update(
+    { token: session_token },
+    {
+      token: new_session_token,
+      code_challenge: new_code_challenge,
+      expires_at: expires_at
+    }
+  );
+
+  res.json({
+    session_token: new_session_token,
+    expires_at: expires_at.toISOString()
+  });
+});
+```
+
+---
+
+### PKCE Security Benefits
+
+✅ **Token Interception Protection**: Even if session_token is intercepted, attacker cannot rotate it without code_verifier
+✅ **Proof of Possession**: Client must prove possession of secret code_verifier on each rotation
+✅ **Forward Secrecy**: Each rotation uses new code_verifier/code_challenge pair
+✅ **No Shared Secrets**: Server only stores code_challenge (hash), not code_verifier
+✅ **Single-Use Bootstrap**: Bootstrap tokens expire after 5 minutes and are single-use
+
+---
+
 ## REST API Implementation Guide
 
-Your backend must implement these HTTP endpoints. All requests include `Authorization: Bearer <token>` header.
+Your backend must implement these HTTP endpoints for secret management. All requests include `Authorization: Bearer <session_token>` header (obtained from token exchange above).
 
 ### 1. Create Secret
 
@@ -688,12 +948,74 @@ SELECT * FROM duckdb_secrets();
 ## Building the Extension
 
 ```bash
-# From DuckDB root directory
+# From extension root directory
 GEN=ninja make
 
 # The extension will be built at:
 # build/release/extension/boilstream/boilstream.duckdb_extension
+
+# If you get version mismatch errors, override the version to match your DuckDB:
+OVERRIDE_GIT_DESCRIBE="v1.4.1" GEN=ninja make
 ```
+
+---
+
+## Testing
+
+### Unit Tests
+
+Unit tests verify security functions (PKCE, token validation, etc.) without requiring a server:
+
+```bash
+cd test/cpp
+mkdir -p build && cd build
+cmake ..
+make
+./boilstream_test  # Run all 236 unit tests
+```
+
+### Integration Tests
+
+Integration tests verify end-to-end flows against a real boilstream server. **You must have a running server and a fresh bootstrap token.**
+
+**Important:** Bootstrap tokens are short-lived (5 min) and single-use. The test suite exchanges the token once at startup and shares the session across all tests.
+
+```bash
+# 1. Build the extension first (override version to match your DuckDB)
+cd /path/to/boilstream-extension
+OVERRIDE_GIT_DESCRIBE="v1.4.1" GEN=ninja make
+
+# 2. Get a fresh bootstrap token from your boilstream server
+
+# 3. Set environment variables:
+export BOILSTREAM_TEST_ENDPOINT="https://localhost/secrets:your_fresh_bootstrap_token"
+
+# Optional: Specify extension path (default: ../../../build/release/extension/boilstream/boilstream.duckdb_extension)
+export BOILSTREAM_EXTENSION_PATH="/path/to/build/release/extension/boilstream/boilstream.duckdb_extension"
+
+# 4. Run integration tests
+cd test/cpp/build
+./boilstream_integration_test
+
+# Note: Tests will fail if BOILSTREAM_TEST_ENDPOINT is not set
+```
+
+**Environment Variables:**
+- `BOILSTREAM_TEST_ENDPOINT` (required): Full endpoint URL with fresh bootstrap token
+- `BOILSTREAM_EXTENSION_PATH` (optional): Path to your local boilstream extension build
+
+**How the tests work:**
+1. First test exchanges the bootstrap token (single-use, consumed once)
+2. All subsequent tests share the same session token (8-hour lifetime)
+3. Invalid token tests use fake tokens to avoid consuming the real bootstrap token
+
+**What the integration tests verify:**
+- Bootstrap token exchange (successful exchange)
+- Token validation (invalid/empty tokens, malformed URLs)
+- Secret CRUD operations (create, list, delete)
+- Token rotation (automatic before expiry)
+- Error handling (non-existent secrets, duplicates)
+- Concurrent operations (multiple connections)
 
 ---
 

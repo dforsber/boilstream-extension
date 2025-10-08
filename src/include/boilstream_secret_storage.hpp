@@ -22,13 +22,19 @@ class SecretManager;
 //! for multi-tenant secret management
 class RestApiSecretStorage : public CatalogSetSecretStorage {
 public:
-	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url, const string &auth_token);
+	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url);
 
 	//! Set the endpoint URL (without token)
 	void SetEndpoint(const string &endpoint);
 
-	//! Set the authentication token for API requests
-	void SetAuthToken(const string &token);
+	//! Perform PKCE token exchange with bootstrap token
+	void PerformTokenExchange(const string &bootstrap_token);
+
+	//! Rotate session token using stored code_verifier
+	void RotateSessionToken();
+
+	//! Clear session state (on error or logout)
+	void ClearSession();
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -38,6 +44,21 @@ public:
 
 	//! Clear connection mapping (for cleanup)
 	void ClearConnectionMapping(idx_t connection_id);
+
+	//! Generate PKCE code_verifier (64-char base64url random string)
+	string GenerateCodeVerifier();
+
+	//! Compute PKCE code_challenge from code_verifier (SHA256 + base64url)
+	string ComputeCodeChallenge(const string &code_verifier);
+
+	//! Validate token format and length
+	void ValidateTokenFormat(const string &token, const string &context);
+
+	//! Check if session token is valid (not expired, with 30min buffer)
+	bool IsSessionTokenValid();
+
+	//! Check if session token should be rotated (< 30min remaining)
+	bool ShouldRotateToken();
 
 	//! Override to fetch all secrets from REST API
 	vector<SecretEntry> AllSecrets(optional_ptr<CatalogTransaction> transaction) override;
@@ -101,11 +122,29 @@ private:
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
 
-	//! Authentication token for API requests
-	string auth_token;
-
-	//! Lock for thread-safe endpoint/token updates
+	//! Lock for thread-safe endpoint updates
 	mutex endpoint_lock;
+
+	//! Session token (obtained via PKCE exchange, in-memory only)
+	string session_token;
+
+	//! PKCE code verifier (never transmitted, used for rotation)
+	string code_verifier;
+
+	//! Session token expiration timestamp
+	std::chrono::system_clock::time_point token_expires_at;
+
+	//! Lock for session token state
+	mutex session_lock;
+
+	//! Lock for token rotation (prevents concurrent rotations)
+	mutex rotation_lock;
+
+	//! Flag indicating rotation in progress
+	bool is_rotating;
+
+	//! Flag indicating token exchange in progress
+	bool is_exchanging;
 
 	//! Connection ID to user ID mapping
 	case_insensitive_map_t<string> connection_user_map;
