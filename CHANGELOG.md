@@ -5,6 +5,78 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-10-09
+
+### Added
+
+- **OPAQUE PAKE authentication**: Replaces PKCE with IETF RFC 9807 OPAQUE protocol
+  - Password-based authentication without transmitting passwords
+  - Three-step login flow: `LoginStart` → `LoginFinish` → session established
+  - Cryptographically derived `session_key` (32 bytes) from OPAQUE protocol
+  - `export_key` generation for future session resumption support
+- **HKDF key derivation** (RFC 5869): Derives separate keys from `session_key`
+  - `signing_key`: HKDF-Expand(session_key, "boilstream-request-signing", 0x01)
+  - `encryption_key`: HKDF-Expand(session_key, "boilstream-secret-encryption", 0x01)
+  - Key separation prevents cross-protocol attacks
+- **Canonical request signing**: Industry-standard format (similar to AWS SigV4)
+  - Format: `METHOD\nURL\nBODY\nTIMESTAMP\nSEQUENCE`
+  - HMAC-SHA256 signature using derived signing key
+  - Request integrity protection independent of TLS
+- **Lock-step sequence protocol**: Session hijacking prevention
+  - `client_sequence` counter (starts at 0, increments per request)
+  - Server validates exact sequence match (mismatch → session killed)
+  - Prevents replay attacks and concurrent session abuse
+- **Request signature headers**: Added to all HTTP requests (GET/POST/DELETE)
+  - `X-Timestamp`: Unix timestamp in seconds
+  - `X-Sequence`: Monotonically increasing counter
+  - `X-Signature`: Base64-encoded HMAC-SHA256 signature
+- **OPAQUE client library integration**:
+  - Rust-based OPAQUE implementation with C FFI bindings
+  - C++ wrapper classes for type-safe OPAQUE operations
+  - Memory-safe buffer management with RAII wrappers
+
+### Changed
+
+- **BREAKING**: Replaced PKCE authentication with OPAQUE PAKE protocol
+- **BREAKING**: `PerformOpaqueLogin()` now used instead of `PerformTokenExchange()`
+- Session state now includes `session_key` and `export_key` from OPAQUE
+- HTTP requests now include cryptographic signatures for integrity
+- `client_sequence` resets to 0 on new session establishment
+
+### Removed
+
+- **BREAKING**: Removed all PKCE code and token rotation logic
+  - Removed `PerformTokenExchange()` method
+  - Removed `RotateSessionToken()` method
+  - Removed `ShouldRotateToken()` method
+  - Removed `GenerateCodeVerifier()` method
+  - Removed `ComputeCodeChallenge()` method
+  - Removed `code_verifier` field
+  - Removed `is_rotating` flag and `rotation_lock` mutex
+  - Removed automatic token rotation from HTTP methods
+- No longer supports PKCE-based authentication (clean break)
+
+### Security
+
+- **Enhanced**: OPAQUE provides password-less authentication (no password transmission)
+- **Enhanced**: Cryptographic key derivation using HKDF-SHA256
+- **Enhanced**: Request signing prevents tampering even if TLS is compromised
+- **Enhanced**: Lock-step sequence prevents session hijacking attacks
+- **Enhanced**: One wrong sequence number kills the session (immediate attack detection)
+- **Enhanced**: Replay attack prevention via timestamp + sequence validation
+- **Enhanced**: Key separation (signing ≠ encryption) prevents cross-protocol attacks
+
+### Technical Details
+
+- OPAQUE protocol: IETF RFC 9807 (ristretto255 group)
+- Key derivation: HKDF-SHA256 (RFC 5869)
+- Request signing: HMAC-SHA256 with canonical format
+- Session keys: 32 bytes (256-bit security)
+- Sequence counter: uint64_t (monotonically increasing)
+- Signature format: Base64-encoded HMAC output
+- All keys stored in-memory only (`vector<uint8_t>`)
+- Export keys prepared for future session resumption (not yet implemented)
+
 ## [0.2.0] - 2025-10-08
 
 ### Added
@@ -109,5 +181,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
+[0.3.0]: https://github.com/yourusername/boilstream-extension/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yourusername/boilstream-extension/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yourusername/boilstream-extension/releases/tag/v0.1.0

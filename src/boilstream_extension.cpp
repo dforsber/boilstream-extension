@@ -158,17 +158,17 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	}
 
 	// Clear any existing session before attempting new token exchange
-	// This ensures clean state and prevents sending old session_token during bootstrap exchange
+	// This ensures clean state and prevents sending old access_token during bootstrap exchange
 	storage->ClearSession();
 
-	// Perform PKCE token exchange BEFORE setting endpoint (for consistent state on failure)
+	// Perform OPAQUE login BEFORE setting endpoint (for consistent state on failure)
 	try {
 		// Temporarily set endpoint for exchange (will be cleared on failure)
 		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
 
-		storage->PerformTokenExchange(bootstrap_token);
-		BOILSTREAM_LOG("SetEndpoint: Token exchange successful");
+		storage->PerformOpaqueLogin(bootstrap_token);
+		BOILSTREAM_LOG("SetEndpoint: OPAQUE login successful");
 
 		// Store bootstrap token hash for reuse detection
 		storage->SetBootstrapTokenHash(incoming_token_hash);
@@ -177,8 +177,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		// Rollback endpoint on failure - ensure consistent state
 		storage->SetEndpoint("");
 		storage->ClearSession();
-		BOILSTREAM_LOG("SetEndpoint: Token exchange failed, rolled back: " << e.what());
-		throw InvalidInputException("Token exchange failed: %s", e.what());
+		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed, rolled back: " << e.what());
+		throw InvalidInputException("OPAQUE login failed: %s", e.what());
 	}
 
 	// Set context for this connection (use hash of bootstrap token, not the token itself)
@@ -250,7 +250,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.2.0";
+	return "0.3.0";
 #endif
 }
 
