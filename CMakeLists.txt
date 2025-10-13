@@ -125,8 +125,9 @@ elseif(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
-    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt)
+    # Link Windows system libraries and libgcc (for Rust f16 compiler builtins)
+    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt gcc)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt gcc)
 endif()
 
 install(
