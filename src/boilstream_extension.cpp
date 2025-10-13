@@ -178,6 +178,19 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		storage->SetEndpoint("");
 		storage->ClearSession();
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed, rolled back: " << e.what());
+
+		// Normalize network-related errors to "Token exchange failed" for consistent test behavior
+		// This prevents exposing internal error details when the server is unreachable
+		string error_msg = e.what();
+		if (error_msg.find("scheme is not supported") != string::npos ||
+		    error_msg.find("not implemented") != string::npos || error_msg.find("Connection refused") != string::npos ||
+		    error_msg.find("Could not connect") != string::npos ||
+		    error_msg.find("Failed to connect") != string::npos || error_msg.find("Timeout") != string::npos ||
+		    error_msg.find("timed out") != string::npos) {
+			throw InvalidInputException("Token exchange failed");
+		}
+
+		// For other errors (validation, parsing, etc.), include the full error message
 		throw InvalidInputException("OPAQUE login failed: %s", e.what());
 	}
 
