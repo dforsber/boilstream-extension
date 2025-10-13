@@ -2,6 +2,8 @@
 
 This extension allows you to use [boilstream](https://github.com/boilingdata/boilstream) server as a remote secure Secrets Storage.
 
+It incorporates industrial grade e2e application level security even inside the TLS tunnel as well as anonymised login and lock-step protocol. We rely heavily on security standards like Facebook's audited OPAQUE PAKE, OAuth2, HKDF-SHA256, AES GCM, SHA256, etc. See the full [SECURITY_SPECIFICATION.md](SECURITY_SPECIFICATION.md) along with conformance test vectors. Interoperability verified through two independent implementations (Rust, C++).
+
 > You can also create your own server that implements the required [REST API](src/README.md) to work with `boilstream` extension.
 
 ## Running the extension
