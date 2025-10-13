@@ -110,10 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed: Force-load Rust library with -Wl,-force_load linker flag
   - Added: CoreFoundation framework and resolv library for Rust dependencies
 - **HIGH**: Windows build errors
-  - Added libgcc to Windows link libraries for Rust f16 compiler builtins
-  - Provides __extendhfsf2 and __truncsfhf2 functions required by Rust core
-  - Fixes: MinGW/rtools42 compatibility with Rust half-precision floats
-  - Fixed: MSVC min/max macro conflicts with std::chrono (added NOMINMAX define)
+  - MinGW/GCC: Added libgcc link library for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
+  - MSVC: Fixed min/max macro conflicts with std::chrono (added NOMINMAX define)
+  - MSVC: Removed gcc.lib linking (only needed for MinGW, not MSVC)
+  - Fixes: Both MinGW/rtools42 and MSVC builds now compile successfully
 - **HIGH**: WASM build support
   - Removed platform guards from Rust C FFI functions
   - Added .cargo/config.toml with -O1 flag to skip wasm-opt

@@ -125,9 +125,17 @@ elseif(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
-    # Link Windows system libraries and libgcc (for Rust f16 compiler builtins)
-    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt gcc)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt gcc)
+    # Link Windows system libraries
+    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt)
+
+    # MinGW/GCC requires libgcc for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
+    # MSVC doesn't need this (and doesn't have gcc.lib)
+    if(MINGW OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(${EXTENSION_NAME} gcc)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} gcc)
+        message(STATUS "Windows MinGW build: linking libgcc for f16 support")
+    endif()
 endif()
 
 install(
