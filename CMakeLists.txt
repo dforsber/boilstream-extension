@@ -126,8 +126,9 @@ elseif(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
     # Link Windows system libraries
-    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt)
+    # ntdll: Required for Rust std library NT native functions (NtReadFile, NtWriteFile, etc.)
+    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
 
     # MinGW/GCC requires libgcc for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
     # MSVC doesn't need this (and doesn't have gcc.lib)

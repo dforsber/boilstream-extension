@@ -113,6 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - MinGW/GCC: Added libgcc link library for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
   - MSVC: Fixed min/max macro conflicts with std::chrono (added NOMINMAX define)
   - MSVC: Removed gcc.lib linking (only needed for MinGW, not MSVC)
+  - MSVC: Added ntdll.lib for Rust std NT native functions (NtReadFile, NtWriteFile, NtOpenFile, etc.)
   - Fixes: Both MinGW/rtools42 and MSVC builds now compile successfully
 - **HIGH**: WASM build support
   - Removed platform guards from Rust C FFI functions
