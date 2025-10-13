@@ -19,6 +19,7 @@ jobs:
       duckdb_version: v1.4.0
       ci_tools_version: v1.4.0
       extension_name: boilstream
+      extra_toolchains: 'rust'
 
   code-quality-check:
     name: Code Quality Check

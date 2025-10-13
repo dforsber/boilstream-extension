@@ -1644,46 +1644,11 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 			return "";
 		}
 
-		// Check HTTP status code - must be 2xx for success
+		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
 
-		// 4xx Client Errors - fail fast, don't retry
-		if (status_code >= 400 && status_code < 500) {
-			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (client error)");
-			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
-			                  " - Client error (check authentication/permissions)");
-		}
-
-		// 5xx Server Errors - classify for retry decision
-		if (status_code >= 500 && status_code < 600) {
-			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (server error)");
-
-			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
-			if (status_code == 501 || status_code == 505) {
-				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
-				                  " - Server does not support this operation");
-			}
-
-			// 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
-			// These are retryable - return empty to trigger retry logic
-			if (attempt < MAX_RETRIES) {
-				continue; // Will retry with exponential backoff
-			} else {
-				// All retries exhausted
-				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - Server error after " +
-				                  std::to_string(MAX_RETRIES + 1) + " attempts");
-			}
-		}
-
-		// 3xx Redirects or other non-2xx
-		if (status_code < 200 || status_code >= 300) {
-			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (non-2xx)");
-			return ""; // Return empty for redirects
-		}
-
-		BOILSTREAM_LOG("HttpGet: SUCCESS, body_len=" << response_body.size());
-
-		// Verify response signature if we have a session_key
+		// Verify response signature and decrypt BEFORE checking status code
+		// This ensures error responses are also decrypted before being thrown
 		if (has_session_key) {
 			try {
 				VerifyAuthenticatedResponse(response_body, status_code, response_headers_captured, current_session_key);
@@ -1709,6 +1674,55 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 				BOILSTREAM_LOG("HttpGet: Response is not encrypted (plaintext)");
 			}
 		}
+
+		// Now check status code with decrypted response body
+		// 4xx Client Errors - fail fast, don't retry
+		if (status_code >= 400 && status_code < 500) {
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
+				error_body += "... (truncated)";
+			}
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (client error), body: " << error_body);
+			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
+			                  " - Client error: " + error_body);
+		}
+
+		// 5xx Server Errors - classify for retry decision
+		if (status_code >= 500 && status_code < 600) {
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (server error)");
+
+			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
+			if (status_code == 501 || status_code == 505) {
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
+					error_body += "... (truncated)";
+				}
+				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
+				                  " - Server does not support this operation: " + error_body);
+			}
+
+			// 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+			// These are retryable - return empty to trigger retry logic
+			if (attempt < MAX_RETRIES) {
+				continue; // Will retry with exponential backoff
+			} else {
+				// All retries exhausted
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
+					error_body += "... (truncated)";
+				}
+				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - Server error after " +
+				                  std::to_string(MAX_RETRIES + 1) + " attempts: " + error_body);
+			}
+		}
+
+		// 3xx Redirects or other non-2xx
+		if (status_code < 200 || status_code >= 300) {
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (non-2xx)");
+			return ""; // Return empty for redirects
+		}
+
+		BOILSTREAM_LOG("HttpGet: SUCCESS, body_len=" << response_body.size());
 
 		return response_body;
 	}
@@ -1928,16 +1942,48 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 			throw IOException("HTTP DELETE failed: " + response->GetError());
 		}
 
-		// Check HTTP status code - must be 2xx for success (404 is also OK for DELETE - already deleted)
+		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
 
+		// Store response body (may be decrypted below)
+		string response_body = response->body;
+
+		// Verify response signature and decrypt BEFORE checking status code
+		// This ensures error responses are also decrypted before being thrown
+		if (has_session_key) {
+			try {
+				VerifyAuthenticatedResponse(response_body, status_code, response->headers, current_session_key);
+				BOILSTREAM_LOG("HttpDelete: Response signature verified successfully");
+			} catch (const std::exception &e) {
+				BOILSTREAM_LOG("HttpDelete: Response signature verification failed: " << e.what());
+				throw IOException("Response integrity check failed: " + string(e.what()));
+			}
+
+			// Check if response is encrypted and decrypt if needed
+			auto header_map = ExtractBoilstreamHeaders(response->headers);
+			if (IsResponseEncrypted(header_map)) {
+				BOILSTREAM_LOG("HttpDelete: Response is encrypted, decrypting...");
+				try {
+					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
+					BOILSTREAM_LOG("HttpDelete: Response decrypted successfully, plaintext_len=" << response_body.size());
+				} catch (const std::exception &e) {
+					BOILSTREAM_LOG("HttpDelete: Response decryption failed: " << e.what());
+					throw IOException("Response decryption failed: " + string(e.what()));
+				}
+			} else {
+				BOILSTREAM_LOG("HttpDelete: Response is not encrypted (plaintext)");
+			}
+		}
+
+		// Now check status code with decrypted response body
 		// 4xx Client Errors (except 404) - fail fast, don't retry
 		if (status_code >= 400 && status_code < 500 && status_code != 404) {
-			string error_body = response->body.substr(0, 200);
-			if (response->body.size() > 200) {
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
 				error_body += "... (truncated)";
 			}
-			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (client error)");
+			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (client error), body: " << error_body);
 			throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
 			                  " - Client error: " + error_body);
 		}
@@ -1948,8 +1994,8 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 
 			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
 			if (status_code == 501 || status_code == 505) {
-				string error_body = response->body.substr(0, 200);
-				if (response->body.size() > 200) {
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
 					error_body += "... (truncated)";
 				}
 				throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
@@ -1966,42 +2012,11 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 
 		// Non-2xx status (except 404, including exhausted 5xx retries)
 		if (status_code < 200 || (status_code >= 300 && status_code != 404)) {
-			string error_body = response->body.substr(0, 200);
-			if (response->body.size() > 200) {
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
 				error_body += "... (truncated)";
 			}
 			throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) + " - " + error_body);
-		}
-
-		// Verify response signature if we have a session_key
-		if (has_session_key) {
-			try {
-				VerifyAuthenticatedResponse(response->body, status_code, response->headers, current_session_key);
-				BOILSTREAM_LOG("HttpDelete: Response signature verified successfully");
-			} catch (const std::exception &e) {
-				BOILSTREAM_LOG("HttpDelete: Response signature verification failed: " << e.what());
-				throw IOException("Response integrity check failed: " + string(e.what()));
-			}
-
-			// Check if response is encrypted and decrypt if needed
-			// Note: HttpDelete returns void, so decrypted body is not used currently
-			// However, we decrypt for consistency and protocol compliance
-			auto header_map = ExtractBoilstreamHeaders(response->headers);
-			if (IsResponseEncrypted(header_map)) {
-				BOILSTREAM_LOG("HttpDelete: Response is encrypted, decrypting...");
-				try {
-					uint16_t cipher_suite = ParseCipherSuite(header_map);
-					string decrypted_body = DecryptResponse(response->body, current_session_key, cipher_suite);
-					BOILSTREAM_LOG(
-					    "HttpDelete: Response decrypted successfully, plaintext_len=" << decrypted_body.size());
-					// Decrypted body is not returned (HttpDelete returns void)
-				} catch (const std::exception &e) {
-					BOILSTREAM_LOG("HttpDelete: Response decryption failed: " << e.what());
-					throw IOException("Response decryption failed: " + string(e.what()));
-				}
-			} else {
-				BOILSTREAM_LOG("HttpDelete: Response is not encrypted (plaintext)");
-			}
 		}
 
 		return; // Success
