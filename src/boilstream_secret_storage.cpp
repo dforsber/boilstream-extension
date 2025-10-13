@@ -1966,7 +1966,8 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 				try {
 					uint16_t cipher_suite = ParseCipherSuite(header_map);
 					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
-					BOILSTREAM_LOG("HttpDelete: Response decrypted successfully, plaintext_len=" << response_body.size());
+					BOILSTREAM_LOG(
+					    "HttpDelete: Response decrypted successfully, plaintext_len=" << response_body.size());
 				} catch (const std::exception &e) {
 					BOILSTREAM_LOG("HttpDelete: Response decryption failed: " << e.what());
 					throw IOException("Response decryption failed: " + string(e.what()));
