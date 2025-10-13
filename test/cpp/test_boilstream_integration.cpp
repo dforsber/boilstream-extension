@@ -278,10 +278,8 @@ TEST_CASE("Server Operations", "[boilstream][server]") {
 		string error = result->GetError();
 		// cerr << "Duplicate secret error: " << error << endl;
 		// Check for various error patterns indicating duplicate: "exists", "already", "conflict", or "duplicate"
-		REQUIRE((error.find("exists") != string::npos ||
-		         error.find("already") != string::npos ||
-		         error.find("conflict") != string::npos ||
-		         error.find("duplicate") != string::npos));
+		REQUIRE((error.find("exists") != string::npos || error.find("already") != string::npos ||
+		         error.find("conflict") != string::npos || error.find("duplicate") != string::npos));
 	}
 }
 

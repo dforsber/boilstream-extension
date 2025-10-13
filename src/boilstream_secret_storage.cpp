@@ -1208,8 +1208,8 @@ uint16_t RestApiSecretStorage::ParseCipherSuite(const case_insensitive_map_t<str
 
 		// Validate supported cipher suites
 		if (cipher_suite != 0x0001 && cipher_suite != 0x0002) {
-			throw IOException("ParseCipherSuite: Unsupported cipher suite 0x" +
-			                  std::to_string(cipher_suite) + " (only 0x0001 and 0x0002 supported)");
+			throw IOException("ParseCipherSuite: Unsupported cipher suite 0x" + std::to_string(cipher_suite) +
+			                  " (only 0x0001 and 0x0002 supported)");
 		}
 
 		return cipher_suite;
@@ -1809,7 +1809,8 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 				try {
 					uint16_t cipher_suite = ParseCipherSuite(header_map);
 					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
-					BOILSTREAM_LOG("HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
+					BOILSTREAM_LOG(
+					    "HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
 				} catch (const std::exception &e) {
 					BOILSTREAM_LOG("HttpPost: Response decryption failed: " << e.what());
 					throw IOException("Response decryption failed: " + string(e.what()));
@@ -1991,7 +1992,8 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 				try {
 					uint16_t cipher_suite = ParseCipherSuite(header_map);
 					string decrypted_body = DecryptResponse(response->body, current_session_key, cipher_suite);
-					BOILSTREAM_LOG("HttpDelete: Response decrypted successfully, plaintext_len=" << decrypted_body.size());
+					BOILSTREAM_LOG(
+					    "HttpDelete: Response decrypted successfully, plaintext_len=" << decrypted_body.size());
 					// Decrypted body is not returned (HttpDelete returns void)
 				} catch (const std::exception &e) {
 					BOILSTREAM_LOG("HttpDelete: Response decryption failed: " << e.what());

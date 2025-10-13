@@ -748,9 +748,11 @@ TEST_CASE("Tier 4: A.10.2 - AES-256-GCM Encryption (PRODUCTION CODE)", "[conform
 	std::vector<uint8_t> nonce = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b};
 
 	// Expected test vectors from spec
-	std::string expected_ciphertext_hex = "7ae008703e0ac4fc579967c06bb3b4de18425d137c84c2e1ab9f7691632ea6bd94fea1f95adfad6292bda8aa6beb335b";
+	std::string expected_ciphertext_hex =
+	    "7ae008703e0ac4fc579967c06bb3b4de18425d137c84c2e1ab9f7691632ea6bd94fea1f95adfad6292bda8aa6beb335b";
 	std::string expected_aead_tag_hex = "e49ca878f21cf72a5eb27c8aab528064";
-	std::string expected_ciphertext_with_tag_hex = "7ae008703e0ac4fc579967c06bb3b4de18425d137c84c2e1ab9f7691632ea6bd94fea1f95adfad6292bda8aa6beb335be49ca878f21cf72a5eb27c8aab528064";
+	std::string expected_ciphertext_with_tag_hex = "7ae008703e0ac4fc579967c06bb3b4de18425d137c84c2e1ab9f7691632ea6bd94f"
+	                                               "ea1f95adfad6292bda8aa6beb335be49ca878f21cf72a5eb27c8aab528064";
 
 	// Derive encryption_key using PRODUCTION code
 	auto encryption_key = fixture.DeriveBoilstreamKey("response-encryption-v1");
@@ -761,7 +763,8 @@ TEST_CASE("Tier 4: A.10.2 - AES-256-GCM Encryption (PRODUCTION CODE)", "[conform
 
 	// Encrypt using AES-256-GCM (PRODUCTION mbedTLS wrapper)
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr, 0);
+	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
+	                                 0);
 
 	// Encrypt plaintext
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
@@ -809,7 +812,8 @@ TEST_CASE("Tier 4: A.10.3 - HMAC over Encrypted Data (PRODUCTION CODE)", "[confo
 
 	// Re-encrypt to get ciphertext_with_tag (must match A.10.2)
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr, 0);
+	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
+	                                 0);
 
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
 	aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext_json.data()), plaintext_json.size(),
@@ -860,14 +864,16 @@ TEST_CASE("Tier 4: A.10.9 - Complete Encryption and Decryption Flow (PRODUCTION 
 	std::vector<uint8_t> nonce = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b};
 
 	// Expected EncryptedResponse JSON from A.10.4
-	std::string expected_encrypted_json = R"({"encrypted":true,"nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"})";
+	std::string expected_encrypted_json =
+	    R"({"encrypted":true,"nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"})";
 
 	// STEP 1: Encrypt using PRODUCTION code
 	INFO("Step 1: Encrypting plaintext using AES-256-GCM");
 	auto encryption_key = fixture.DeriveBoilstreamKey("response-encryption-v1");
 
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr, 0);
+	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
+	                                 0);
 
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
 	aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext_json.data()), plaintext_json.size(),
@@ -932,10 +938,10 @@ TEST_CASE("Tier 4: A.10.9 - Complete Encryption and Decryption Flow (PRODUCTION 
 	vector<uint8_t> duckdb_session_key(fixture.test_session_key.begin(), fixture.test_session_key.end());
 
 	// Call PRODUCTION DecryptResponse via friend class accessor
-	std::string decrypted_plaintext = BoilstreamConformanceTestAccess::DecryptResponse(
-	    storage, encrypted_response_json, duckdb_session_key,
-	    0x0001 // AES-256-GCM
-	);
+	std::string decrypted_plaintext =
+	    BoilstreamConformanceTestAccess::DecryptResponse(storage, encrypted_response_json, duckdb_session_key,
+	                                                     0x0001 // AES-256-GCM
+	    );
 
 	INFO("Decrypted plaintext: " << decrypted_plaintext);
 
