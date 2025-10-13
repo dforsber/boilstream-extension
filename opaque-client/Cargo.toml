@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
+# staticlib for C FFI on native platforms
+# cdylib for WASM (emscripten can link against .so)
+# rlib for Rust-to-Rust linking
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]

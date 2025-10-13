@@ -3,10 +3,9 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME boilstream)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
+# DuckDB provides mbedTLS for all platforms (including WASM)
+# We use duckdb_mbedtls::MbedTlsWrapper for cryptographic operations
+# OpenSSL is NOT needed - removed to support WASM builds
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -36,6 +35,7 @@ endif()
 # Configure Rust target and library name based on platform
 if(IS_WASM_BUILD)
     # WASM build: target wasm32-unknown-emscripten
+    # Use staticlib with C FFI functions
     set(RUST_TARGET "wasm32-unknown-emscripten")
     set(RUST_TARGET_FLAG "--target=${RUST_TARGET}")
     set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/opaque-client/target/${RUST_TARGET}/${RUST_PROFILE}")
@@ -63,7 +63,7 @@ add_custom_command(
     OUTPUT ${RUST_LIB_PATH}
     COMMAND cargo build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/opaque-client
-    COMMENT "Building Rust OPAQUE client library for ${RUST_TARGET}"
+    COMMENT "Building Rust OPAQUE client library"
     VERBATIM
 )
 
@@ -86,9 +86,16 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 # target_compile_definitions(${EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
 # target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
 
-# Link OpenSSL and Rust OPAQUE client library in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto opaque_client_rust)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto opaque_client_rust)
+# Link Rust OPAQUE client library in both the static library as the loadable extension
+# Note: We use duckdb_mbedtls (provided by DuckDB) instead of OpenSSL
+target_link_libraries(${EXTENSION_NAME} opaque_client_rust)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
+
+# On macOS, force load the Rust library to ensure all symbols are included
+if(APPLE)
+    target_link_options(${EXTENSION_NAME} PRIVATE "-Wl,-force_load,${RUST_LIB_PATH}")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-Wl,-force_load,${RUST_LIB_PATH}")
+endif()
 
 # On some platforms, we need to link additional system libraries for Rust
 if(IS_WASM_BUILD)
@@ -98,8 +105,9 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(${EXTENSION_NAME} dl pthread)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread)
 elseif(APPLE)
-    target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation")
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation")
+    # macOS requires additional frameworks and libraries for Rust
+    target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
     target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt)

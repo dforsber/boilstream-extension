@@ -10,7 +10,6 @@ use hmac::{Hmac, Mac};
 type HmacSha256 = Hmac<Sha256>;
 
 // Platform-specific imports
-#[cfg(not(target_arch = "wasm32"))]
 use std::os::raw::c_char;
 
 #[cfg(target_arch = "wasm32")]
@@ -120,7 +119,6 @@ pub struct LoginState {
 /// Initialize OPAQUE client registration (step 1)
 /// Returns RegistrationRequest serialized + state handle
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_client_registration_start(
     password: *const c_char,
     password_len: usize,
@@ -160,7 +158,6 @@ pub extern "C" fn opaque_client_registration_start(
 /// Finish OPAQUE client registration (step 2)
 /// Takes RegistrationResponse from server, returns RegistrationUpload + export_key
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_client_registration_finish(
     state: *mut RegistrationState,
     registration_response: *const u8,
@@ -215,7 +212,6 @@ pub extern "C" fn opaque_client_registration_finish(
 /// Initialize OPAQUE client login (step 1)
 /// Returns CredentialRequest serialized + state handle
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_client_login_start(
     password: *const c_char,
     password_len: usize,
@@ -255,7 +251,6 @@ pub extern "C" fn opaque_client_login_start(
 /// Finish OPAQUE client login (step 2)
 /// Takes CredentialResponse from server, returns CredentialFinalization + session_key + export_key
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_client_login_finish(
     state: *mut LoginState,
     credential_response: *const u8,
@@ -310,7 +305,6 @@ pub extern "C" fn opaque_client_login_finish(
 
 /// Free a buffer allocated by the Rust library
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
     if !buffer.data.is_null() {
         unsafe {
@@ -322,7 +316,6 @@ pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
 
 /// Free a registration state
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_free_registration_state(state: *mut RegistrationState) {
     if !state.is_null() {
         unsafe {
@@ -334,7 +327,6 @@ pub extern "C" fn opaque_free_registration_state(state: *mut RegistrationState) 
 
 /// Free a login state
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn opaque_free_login_state(state: *mut LoginState) {
     if !state.is_null() {
         unsafe {
@@ -351,7 +343,6 @@ pub extern "C" fn opaque_free_login_state(state: *mut LoginState) {
 /// Build AWS SigV4-style canonical request
 /// Returns canonical request string that needs to be signed
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn aws_build_canonical_request(
     method: *const c_char,
     method_len: usize,
@@ -425,7 +416,6 @@ pub extern "C" fn aws_build_canonical_request(
 /// Derive AWS-style signing key (date-scoped)
 /// Returns the final signing key for HMAC
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn aws_derive_signing_key(
     base_signing_key: *const u8,
     base_signing_key_len: usize,
@@ -487,7 +477,6 @@ pub extern "C" fn aws_derive_signing_key(
 /// Sign canonical request with HMAC-SHA256
 /// Returns base64-encoded signature
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub extern "C" fn aws_sign_canonical_request(
     signing_key: *const u8,
     signing_key_len: usize,
