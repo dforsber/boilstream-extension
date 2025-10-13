@@ -133,9 +133,10 @@ elseif(WIN32)
     # MinGW/GCC requires libgcc for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
     # MSVC doesn't need this (and doesn't have gcc.lib)
     if(MINGW OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_link_libraries(${EXTENSION_NAME} gcc)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} gcc)
-        message(STATUS "Windows MinGW build: linking libgcc for f16 support")
+        # Statically link libgcc to ensure f16 builtins are included
+        target_link_libraries(${EXTENSION_NAME} -static-libgcc gcc)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} -static-libgcc gcc)
+        message(STATUS "Windows MinGW build: linking libgcc statically for f16 support")
     endif()
 endif()
 
