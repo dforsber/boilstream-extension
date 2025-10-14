@@ -94,10 +94,11 @@ add_library(opaque_client_rust STATIC IMPORTED GLOBAL)
 # to ANY target that links against opaque_client_rust
 if(WIN32 AND NOT MSVC)
     # MinGW requires GCC runtime, Windows APIs, and C++ standard library
+    # Note: Separate linker flags from library names for proper handling
     set_target_properties(opaque_client_rust PROPERTIES
         IMPORTED_LOCATION ${RUST_LIB_PATH}
-        INTERFACE_LINK_LIBRARIES "ws2_32;userenv;bcrypt;ntdll;-static-libgcc;-static-libstdc++;stdc++;gcc"
-        INTERFACE_LINK_OPTIONS "-Wl,--allow-multiple-definition"
+        INTERFACE_LINK_LIBRARIES "ws2_32;userenv;bcrypt;ntdll;userenv;stdc++;gcc"
+        INTERFACE_LINK_OPTIONS "-Wl,--allow-multiple-definition;-static-libgcc;-static-libstdc++"
     )
 elseif(WIN32 AND MSVC)
     # MSVC only needs Windows APIs (standard library is automatic)
