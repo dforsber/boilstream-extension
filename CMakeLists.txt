@@ -136,17 +136,15 @@ elseif(WIN32)
         # Not MSVC, so assume MinGW/GCC - link full runtime stack
         message(STATUS "Windows MinGW build: linking full compiler runtime for Rust support")
         # Static linking of compiler runtime to avoid DLL dependencies
-        # Order matters: start with high-level, then low-level libraries
+        # Note: gcc_s is shared lib - we use gcc for static builds
         target_link_libraries(${EXTENSION_NAME}
             -static-libgcc -static-libstdc++  # Static flags
             stdc++                             # C++ standard library (for RTTI, exceptions)
-            gcc_s                              # GCC support library (for unwinding, etc.)
-            gcc                                # GCC compiler builtins (f16, etc.)
+            gcc                                # GCC compiler runtime (builtins, unwinding, etc.)
         )
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
             -static-libgcc -static-libstdc++
             stdc++
-            gcc_s
             gcc
         )
     else()

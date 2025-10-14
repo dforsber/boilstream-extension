@@ -110,10 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed: Force-load Rust library with -Wl,-force_load linker flag
   - Added: CoreFoundation framework and resolv library for Rust dependencies
 - **HIGH**: Windows build errors
-  - MinGW/GCC: Statically link full compiler runtime (-static-libgcc, -static-libstdc++, stdc++, gcc_s, gcc)
+  - MinGW/GCC: Statically link full compiler runtime (-static-libgcc, -static-libstdc++, stdc++, gcc)
     - Provides f16 compiler builtins (__extendhfsf2, __truncsfhf2)
     - Provides C++ RTTI and exception handling
     - Provides stack checking (__chkstk) and unwinding support
+    - Note: gcc_s (shared lib) not used - static MinGW uses gcc for all runtime functions
   - MSVC: Fixed min/max macro conflicts with std::chrono (added NOMINMAX define)
   - MSVC: Removed gcc.lib linking (only needed for MinGW, not MSVC)
   - MSVC: Added ntdll.lib for Rust std NT native functions (NtReadFile, NtWriteFile, NtOpenFile, etc.)
