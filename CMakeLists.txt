@@ -130,15 +130,27 @@ elseif(WIN32)
     target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
 
-    # MinGW/GCC requires libgcc for Rust f16 compiler builtins (__extendhfsf2, __truncsfhf2)
-    # MSVC doesn't need this (and doesn't have gcc.lib)
+    # MinGW/GCC requires full compiler runtime for Rust
+    # MSVC doesn't need this (and doesn't have these libraries)
     if(NOT MSVC)
-        # Not MSVC, so assume MinGW/GCC - statically link libgcc for f16 support
-        message(STATUS "Windows non-MSVC build: linking libgcc statically for f16 support")
-        target_link_libraries(${EXTENSION_NAME} -static-libgcc gcc)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} -static-libgcc gcc)
+        # Not MSVC, so assume MinGW/GCC - link full runtime stack
+        message(STATUS "Windows MinGW build: linking full compiler runtime for Rust support")
+        # Static linking of compiler runtime to avoid DLL dependencies
+        # Order matters: start with high-level, then low-level libraries
+        target_link_libraries(${EXTENSION_NAME}
+            -static-libgcc -static-libstdc++  # Static flags
+            stdc++                             # C++ standard library (for RTTI, exceptions)
+            gcc_s                              # GCC support library (for unwinding, etc.)
+            gcc                                # GCC compiler builtins (f16, etc.)
+        )
+        target_link_libraries(${LOADABLE_EXTENSION_NAME}
+            -static-libgcc -static-libstdc++
+            stdc++
+            gcc_s
+            gcc
+        )
     else()
-        message(STATUS "Windows MSVC build: skipping libgcc")
+        message(STATUS "Windows MSVC build: skipping GCC runtime libraries")
     endif()
 endif()
 
