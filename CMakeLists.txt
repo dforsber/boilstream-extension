@@ -135,17 +135,34 @@ elseif(WIN32)
     if(NOT MSVC)
         # Not MSVC, so assume MinGW/GCC - link full runtime stack
         message(STATUS "Windows MinGW build: linking full compiler runtime for Rust support")
-        # Static linking of compiler runtime to avoid DLL dependencies
-        # Note: gcc_s is shared lib - we use gcc for static builds
+        # Use linker groups to resolve circular dependencies and allow multiple passes
+        # This handles the case where Rust provides some builtins and we need others from libgcc
+        target_link_options(${EXTENSION_NAME} PRIVATE
+            "LINKER:--allow-multiple-definition"  # Allow weak f16 symbols from both Rust and libgcc
+            "LINKER:--start-group"                # Start linker group for circular dependencies
+        )
         target_link_libraries(${EXTENSION_NAME}
             -static-libgcc -static-libstdc++  # Static flags
             stdc++                             # C++ standard library (for RTTI, exceptions)
-            gcc                                # GCC compiler runtime (builtins, unwinding, etc.)
+            gcc_eh                             # GCC exception handling and stack checking (__chkstk)
+            gcc                                # GCC compiler builtins (f16, etc.)
+        )
+        target_link_options(${EXTENSION_NAME} PRIVATE
+            "LINKER:--end-group"              # End linker group
+        )
+
+        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
+            "LINKER:--allow-multiple-definition"
+            "LINKER:--start-group"
         )
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
             -static-libgcc -static-libstdc++
             stdc++
+            gcc_eh
             gcc
+        )
+        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
+            "LINKER:--end-group"
         )
     else()
         message(STATUS "Windows MSVC build: skipping GCC runtime libraries")
