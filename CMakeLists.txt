@@ -102,8 +102,6 @@ target_link_libraries(${EXTENSION_NAME} opaque_client_rust)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
 
 # Platform-specific configuration
-# Corrosion handles all Rust dependencies automatically (Windows libs, GCC runtime, etc.)
-# We only need to add platform-specific system libraries not covered by Corrosion
 if(NOT IS_WASM_BUILD)
     if(APPLE)
         # macOS frameworks for Rust
@@ -113,6 +111,11 @@ if(NOT IS_WASM_BUILD)
         # Linux system libraries
         target_link_libraries(${EXTENSION_NAME} dl pthread)
         target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread)
+    elseif(WIN32)
+        # Windows: Corrosion handles most dependencies, but we need to add bcrypt explicitly
+        # bcrypt is needed by the getrandom crate (BCryptGenRandom function)
+        target_link_libraries(${EXTENSION_NAME} bcrypt)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
     endif()
 endif()
 
