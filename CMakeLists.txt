@@ -125,37 +125,37 @@ elseif(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
-    # MinGW/GCC requires special handling for Rust library linking
-    # MSVC doesn't need this (and doesn't have these libraries)
     if(NOT MSVC)
-        # MinGW: Link Rust library again inside a linker group with all dependencies
-        message(STATUS "Windows MinGW build: re-linking Rust in linker group")
+        # MinGW: Set GLOBAL linker flags for ALL targets
+        # This is needed because any extension that links against boilstream
+        # will transitively pull in Rust dependencies
+        message(STATUS "Windows MinGW: setting global linker flags for Rust dependencies")
 
-        # Link Rust library AGAIN inside a group with all its dependencies
-        # This allows multi-pass resolution regardless of link order
-        target_link_libraries(${EXTENSION_NAME}
-            "-Wl,--allow-multiple-definition"
-            "-Wl,--start-group"
-            opaque_client_rust                  # Re-link Rust library
-            ws2_32 userenv bcrypt ntdll          # Windows APIs
-            -static-libgcc -static-libstdc++     # Static linking
-            stdc++                               # C++ RTTI
-            gcc                                  # GCC runtime (__chkstk, f16)
-            "-Wl,--end-group"
-        )
+        # Set global linker flags for all shared libraries
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
 
-        target_link_libraries(${LOADABLE_EXTENSION_NAME}
-            "-Wl,--allow-multiple-definition"
-            "-Wl,--start-group"
-            opaque_client_rust
+        # Add runtime libraries to all Windows MinGW builds
+        link_libraries(
             ws2_32 userenv bcrypt ntdll
             -static-libgcc -static-libstdc++
             stdc++
             gcc
+        )
+
+        # For boilstream extension specifically, re-link Rust in a group
+        target_link_libraries(${EXTENSION_NAME}
+            "-Wl,--start-group"
+            opaque_client_rust
+            "-Wl,--end-group"
+        )
+
+        target_link_libraries(${LOADABLE_EXTENSION_NAME}
+            "-Wl,--start-group"
+            opaque_client_rust
             "-Wl,--end-group"
         )
     else()
-        # MSVC: Simple linking without linker groups
+        # MSVC: Simple linking
         message(STATUS "Windows MSVC build: standard library linking")
         target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
         target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
