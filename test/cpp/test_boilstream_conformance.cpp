@@ -1092,7 +1092,7 @@ TEST_CASE("Conformance Summary", "[conformance][summary]") {
 	INFO("  - A.10.3: HMAC over encrypted data (test vectors) - 1 test");
 	INFO("  - A.10.9: Complete encryption-decryption flow (DecryptResponse) - 1 test");
 	INFO("  - A.10.10: Security invariants - 1 test");
-	INFO("Total: 22 conformance tests");
+	INFO("Total: 23 conformance tests");
 	INFO("");
 	INFO("CRITICAL: Tier 2 & 4 tests call ACTUAL PRODUCTION FUNCTIONS");
 	INFO("  - DeriveSigningKey(), DeriveIntegrityKey(), DeriveEncryptionKey()");
