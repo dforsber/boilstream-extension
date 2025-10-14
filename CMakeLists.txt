@@ -128,23 +128,26 @@ elseif(WIN32)
     # MinGW/GCC requires special handling for Rust library linking
     # MSVC doesn't need this (and doesn't have these libraries)
     if(NOT MSVC)
-        # MinGW: Wrap Rust library dependencies in linker group for multi-pass linking
-        message(STATUS "Windows MinGW build: using linker groups for Rust dependencies")
+        # MinGW: Link Rust library again inside a linker group with all dependencies
+        message(STATUS "Windows MinGW build: re-linking Rust in linker group")
 
-        # Put group flags INSIDE target_link_libraries so they stay together on link line
+        # Link Rust library AGAIN inside a group with all its dependencies
+        # This allows multi-pass resolution regardless of link order
         target_link_libraries(${EXTENSION_NAME}
-            "-Wl,--allow-multiple-definition"  # Allow weak f16 symbols
-            "-Wl,--start-group"                # Start linker group - multiple passes
-            ws2_32 userenv bcrypt ntdll        # Windows APIs (WSARecv, etc.)
-            -static-libgcc -static-libstdc++    # Static linking flags
-            stdc++                              # C++ standard library (RTTI)
-            gcc                                 # GCC runtime (__chkstk, f16 builtins)
-            "-Wl,--end-group"                  # End linker group
+            "-Wl,--allow-multiple-definition"
+            "-Wl,--start-group"
+            opaque_client_rust                  # Re-link Rust library
+            ws2_32 userenv bcrypt ntdll          # Windows APIs
+            -static-libgcc -static-libstdc++     # Static linking
+            stdc++                               # C++ RTTI
+            gcc                                  # GCC runtime (__chkstk, f16)
+            "-Wl,--end-group"
         )
 
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
             "-Wl,--allow-multiple-definition"
             "-Wl,--start-group"
+            opaque_client_rust
             ws2_32 userenv bcrypt ntdll
             -static-libgcc -static-libstdc++
             stdc++
