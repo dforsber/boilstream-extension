@@ -88,9 +88,30 @@ add_custom_target(rust_opaque_client ALL DEPENDS ${RUST_LIB_PATH})
 
 # Create an imported library target for the Rust library
 add_library(opaque_client_rust STATIC IMPORTED GLOBAL)
-set_target_properties(opaque_client_rust PROPERTIES
-    IMPORTED_LOCATION ${RUST_LIB_PATH}
-)
+
+# Configure platform-specific interface libraries for Rust dependencies
+# INTERFACE_LINK_LIBRARIES ensures these libraries are transitively linked
+# to ANY target that links against opaque_client_rust
+if(WIN32 AND NOT MSVC)
+    # MinGW requires GCC runtime, Windows APIs, and C++ standard library
+    set_target_properties(opaque_client_rust PROPERTIES
+        IMPORTED_LOCATION ${RUST_LIB_PATH}
+        INTERFACE_LINK_LIBRARIES "ws2_32;userenv;bcrypt;ntdll;-static-libgcc;-static-libstdc++;stdc++;gcc"
+        INTERFACE_LINK_OPTIONS "-Wl,--allow-multiple-definition"
+    )
+elseif(WIN32 AND MSVC)
+    # MSVC only needs Windows APIs (standard library is automatic)
+    set_target_properties(opaque_client_rust PROPERTIES
+        IMPORTED_LOCATION ${RUST_LIB_PATH}
+        INTERFACE_LINK_LIBRARIES "ws2_32;userenv;bcrypt;ntdll"
+    )
+else()
+    # Other platforms don't need special runtime libraries
+    set_target_properties(opaque_client_rust PROPERTIES
+        IMPORTED_LOCATION ${RUST_LIB_PATH}
+    )
+endif()
+
 add_dependencies(opaque_client_rust rust_opaque_client)
 
 set(EXTENSION_SOURCES src/boilstream_extension.cpp src/boilstream_secret_storage.cpp src/opaque_wrapper.cpp)
@@ -125,41 +146,10 @@ elseif(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
-    if(NOT MSVC)
-        # MinGW: Set GLOBAL linker flags for ALL targets
-        # This is needed because any extension that links against boilstream
-        # will transitively pull in Rust dependencies
-        message(STATUS "Windows MinGW: setting global linker flags for Rust dependencies")
-
-        # Set global linker flags for all shared libraries
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-
-        # Add runtime libraries to all Windows MinGW builds
-        link_libraries(
-            ws2_32 userenv bcrypt ntdll
-            -static-libgcc -static-libstdc++
-            stdc++
-            gcc
-        )
-
-        # For boilstream extension specifically, re-link Rust in a group
-        target_link_libraries(${EXTENSION_NAME}
-            "-Wl,--start-group"
-            opaque_client_rust
-            "-Wl,--end-group"
-        )
-
-        target_link_libraries(${LOADABLE_EXTENSION_NAME}
-            "-Wl,--start-group"
-            opaque_client_rust
-            "-Wl,--end-group"
-        )
-    else()
-        # MSVC: Simple linking
-        message(STATUS "Windows MSVC build: standard library linking")
-        target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
-    endif()
+    # Windows-specific libraries are now handled via INTERFACE_LINK_LIBRARIES
+    # on the opaque_client_rust target (see lines 95-113)
+    # No additional linking needed here - dependencies propagate automatically
+    message(STATUS "Windows build: Rust dependencies configured via INTERFACE_LINK_LIBRARIES")
 endif()
 
 install(
