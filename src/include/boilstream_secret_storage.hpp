@@ -10,8 +10,14 @@
 
 #include "duckdb/main/secret/secret_storage.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/http_util.hpp"
 #include <string>
 #include <chrono>
+
+// Forward declarations for test friend access (outside namespace)
+class BoilstreamCryptoTestAccess;
+class BoilstreamConformanceTestAccess;
+class BoilstreamEncryptionTestAccess;
 
 namespace duckdb {
 
@@ -21,17 +27,22 @@ class SecretManager;
 //! REST API-based secret storage that communicates with an external service
 //! for multi-tenant secret management
 class RestApiSecretStorage : public CatalogSetSecretStorage {
+	// Allow test code to access private methods for testing
+	friend class ::BoilstreamCryptoTestAccess;
+	friend class ::BoilstreamConformanceTestAccess;
+	friend class ::BoilstreamEncryptionTestAccess;
+
 public:
 	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url);
 
 	//! Set the endpoint URL (without token)
 	void SetEndpoint(const string &endpoint);
 
-	//! Perform PKCE token exchange with bootstrap token
-	void PerformTokenExchange(const string &bootstrap_token);
+	//! Perform OPAQUE registration with password
+	void PerformOpaqueRegistration(const string &password);
 
-	//! Rotate session token using stored code_verifier
-	void RotateSessionToken();
+	//! Perform OPAQUE login with password
+	void PerformOpaqueLogin(const string &password);
 
 	//! Clear session state (on error or logout)
 	void ClearSession();
@@ -45,20 +56,11 @@ public:
 	//! Clear connection mapping (for cleanup)
 	void ClearConnectionMapping(idx_t connection_id);
 
-	//! Generate PKCE code_verifier (64-char base64url random string)
-	string GenerateCodeVerifier();
-
-	//! Compute PKCE code_challenge from code_verifier (SHA256 + base64url)
-	string ComputeCodeChallenge(const string &code_verifier);
-
 	//! Validate token format and length
 	void ValidateTokenFormat(const string &token, const string &context);
 
 	//! Check if session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid();
-
-	//! Check if session token should be rotated (< 30min remaining)
-	bool ShouldRotateToken();
 
 	//! Get stored bootstrap token hash (for reuse detection)
 	string GetBootstrapTokenHash();
@@ -95,8 +97,73 @@ protected:
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
 
 private:
+	//! Request signing result containing all required headers
+	struct SigningResult {
+		string signature;        // Base64-encoded HMAC signature
+		string date_time;        // ISO8601 timestamp (YYYYMMDDTHHMMSSZ)
+		string credential_scope; // AWS-style credential scope
+	};
+
+	//! Session state snapshot for thread-safe access
+	struct SessionSnapshot {
+		string access_token;
+		vector<uint8_t> session_key;
+		string region;
+		uint64_t sequence;
+		bool has_session_key;
+	};
+
+	//! Get thread-safe snapshot of current session state
+	SessionSnapshot GetSessionSnapshot();
+
+	//! Extract all x-boilstream-* headers from HTTP response
+	case_insensitive_map_t<string> ExtractBoilstreamHeaders(const HTTPHeaders &headers);
+
+	//! Build authenticated request headers with signature
+	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body);
+
+	//! Verify authenticated response signature and timestamp
+	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
+	                                 const HTTPHeaders &response_headers, const vector<uint8_t> &session_key_param);
+
 	//! Extract user context from transaction (user_context_id from ClientData)
 	string ExtractUserContext(optional_ptr<CatalogTransaction> transaction);
+
+	//! Derive signing key from session_key using HKDF-SHA256
+	vector<uint8_t> DeriveSigningKey(const vector<uint8_t> &session_key_param);
+
+	//! Derive encryption key from session_key using HKDF-SHA256
+	vector<uint8_t> DeriveEncryptionKey(const vector<uint8_t> &session_key_param);
+
+	//! Derive integrity key from session_key using HKDF-SHA256 (for response verification)
+	vector<uint8_t> DeriveIntegrityKey(const vector<uint8_t> &session_key_param);
+
+	//! Sign an HTTP request with HMAC-SHA256 (canonical request format)
+	//! Returns signing result with signature, date_time, and credential_scope
+	SigningResult SignRequest(const string &method, const string &url, const string &body, uint64_t timestamp,
+	                          uint64_t sequence, const vector<uint8_t> &session_key_param,
+	                          const string &access_token_param, const string &region_param);
+
+	//! Verify HTTP response signature (HMAC-SHA256 over canonical response format)
+	//! Throws IOException if signature verification fails
+	void VerifyResponseSignature(const string &response_body, uint16_t status_code,
+	                             const case_insensitive_map_t<string> &headers,
+	                             const vector<uint8_t> &session_key_param);
+
+	//! Decrypt encrypted response body (AES-256-GCM or ChaCha20-Poly1305)
+	//! Performs HMAC verification before decryption per SECURITY_SPECIFICATION.md
+	//! Returns plaintext JSON string
+	string DecryptResponse(const string &encrypted_response_body, const vector<uint8_t> &session_key_param,
+	                       uint16_t cipher_suite);
+
+	//! Check if response is encrypted by examining X-Boilstream-Encrypted header
+	//! Returns true if header is present and set to "true"
+	bool IsResponseEncrypted(const case_insensitive_map_t<string> &headers);
+
+	//! Parse cipher suite from X-Boilstream-Cipher header
+	//! Returns cipher suite ID (e.g., 0x0001 for AES-256-GCM)
+	//! Throws IOException if header is missing or invalid
+	uint16_t ParseCipherSuite(const case_insensitive_map_t<string> &headers);
 
 	//! Serialize secret to JSON string
 	string SerializeSecret(const BaseSecret &secret);
@@ -134,23 +201,26 @@ private:
 	//! Lock for thread-safe endpoint updates
 	mutex endpoint_lock;
 
-	//! Session token (obtained via PKCE exchange, in-memory only)
-	string session_token;
+	//! Access token (obtained via OPAQUE login, in-memory only)
+	string access_token;
 
-	//! PKCE code verifier (never transmitted, used for rotation)
-	string code_verifier;
+	//! OPAQUE session key (32 bytes, OPAQUE-derived with SHA-256, in-memory only)
+	vector<uint8_t> session_key;
+
+	//! OPAQUE refresh token (32 bytes, for session resumption, will be persisted)
+	vector<uint8_t> refresh_token;
+
+	//! Lock-step sequence counter (starts at 0, increments with each request)
+	uint64_t client_sequence;
+
+	//! Region identifier (e.g., "us-east-1", from server login response)
+	string region;
 
 	//! Session token expiration timestamp
 	std::chrono::system_clock::time_point token_expires_at;
 
 	//! Lock for session token state
 	mutex session_lock;
-
-	//! Lock for token rotation (prevents concurrent rotations)
-	mutex rotation_lock;
-
-	//! Flag indicating rotation in progress
-	bool is_rotating;
 
 	//! Flag indicating token exchange in progress
 	bool is_exchanging;

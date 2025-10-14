@@ -1,0 +1,9 @@
+# Cargo configuration for wasm32-unknown-emscripten target
+
+[target.wasm32-unknown-emscripten]
+# Tell emscripten to skip wasm-opt (version incompatibility with --enable-bulk-memory-opt)
+# -O1 keeps basic optimizations but skips wasm-opt
+rustflags = [
+    "-C", "link-arg=-sERROR_ON_UNDEFINED_SYMBOLS=0",
+    "-C", "link-arg=-O1"
+]

@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "boilstream_secret_storage.hpp"
+#include "opaque_wrapper.hpp"
+#include "opaque_client.h"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -22,6 +24,54 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <cstring>
+#include <iomanip>
+
+// Platform-specific secure memory zeroization
+// Prevents compiler from optimizing away memory clearing operations
+#if defined(_WIN32)
+#define NOMINMAX // Prevent Windows from defining min/max macros that conflict with std::min/std::max
+#include <windows.h>
+#define SECURE_ZERO_MEMORY(ptr, size) SecureZeroMemory(ptr, size)
+#elif defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasm32__)
+// WASM: Use volatile loop (portable, works in browser environment)
+// Note: WASM has limited security guarantees due to sandboxing, but we still
+// zero memory to prevent leakage within the WASM instance
+#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
+	do {                                                                                                               \
+		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
+		size_t n = (size);                                                                                             \
+		while (n--)                                                                                                    \
+			*p++ = 0;                                                                                                  \
+	} while (0)
+#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 25)
+// explicit_bzero available in glibc 2.25+
+#define SECURE_ZERO_MEMORY(ptr, size) explicit_bzero(ptr, size)
+#else
+// Fallback for older glibc
+#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
+	do {                                                                                                               \
+		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
+		size_t n = (size);                                                                                             \
+		while (n--)                                                                                                    \
+			*p++ = 0;                                                                                                  \
+	} while (0)
+#endif
+#elif defined(__OpenBSD__) || defined(__FreeBSD__)
+// BSD systems have explicit_bzero
+#define SECURE_ZERO_MEMORY(ptr, size) explicit_bzero(ptr, size)
+#else
+// Portable fallback using volatile to prevent compiler optimization
+// Works on most platforms including WASM, macOS, Linux, etc.
+#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
+	do {                                                                                                               \
+		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
+		size_t n = (size);                                                                                             \
+		while (n--)                                                                                                    \
+			*p++ = 0;                                                                                                  \
+	} while (0)
+#endif
 
 // Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
 // To enable: add -DBOILSTREAM_DEBUG to compiler flags
@@ -55,7 +105,7 @@ struct HttpOperationGuard {
 
 RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p)
     : CatalogSetSecretStorage(db_p, "boilstream", 5), // offset=5 for higher priority than built-in storages (10, 20)
-      endpoint_url(endpoint_url_p), is_rotating(false), is_exchanging(false) {
+      endpoint_url(endpoint_url_p), is_exchanging(false) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
 	persistent = true;                                               // Acts as persistent storage
 	token_expires_at = std::chrono::system_clock::time_point::min(); // Initialize as expired
@@ -68,67 +118,24 @@ void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
 
 void RestApiSecretStorage::ClearSession() {
 	lock_guard<mutex> lock(session_lock);
-	session_token = "";
-	code_verifier = "";
+	access_token = "";
+
+	// Securely zero session_key before clearing
+	if (!session_key.empty()) {
+		SECURE_ZERO_MEMORY(session_key.data(), session_key.size());
+		session_key.clear();
+	}
+
+	// Securely zero refresh_token before clearing
+	if (!refresh_token.empty()) {
+		SECURE_ZERO_MEMORY(refresh_token.data(), refresh_token.size());
+		refresh_token.clear();
+	}
+
+	client_sequence = 0;
+	region = "";
 	bootstrap_token_hash = "";
 	token_expires_at = std::chrono::system_clock::time_point::min();
-}
-
-string RestApiSecretStorage::GenerateCodeVerifier() {
-	// Generate 64-char base64url random string for PKCE
-	// Base64url alphabet: A-Z, a-z, 0-9, -, _
-	const char base64url_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-	const idx_t alphabet_size = 64;
-	const idx_t verifier_length = 64;
-
-	RandomEngine random;
-	string verifier;
-	verifier.reserve(verifier_length);
-
-	// Use rejection sampling to avoid modulo bias
-	// alphabet_size is 64 (power of 2), so we can use simple rejection
-	const uint64_t max_valid = (UINT64_MAX / alphabet_size) * alphabet_size;
-
-	for (idx_t i = 0; i < verifier_length; i++) {
-		uint64_t rand_val;
-
-		// Rejection sampling: reject values >= max_valid to ensure uniform distribution
-		do {
-			rand_val = random.NextRandomInteger();
-		} while (rand_val >= max_valid);
-
-		auto rand_idx = rand_val % alphabet_size;
-		verifier += base64url_chars[rand_idx];
-	}
-
-	return verifier;
-}
-
-string RestApiSecretStorage::ComputeCodeChallenge(const string &verifier) {
-	// Compute SHA256 hash of code_verifier using mbedtls
-	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state;
-	sha_state.AddString(verifier);
-
-	// Get binary hash (Finalize() returns raw bytes, not hex)
-	auto binary_hash = sha_state.Finalize();
-
-	// Convert binary to base64url
-	auto base64 = Blob::ToBase64(string_t(binary_hash));
-
-	// Convert base64 to base64url (replace +/= with -/_ and remove padding)
-	string base64url = base64;
-	for (auto &c : base64url) {
-		if (c == '+')
-			c = '-';
-		else if (c == '/')
-			c = '_';
-		else if (c == '=') {
-			base64url = base64url.substr(0, base64url.find('='));
-			break;
-		}
-	}
-
-	return base64url;
 }
 
 bool RestApiSecretStorage::IsSessionTokenValid() {
@@ -139,7 +146,7 @@ bool RestApiSecretStorage::IsSessionTokenValid() {
 		return false;
 	}
 
-	if (session_token.empty()) {
+	if (access_token.empty()) {
 		return false;
 	}
 
@@ -147,19 +154,6 @@ bool RestApiSecretStorage::IsSessionTokenValid() {
 	const auto BUFFER = std::chrono::minutes(30);
 	auto now = std::chrono::system_clock::now();
 	return now < (token_expires_at - BUFFER);
-}
-
-bool RestApiSecretStorage::ShouldRotateToken() {
-	lock_guard<mutex> lock(session_lock);
-
-	if (session_token.empty()) {
-		return false;
-	}
-
-	// Rotate if less than 30 minutes remaining
-	const auto BUFFER = std::chrono::minutes(30);
-	auto now = std::chrono::system_clock::now();
-	return now >= (token_expires_at - BUFFER);
 }
 
 string RestApiSecretStorage::GetBootstrapTokenHash() {
@@ -196,20 +190,10 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 	}
 }
 
-void RestApiSecretStorage::PerformTokenExchange(const string &bootstrap_token) {
-	BOILSTREAM_LOG("PerformTokenExchange: starting exchange");
+void RestApiSecretStorage::PerformOpaqueRegistration(const string &password) {
+	BOILSTREAM_LOG("PerformOpaqueRegistration: starting OPAQUE registration");
 
-	// Mark exchange as in progress
-	{
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = true;
-	}
-
-	// Generate PKCE parameters
-	auto new_verifier = GenerateCodeVerifier();
-	auto challenge = ComputeCodeChallenge(new_verifier);
-
-	// Build exchange URL
+	// Build registration URL
 	string url;
 	{
 		lock_guard<mutex> lock(endpoint_lock);
@@ -217,8 +201,6 @@ void RestApiSecretStorage::PerformTokenExchange(const string &bootstrap_token) {
 	}
 
 	if (url.empty()) {
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
 		throw InvalidInputException("Boilstream endpoint not configured");
 	}
 
@@ -228,119 +210,104 @@ void RestApiSecretStorage::PerformTokenExchange(const string &bootstrap_token) {
 		url = url.substr(0, secrets_pos);
 	}
 
-	url += "/auth/api/token-exchange";
+	// Compute user_id: SHA-256 hash of password (bootstrap_token)
+	// Following spec: user_id = lowercase_hex(SHA256(password))
+	char password_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(password.c_str(), password.size(), password_hash);
 
-	// Prepare request body using yyjson
+	// Convert hash to lowercase hex string (64 characters)
+	string user_id;
+	user_id.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+		unsigned char byte = static_cast<unsigned char>(password_hash[i]);
+		user_id += hex_chars[(byte >> 4) & 0xF];
+		user_id += hex_chars[byte & 0xF];
+	}
+	BOILSTREAM_LOG("PerformOpaqueRegistration: computed user_id=" << user_id.substr(0, 16) << "...");
+
+	// Step 1: Client starts registration
+	auto reg_start = OpaqueClientWrapper::RegistrationStart(password);
+	BOILSTREAM_LOG("PerformOpaqueRegistration: registration request generated");
+
+	// Step 2: Send RegistrationRequest to server with user_id
+	string reg_url = url + "/auth/api/opaque-registration-start";
+
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
-
-	yyjson_mut_obj_add_strcpy(doc, obj, "bootstrap_token", bootstrap_token.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge", challenge.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge_method", "S256");
+	yyjson_mut_obj_add_strcpy(doc, obj, "user_id", user_id.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "registration_request", reg_start.registration_request_base64.c_str());
 
 	auto body_str = yyjson_mut_write(doc, 0, nullptr);
 	string body(body_str);
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
-	// Make HTTP POST request (without Authorization header - bootstrap token is in body)
 	string response;
 	try {
-		response = HttpPost(url, body);
+		response = HttpPost(reg_url, body);
 	} catch (const std::exception &e) {
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
-		BOILSTREAM_LOG("PerformTokenExchange: HttpPost exception: " << e.what());
-		throw IOException("Token exchange failed: " + string(e.what()));
+		opaque_free_registration_state(reg_start.state);
+		throw IOException("OPAQUE registration failed (server request): " + string(e.what()));
 	}
 
-	// Parse response
+	// Parse server response
 	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
 	if (!response_doc) {
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
-		throw IOException("Token exchange failed: Invalid JSON response");
+		opaque_free_registration_state(reg_start.state);
+		throw IOException("OPAQUE registration failed: Invalid JSON response from server");
 	}
 
 	auto response_root = yyjson_doc_get_root(response_doc);
-	if (!response_root || !yyjson_is_obj(response_root)) {
+	auto registration_response_val = yyjson_obj_get(response_root, "registration_response");
+	if (!registration_response_val || !yyjson_is_str(registration_response_val)) {
 		yyjson_doc_free(response_doc);
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
-		throw IOException("Token exchange failed: Invalid response format");
+		opaque_free_registration_state(reg_start.state);
+		throw IOException("OPAQUE registration failed: No registration_response in server response");
 	}
 
-	// Extract session_token
-	auto token_val = yyjson_obj_get(response_root, "session_token");
-	if (!token_val || !yyjson_is_str(token_val)) {
-		yyjson_doc_free(response_doc);
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
-		throw IOException("Token exchange failed: No session_token in response");
-	}
-	string new_session_token = yyjson_get_str(token_val);
-
-	// Validate token format before storing
-	try {
-		ValidateTokenFormat(new_session_token, "Token exchange");
-	} catch (const std::exception &e) {
-		yyjson_doc_free(response_doc);
-		lock_guard<mutex> lock(session_lock);
-		is_exchanging = false;
-		throw;
-	}
-
-	// Extract expires_at
-	auto expires_val = yyjson_obj_get(response_root, "expires_at");
-	std::chrono::system_clock::time_point new_expires_at;
-	if (expires_val && yyjson_is_int(expires_val)) {
-		// Unix timestamp
-		auto expires_timestamp = yyjson_get_int(expires_val);
-		new_expires_at = std::chrono::system_clock::from_time_t(expires_timestamp);
-	} else if (expires_val && yyjson_is_str(expires_val)) {
-		// ISO 8601 string
-		string expires_str = yyjson_get_str(expires_val);
-		new_expires_at = ParseExpiresAt(expires_str);
-	} else {
-		// Default to 8 hours from now
-		new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
-	}
-
+	string registration_response_base64 = yyjson_get_str(registration_response_val);
 	yyjson_doc_free(response_doc);
 
-	// Store session state atomically and clear exchange flag
-	{
-		lock_guard<mutex> lock(session_lock);
-		session_token = new_session_token;
-		code_verifier = new_verifier;
-		token_expires_at = new_expires_at;
-		is_exchanging = false; // Exchange complete
+	// Step 3: Client finishes registration
+	auto reg_finish = OpaqueClientWrapper::RegistrationFinish(reg_start.state, // consumed by this call
+	                                                          registration_response_base64);
+	BOILSTREAM_LOG("PerformOpaqueRegistration: registration upload generated");
+
+	// Step 4: Send RegistrationUpload to server
+	string upload_url = url + "/auth/api/opaque-registration-finish";
+
+	auto upload_doc = yyjson_mut_doc_new(nullptr);
+	auto upload_obj = yyjson_mut_obj(upload_doc);
+	yyjson_mut_doc_set_root(upload_doc, upload_obj);
+	yyjson_mut_obj_add_strcpy(upload_doc, upload_obj, "registration_upload",
+	                          reg_finish.registration_upload_base64.c_str());
+
+	auto upload_body_str = yyjson_mut_write(upload_doc, 0, nullptr);
+	string upload_body(upload_body_str);
+	free(upload_body_str);
+	yyjson_mut_doc_free(upload_doc);
+
+	try {
+		HttpPost(upload_url, upload_body);
+	} catch (const std::exception &e) {
+		throw IOException("OPAQUE registration failed (upload): " + string(e.what()));
 	}
 
-	BOILSTREAM_LOG(
-	    "PerformTokenExchange: SUCCESS, token expires in "
-	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
-	    << " hours");
+	BOILSTREAM_LOG("PerformOpaqueRegistration: SUCCESS - registration complete");
 }
 
-void RestApiSecretStorage::RotateSessionToken() {
-	BOILSTREAM_LOG("RotateSessionToken: starting rotation");
+void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
+	BOILSTREAM_LOG("PerformOpaqueLogin: starting OPAQUE login");
 
-	// Get current verifier and session token
-	string current_token;
-	string current_verifier;
+	// Mark exchange as in progress
 	{
 		lock_guard<mutex> lock(session_lock);
-		current_token = session_token;
-		current_verifier = code_verifier;
+		is_exchanging = true;
 	}
 
-	if (current_token.empty() || current_verifier.empty()) {
-		throw IOException("Token rotation failed: No active session");
-	}
-
-	// Build rotation URL
+	// Build login URL
 	string url;
 	{
 		lock_guard<mutex> lock(endpoint_lock);
@@ -348,6 +315,8 @@ void RestApiSecretStorage::RotateSessionToken() {
 	}
 
 	if (url.empty()) {
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
 		throw InvalidInputException("Boilstream endpoint not configured");
 	}
 
@@ -357,66 +326,207 @@ void RestApiSecretStorage::RotateSessionToken() {
 		url = url.substr(0, secrets_pos);
 	}
 
-	url += "/auth/api/token-rotate";
+	// Compute user_id: SHA-256 hash of password (bootstrap_token or refresh_token)
+	// Following spec: user_id = lowercase_hex(SHA256(password))
+	char password_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(password.c_str(), password.size(), password_hash);
 
-	// Generate new code_verifier for next rotation
-	auto new_verifier = GenerateCodeVerifier();
-	auto new_challenge = ComputeCodeChallenge(new_verifier);
+	// Convert hash to lowercase hex string (64 characters)
+	string user_id;
+	user_id.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+		unsigned char byte = static_cast<unsigned char>(password_hash[i]);
+		user_id += hex_chars[(byte >> 4) & 0xF];
+		user_id += hex_chars[byte & 0xF];
+	}
+	BOILSTREAM_LOG("PerformOpaqueLogin: computed user_id=" << user_id.substr(0, 16) << "...");
 
-	// Prepare request body with new challenge for next rotation
+	// Step 1: Client starts login
+	auto login_start = OpaqueClientWrapper::LoginStart(password);
+	BOILSTREAM_LOG("PerformOpaqueLogin: credential request generated");
+
+	// Step 2: Send CredentialRequest to server with user_id
+	string login_url = url + "/auth/api/opaque-login-start";
+
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
-
-	yyjson_mut_obj_add_strcpy(doc, obj, "session_token", current_token.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "code_verifier", current_verifier.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "new_code_challenge", new_challenge.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "code_challenge_method", "S256");
+	yyjson_mut_obj_add_strcpy(doc, obj, "user_id", user_id.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "credential_request", login_start.credential_request_base64.c_str());
 
 	auto body_str = yyjson_mut_write(doc, 0, nullptr);
 	string body(body_str);
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
-	// Make HTTP POST request
+	BOILSTREAM_LOG("PerformOpaqueLogin: login-start request: " << body);
+
 	string response;
 	try {
-		response = HttpPost(url, body);
+		response = HttpPost(login_url, body);
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("RotateSessionToken: HttpPost exception: " << e.what());
-		throw IOException("Token rotation failed: " + string(e.what()));
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		opaque_free_login_state(login_start.state);
+		throw IOException("OPAQUE login failed (server request): " + string(e.what()));
 	}
 
-	// Parse response
+	BOILSTREAM_LOG("PerformOpaqueLogin: login-start response: " << response);
+
+	// Parse server response
 	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
 	if (!response_doc) {
-		throw IOException("Token rotation failed: Invalid JSON response");
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		opaque_free_login_state(login_start.state);
+		throw IOException("OPAQUE login failed: Invalid JSON response from server");
 	}
 
 	auto response_root = yyjson_doc_get_root(response_doc);
-	if (!response_root || !yyjson_is_obj(response_root)) {
+	auto credential_response_val = yyjson_obj_get(response_root, "credential_response");
+	if (!credential_response_val || !yyjson_is_str(credential_response_val)) {
 		yyjson_doc_free(response_doc);
-		throw IOException("Token rotation failed: Invalid response format");
+		lock_guard<mutex> lock(session_lock);
+		is_exchanging = false;
+		opaque_free_login_state(login_start.state);
+		throw IOException("OPAQUE login failed: No credential_response in server response");
 	}
 
-	// Extract new session_token
-	auto token_val = yyjson_obj_get(response_root, "session_token");
-	if (!token_val || !yyjson_is_str(token_val)) {
-		yyjson_doc_free(response_doc);
-		throw IOException("Token rotation failed: No session_token in response");
-	}
-	string new_session_token = yyjson_get_str(token_val);
+	string credential_response_base64 = yyjson_get_str(credential_response_val);
 
-	// Validate token format before storing
+	// Extract state_id if present (required by server for stateful OPAQUE)
+	string state_id;
+	auto state_id_val = yyjson_obj_get(response_root, "state_id");
+	if (state_id_val && yyjson_is_str(state_id_val)) {
+		state_id = yyjson_get_str(state_id_val);
+		BOILSTREAM_LOG("PerformOpaqueLogin: extracted state_id=" << state_id);
+	} else {
+		BOILSTREAM_LOG("PerformOpaqueLogin: WARNING - state_id not found in server response");
+	}
+
+	yyjson_doc_free(response_doc);
+
+	// Step 3: Client finishes login
+	auto login_finish = OpaqueClientWrapper::LoginFinish(login_start.state, // consumed by this call
+	                                                     credential_response_base64);
+	BOILSTREAM_LOG("PerformOpaqueLogin: credential finalization generated");
+
+	// Decode session_key and export_key from base64
+	auto session_key_decoded = Blob::FromBase64(string_t(login_finish.session_key_base64));
+	auto export_key_decoded = Blob::FromBase64(string_t(login_finish.export_key_base64));
+
+	// Store session_key early so HttpPost can use it for response decryption
+	// The server sends encrypted responses during login-finish
+	// We're still in the is_exchanging=true state, so other operations are blocked
+	{
+		lock_guard<mutex> lock(session_lock);
+		session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
+		BOILSTREAM_LOG("PerformOpaqueLogin: session_key stored (length=" << session_key.size() << ")");
+	}
+
+	// Step 4: Send CredentialFinalization to server
+	string finalize_url = url + "/auth/api/opaque-login-finish";
+
+	auto final_doc = yyjson_mut_doc_new(nullptr);
+	auto final_obj = yyjson_mut_obj(final_doc);
+	yyjson_mut_doc_set_root(final_doc, final_obj);
+
+	// Add state_id if it was provided by server (required for stateful OPAQUE)
+	BOILSTREAM_LOG("PerformOpaqueLogin: About to add state_id, empty=" << state_id.empty() << ", value=" << state_id);
+	if (!state_id.empty()) {
+		yyjson_mut_obj_add_strcpy(final_doc, final_obj, "state_id", state_id.c_str());
+		BOILSTREAM_LOG("PerformOpaqueLogin: Added state_id to finalization request");
+	} else {
+		BOILSTREAM_LOG("PerformOpaqueLogin: ERROR - state_id is EMPTY, not adding to request");
+	}
+
+	yyjson_mut_obj_add_strcpy(final_doc, final_obj, "credential_finalization",
+	                          login_finish.credential_finalization_base64.c_str());
+
+	auto final_body_str = yyjson_mut_write(final_doc, 0, nullptr);
+	string final_body(final_body_str);
+	free(final_body_str);
+	yyjson_mut_doc_free(final_doc);
+
+	BOILSTREAM_LOG("PerformOpaqueLogin: login-finish request: " << final_body);
+
+	string final_response;
 	try {
-		ValidateTokenFormat(new_session_token, "Token rotation");
+		final_response = HttpPost(finalize_url, final_body);
 	} catch (const std::exception &e) {
-		yyjson_doc_free(response_doc);
-		throw;
+		lock_guard<mutex> lock(session_lock);
+		session_key.clear(); // Clear session_key on error
+		is_exchanging = false;
+		throw IOException("OPAQUE login failed (finalization): " + string(e.what()));
+	}
+
+	BOILSTREAM_LOG("PerformOpaqueLogin: login-finish response: " << final_response);
+
+	// Parse finalization response (contains access_token and expires_at)
+	auto final_response_doc = yyjson_read(final_response.c_str(), final_response.size(), 0);
+	if (!final_response_doc) {
+		lock_guard<mutex> lock(session_lock);
+		session_key.clear(); // Clear session_key on error
+		is_exchanging = false;
+		throw IOException("OPAQUE login failed: Invalid finalization response from server");
+	}
+
+	auto final_response_root = yyjson_doc_get_root(final_response_doc);
+
+	// Check if response indicates an error (success=false or error field present)
+	auto success_val = yyjson_obj_get(final_response_root, "success");
+	auto error_val = yyjson_obj_get(final_response_root, "error");
+
+	if ((success_val && yyjson_is_bool(success_val) && !yyjson_get_bool(success_val)) ||
+	    (error_val && yyjson_is_str(error_val))) {
+		string error_msg = "Unknown error";
+		if (error_val && yyjson_is_str(error_val)) {
+			error_msg = yyjson_get_str(error_val);
+		}
+		yyjson_doc_free(final_response_doc);
+		lock_guard<mutex> lock(session_lock);
+		session_key.clear(); // Clear session_key on error
+		is_exchanging = false;
+		throw IOException("OPAQUE login failed: " + error_msg);
+	}
+
+	auto access_token_val = yyjson_obj_get(final_response_root, "access_token");
+	if (!access_token_val || !yyjson_is_str(access_token_val)) {
+		yyjson_doc_free(final_response_doc);
+		lock_guard<mutex> lock(session_lock);
+		session_key.clear(); // Clear session_key on error
+		is_exchanging = false;
+		throw IOException("OPAQUE login failed: No access_token in finalization response");
+	}
+
+	string new_access_token = yyjson_get_str(access_token_val);
+
+	// Validate access_token format per SECURITY_SPECIFICATION.md:1309
+	// Must be exactly 64 lowercase hexadecimal characters
+	if (new_access_token.length() != 64) {
+		yyjson_doc_free(final_response_doc);
+		lock_guard<mutex> lock(session_lock);
+		session_key.clear(); // Clear session_key on error
+		is_exchanging = false;
+		throw IOException("OPAQUE login failed: Invalid access_token format - must be 64 characters (got " +
+		                  std::to_string(new_access_token.length()) + ")");
+	}
+
+	// Validate all characters are lowercase hexadecimal
+	for (size_t i = 0; i < new_access_token.length(); i++) {
+		char c = new_access_token[i];
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+			yyjson_doc_free(final_response_doc);
+			lock_guard<mutex> lock(session_lock);
+			session_key.clear(); // Clear session_key on error
+			is_exchanging = false;
+			throw IOException("OPAQUE login failed: Invalid access_token format - must be lowercase hexadecimal");
+		}
 	}
 
 	// Extract expires_at
-	auto expires_val = yyjson_obj_get(response_root, "expires_at");
+	auto expires_val = yyjson_obj_get(final_response_root, "expires_at");
 	std::chrono::system_clock::time_point new_expires_at;
 	if (expires_val && yyjson_is_int(expires_val)) {
 		auto expires_timestamp = yyjson_get_int(expires_val);
@@ -428,18 +538,36 @@ void RestApiSecretStorage::RotateSessionToken() {
 		new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
 	}
 
-	yyjson_doc_free(response_doc);
+	// Extract region (defaults to "us-east-1" if not provided)
+	string new_region = "us-east-1";
+	auto region_val = yyjson_obj_get(final_response_root, "region");
+	if (region_val && yyjson_is_str(region_val)) {
+		new_region = yyjson_get_str(region_val);
+	}
 
-	// Update session state atomically with new verifier for next rotation
+	yyjson_doc_free(final_response_doc);
+
+	// Store session state atomically
 	{
 		lock_guard<mutex> lock(session_lock);
-		session_token = new_session_token;
-		code_verifier = new_verifier; // Store new verifier - server has matching challenge
+		access_token = new_access_token;
+
+		// Store OPAQUE session_key and refresh_token (convert string to vector<uint8_t>)
+		session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
+		refresh_token.assign(export_key_decoded.begin(), export_key_decoded.end());
+
+		// Reset sequence counter (starts at 0 for new session)
+		client_sequence = 0;
+
+		// Store region from server response
+		region = new_region;
+
 		token_expires_at = new_expires_at;
+		is_exchanging = false;
 	}
 
 	BOILSTREAM_LOG(
-	    "RotateSessionToken: SUCCESS, new token expires in "
+	    "PerformOpaqueLogin: SUCCESS, token expires in "
 	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
 	    << " hours");
 }
@@ -493,6 +621,742 @@ string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction>
 	return GetUserContextForConnection(context.GetConnectionId());
 }
 
+vector<uint8_t> RestApiSecretStorage::DeriveSigningKey(const vector<uint8_t> &session_key_param) {
+	// HKDF-SHA256 key derivation for request signing (base key) - 32 bytes
+	// Following RFC 5869 and SECURITY_SPECIFICATION.md
+	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
+	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
+	// Output: derived_key = T(1)[0:32]
+
+	if (session_key_param.empty()) {
+		throw IOException("Cannot derive signing key: session_key not initialized");
+	}
+
+	// Step 1: HKDF-Extract
+	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
+	string salt = "boilstream-session-v1";
+	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
+	                                        reinterpret_cast<const char *>(session_key_param.data()),
+	                                        session_key_param.size(), prk);
+
+	// Step 2: HKDF-Expand
+	// T(1) = HMAC-SHA256(PRK, info || 0x01)
+	string info = "request-integrity-v1";
+	string info_with_counter = info + string(1, (char)0x01);
+	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
+	                                        derived);
+
+	// Return 32-byte key (T(1))
+	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
+
+	// Securely zero intermediate key material
+	SECURE_ZERO_MEMORY(prk, sizeof(prk));
+	SECURE_ZERO_MEMORY(derived, sizeof(derived));
+
+	return result;
+}
+
+vector<uint8_t> RestApiSecretStorage::DeriveEncryptionKey(const vector<uint8_t> &session_key_param) {
+	// HKDF-SHA256 key derivation for response decryption - 32 bytes
+	// Following RFC 5869 and SECURITY_SPECIFICATION.md
+	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
+	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
+	// Output: derived_key = T(1)[0:32]
+
+	if (session_key_param.empty()) {
+		throw IOException("Cannot derive encryption key: session_key not initialized");
+	}
+
+	// Step 1: HKDF-Extract
+	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
+	string salt = "boilstream-session-v1";
+	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
+	                                        reinterpret_cast<const char *>(session_key_param.data()),
+	                                        session_key_param.size(), prk);
+
+	// Step 2: HKDF-Expand
+	// T(1) = HMAC-SHA256(PRK, info || 0x01)
+	string info = "response-encryption-v1";
+	string info_with_counter = info + string(1, (char)0x01);
+	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
+	                                        derived);
+
+	// Return 32-byte key (T(1))
+	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
+
+	// Securely zero intermediate key material
+	SECURE_ZERO_MEMORY(prk, sizeof(prk));
+	SECURE_ZERO_MEMORY(derived, sizeof(derived));
+
+	return result;
+}
+
+vector<uint8_t> RestApiSecretStorage::DeriveIntegrityKey(const vector<uint8_t> &session_key_param) {
+	// HKDF-SHA256 key derivation for response integrity verification - 32 bytes
+	// Following RFC 5869 and SECURITY_SPECIFICATION.md
+	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
+	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
+	// Output: derived_key = T(1)[0:32]
+
+	if (session_key_param.empty()) {
+		throw IOException("Cannot derive integrity key: session_key not initialized");
+	}
+
+	// Step 1: HKDF-Extract
+	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
+	string salt = "boilstream-session-v1";
+	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
+	                                        reinterpret_cast<const char *>(session_key_param.data()),
+	                                        session_key_param.size(), prk);
+
+	// Step 2: HKDF-Expand
+	// T(1) = HMAC-SHA256(PRK, info || 0x01)
+	string info = "response-integrity-v1";
+	string info_with_counter = info + string(1, (char)0x01);
+	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
+	                                        derived);
+
+	// Return 32-byte key (T(1))
+	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
+
+	// Securely zero intermediate key material
+	SECURE_ZERO_MEMORY(prk, sizeof(prk));
+	SECURE_ZERO_MEMORY(derived, sizeof(derived));
+
+	return result;
+}
+
+RestApiSecretStorage::SessionSnapshot RestApiSecretStorage::GetSessionSnapshot() {
+	// Thread-safe extraction of session state
+	SessionSnapshot snapshot;
+	{
+		lock_guard<mutex> lock(session_lock);
+		snapshot.access_token = access_token;
+		snapshot.session_key = session_key;
+		snapshot.region = region;
+		snapshot.sequence = client_sequence;
+		snapshot.has_session_key = !session_key.empty();
+
+		// Increment sequence counter after reading
+		client_sequence++;
+	}
+	return snapshot;
+}
+
+case_insensitive_map_t<string> RestApiSecretStorage::ExtractBoilstreamHeaders(const HTTPHeaders &headers) {
+	// Extract ALL x-boilstream-* headers from response
+	// CRITICAL: We must extract ALL boilstream headers because they're included in the signature
+	// Using a whitelist would miss headers and cause signature verification to fail
+	case_insensitive_map_t<string> header_map;
+
+	// Iterate through all headers and extract any starting with "x-boilstream-"
+	for (const auto &header_pair : headers) {
+		string header_name_lower = StringUtil::Lower(header_pair.first);
+		if (header_name_lower.find("x-boilstream-") == 0) {
+			header_map[header_name_lower] = header_pair.second;
+		}
+	}
+
+	return header_map;
+}
+
+HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method, const string &url,
+                                                            const string &body) {
+	// Get session snapshot (thread-safe, increments sequence)
+	auto snapshot = GetSessionSnapshot();
+
+	if (!snapshot.has_session_key) {
+		throw IOException("BuildAuthenticatedHeaders: No active session");
+	}
+
+	// Get current timestamp
+	auto now = std::chrono::system_clock::now();
+	auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+	// Sign request
+	auto signing_result = SignRequest(method, url, body, timestamp, snapshot.sequence, snapshot.session_key,
+	                                  snapshot.access_token, snapshot.region);
+
+	// Build headers
+	HTTPHeaders headers(db);
+	headers.Insert("Authorization", "Bearer " + snapshot.access_token);
+	headers.Insert("Content-Type", "application/json");
+	headers.Insert("X-Boilstream-Date", signing_result.date_time);
+	headers.Insert("X-Boilstream-Sequence", std::to_string(snapshot.sequence));
+	headers.Insert("X-Boilstream-Signature", signing_result.signature);
+	headers.Insert("X-Boilstream-Credential", signing_result.credential_scope);
+	headers.Insert("X-Boilstream-Ciphers", "0x0001, 0x0002");
+	headers.Insert("X-Boilstream-Cipher-Version", "1");
+
+	return headers;
+}
+
+void RestApiSecretStorage::VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
+                                                       const HTTPHeaders &response_headers,
+                                                       const vector<uint8_t> &session_key_param) {
+	// Extract boilstream headers and delegate to existing verification
+	auto header_map = ExtractBoilstreamHeaders(response_headers);
+	VerifyResponseSignature(response_body, status_code, header_map, session_key_param);
+}
+
+void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, uint16_t status_code,
+                                                   const case_insensitive_map_t<string> &headers,
+                                                   const vector<uint8_t> &session_key_param) {
+	// Verify response signature per SECURITY_SPECIFICATION.md:878-890
+	// This implements the client-side response verification
+
+	BOILSTREAM_LOG("VerifyResponseSignature: status=" << status_code);
+
+	// Check if response has signature header
+	auto sig_it = headers.find("x-boilstream-response-signature");
+	if (sig_it == headers.end()) {
+		// No signature header - this might be a login-start response (before session_key available)
+		BOILSTREAM_LOG("VerifyResponseSignature: No signature header present (OK for login-start)");
+		return;
+	}
+
+	string received_signature_b64 = sig_it->second;
+	BOILSTREAM_LOG("VerifyResponseSignature: Found signature header");
+
+	// Debug: Log ALL headers received (before filtering)
+	BOILSTREAM_LOG("VerifyResponseSignature: ALL headers received (" << headers.size() << " total):");
+	for (const auto &header : headers) {
+		BOILSTREAM_LOG("  " << header.first << ": " << header.second);
+	}
+
+	// Derive integrity key from session_key
+	auto integrity_key = DeriveIntegrityKey(session_key_param);
+
+	// Hash response body (SHA-256, lowercase hex)
+	char body_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(response_body.c_str(), response_body.size(), body_hash);
+
+	// Convert to lowercase hex string
+	string hashed_payload;
+	hashed_payload.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+		unsigned char byte = static_cast<unsigned char>(body_hash[i]);
+		hashed_payload += hex_chars[(byte >> 4) & 0xF];
+		hashed_payload += hex_chars[byte & 0xF];
+	}
+
+	// Build canonical response format per SECURITY_SPECIFICATION.md:616-625
+	// Response Canonical Format (4 components):
+	// HTTPStatusCode
+	// CanonicalHeaders
+	// SignedHeaders
+	// HashedPayload
+
+	// 1. Status code
+	string canonical_response = std::to_string(status_code) + "\n";
+
+	// 2. Build canonical headers (ALL x-boilstream-* headers except x-boilstream-response-signature)
+	//    Sorted lexicographically, lowercase names, with trailing newline
+	vector<std::pair<string, string>> boilstream_headers;
+	for (const auto &header : headers) {
+		string header_name_lower = StringUtil::Lower(header.first);
+		// Include all x-boilstream-* headers except the signature itself
+		if (header_name_lower.find("x-boilstream-") == 0 && header_name_lower != "x-boilstream-response-signature") {
+			boilstream_headers.push_back({header_name_lower, header.second});
+		}
+	}
+	std::sort(boilstream_headers.begin(), boilstream_headers.end());
+
+	string canonical_headers;
+	string signed_headers;
+	for (size_t i = 0; i < boilstream_headers.size(); i++) {
+		canonical_headers += boilstream_headers[i].first + ":" + boilstream_headers[i].second + "\n";
+		if (i > 0)
+			signed_headers += ";";
+		signed_headers += boilstream_headers[i].first;
+		BOILSTREAM_LOG("VerifyResponseSignature: Response header[" << i << "]: " << boilstream_headers[i].first << "="
+		                                                           << boilstream_headers[i].second);
+	}
+
+	canonical_response += canonical_headers;
+	canonical_response += "\n"; // Blank line after canonical headers
+
+	// 3. Signed headers list
+	canonical_response += signed_headers + "\n";
+
+	// 4. Hashed payload
+	canonical_response += hashed_payload;
+
+	BOILSTREAM_LOG("VerifyResponseSignature: Canonical response built");
+	BOILSTREAM_LOG("VerifyResponseSignature: Canonical response:\n" << canonical_response);
+	BOILSTREAM_LOG("VerifyResponseSignature: Received signature (b64): " << received_signature_b64);
+
+	// Compute expected signature: HMAC-SHA256(integrity_key, canonical_response)
+	char expected_signature[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
+	                                        canonical_response.c_str(), canonical_response.size(), expected_signature);
+
+	// Encode expected signature as base64
+	string expected_signature_str(expected_signature, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
+	string expected_signature_b64 = Blob::ToBase64(string_t(expected_signature_str));
+
+	BOILSTREAM_LOG("VerifyResponseSignature: Expected signature (b64): " << expected_signature_b64);
+
+	// Constant-time comparison (CRITICAL for security)
+	// Using simple byte-by-byte comparison with constant time
+	if (received_signature_b64.length() != expected_signature_b64.length()) {
+		SECURE_ZERO_MEMORY(expected_signature, sizeof(expected_signature));
+		throw IOException("Response signature verification failed: signature length mismatch");
+	}
+
+	// Constant-time byte comparison
+	volatile uint8_t diff = 0;
+	for (size_t i = 0; i < received_signature_b64.length(); i++) {
+		diff |= (received_signature_b64[i] ^ expected_signature_b64[i]);
+	}
+
+	// Securely zero expected signature
+	SECURE_ZERO_MEMORY(expected_signature, sizeof(expected_signature));
+
+	if (diff != 0) {
+		throw IOException("Response signature verification failed: HMAC mismatch (potential tampering detected)");
+	}
+
+	// Validate timestamp (must be within 60 seconds)
+	auto date_it = headers.find("x-boilstream-date");
+	if (date_it != headers.end()) {
+		string timestamp_str = date_it->second;
+		// Parse ISO8601 timestamp: YYYYMMDDTHHMMSSZ
+		// Manual parsing (std::get_time not available in C++11)
+		if (timestamp_str.length() == 16 && timestamp_str[8] == 'T' && timestamp_str[15] == 'Z') {
+			try {
+				int year = std::stoi(timestamp_str.substr(0, 4));
+				int month = std::stoi(timestamp_str.substr(4, 2));
+				int day = std::stoi(timestamp_str.substr(6, 2));
+				int hour = std::stoi(timestamp_str.substr(9, 2));
+				int minute = std::stoi(timestamp_str.substr(11, 2));
+				int second = std::stoi(timestamp_str.substr(13, 2));
+
+				std::tm tm = {};
+				tm.tm_year = year - 1900;
+				tm.tm_mon = month - 1;
+				tm.tm_mday = day;
+				tm.tm_hour = hour;
+				tm.tm_min = minute;
+				tm.tm_sec = second;
+				tm.tm_isdst = 0;
+
+				time_t response_time = 0;
+#ifdef _WIN32
+				response_time = _mkgmtime(&tm);
+#else
+				response_time = timegm(&tm);
+#endif
+				if (response_time != -1) {
+					auto response_tp = std::chrono::system_clock::from_time_t(response_time);
+					auto now = std::chrono::system_clock::now();
+					auto diff_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+					                        now > response_tp ? now - response_tp : response_tp - now)
+					                        .count();
+
+					if (diff_seconds > 60) {
+						throw IOException("Response signature verification failed: timestamp outside 60-second window");
+					}
+				}
+			} catch (...) {
+				// Timestamp parsing failed - log but don't fail verification
+				BOILSTREAM_LOG("VerifyResponseSignature: Failed to parse timestamp");
+			}
+		}
+	}
+
+	BOILSTREAM_LOG("VerifyResponseSignature: Signature verified successfully");
+}
+
+string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_body,
+                                             const vector<uint8_t> &session_key_param, uint16_t cipher_suite) {
+	// Decrypt encrypted response per SECURITY_SPECIFICATION.md:988-1048
+	// Order of operations (CRITICAL):
+	// 1. Parse response JSON
+	// 2. Validate cipher suite (before expensive operations)
+	// 3. Derive keys from session_key
+	// 4. Decode base64/hex fields
+	// 5. Verify HMAC BEFORE decryption
+	// 6. Decrypt ciphertext (only after HMAC verification succeeds)
+
+	BOILSTREAM_LOG("DecryptResponse: Starting decryption, cipher_suite=0x" << std::hex << cipher_suite << std::dec);
+
+	// 1. Parse response JSON to extract nonce, ciphertext, hmac
+	yyjson_doc *doc = yyjson_read(encrypted_response_body.c_str(), encrypted_response_body.size(), 0);
+	if (!doc) {
+		throw IOException("DecryptResponse: Failed to parse encrypted response JSON");
+	}
+	yyjson_val *root = yyjson_doc_get_root(doc);
+	if (!root || !yyjson_is_obj(root)) {
+		yyjson_doc_free(doc);
+		throw IOException("DecryptResponse: Invalid encrypted response structure");
+	}
+
+	// Extract fields
+	yyjson_val *encrypted_val = yyjson_obj_get(root, "encrypted");
+	yyjson_val *nonce_val = yyjson_obj_get(root, "nonce");
+	yyjson_val *ciphertext_val = yyjson_obj_get(root, "ciphertext");
+	yyjson_val *hmac_val = yyjson_obj_get(root, "hmac");
+
+	if (!encrypted_val || !yyjson_is_bool(encrypted_val) || !yyjson_get_bool(encrypted_val)) {
+		yyjson_doc_free(doc);
+		throw IOException("DecryptResponse: Response is not encrypted (encrypted field missing or false)");
+	}
+
+	if (!nonce_val || !yyjson_is_str(nonce_val)) {
+		yyjson_doc_free(doc);
+		throw IOException("DecryptResponse: Missing or invalid nonce field");
+	}
+	if (!ciphertext_val || !yyjson_is_str(ciphertext_val)) {
+		yyjson_doc_free(doc);
+		throw IOException("DecryptResponse: Missing or invalid ciphertext field");
+	}
+	if (!hmac_val || !yyjson_is_str(hmac_val)) {
+		yyjson_doc_free(doc);
+		throw IOException("DecryptResponse: Missing or invalid hmac field");
+	}
+
+	string nonce_b64 = yyjson_get_str(nonce_val);
+	string ciphertext_b64 = yyjson_get_str(ciphertext_val);
+	string hmac_hex = yyjson_get_str(hmac_val);
+
+	yyjson_doc_free(doc);
+
+	BOILSTREAM_LOG("DecryptResponse: Parsed JSON - nonce_len=" << nonce_b64.size()
+	                                                           << ", ciphertext_len=" << ciphertext_b64.size()
+	                                                           << ", hmac_len=" << hmac_hex.size());
+
+	// 2. Validate cipher suite early (before expensive operations)
+	if (cipher_suite != 0x0001 && cipher_suite != 0x0002) {
+		throw IOException("DecryptResponse: Unsupported cipher suite 0x" + std::to_string(cipher_suite));
+	}
+
+	// 3. Derive keys from session_key
+	auto encryption_key = DeriveEncryptionKey(session_key_param);
+	auto integrity_key = DeriveIntegrityKey(session_key_param);
+
+	// 4. Decode fields
+	// Decode nonce (base64 → 12 bytes)
+	string nonce_bytes_str = Blob::FromBase64(nonce_b64);
+	if (nonce_bytes_str.size() != 12) {
+		throw IOException("DecryptResponse: Invalid nonce size (expected 12 bytes, got " +
+		                  std::to_string(nonce_bytes_str.size()) + ")");
+	}
+	vector<uint8_t> nonce_bytes(nonce_bytes_str.begin(), nonce_bytes_str.end());
+
+	// Decode ciphertext (base64 → N+16 bytes, where 16 is AEAD tag)
+	string ciphertext_with_tag_str = Blob::FromBase64(ciphertext_b64);
+	if (ciphertext_with_tag_str.size() < 16) {
+		throw IOException("DecryptResponse: Invalid ciphertext size (must be at least 16 bytes for AEAD tag)");
+	}
+	vector<uint8_t> ciphertext_with_tag(ciphertext_with_tag_str.begin(), ciphertext_with_tag_str.end());
+
+	// Decode hmac (lowercase hex → 32 bytes)
+	if (hmac_hex.size() != 64) {
+		throw IOException("DecryptResponse: Invalid HMAC size (expected 64 hex chars, got " +
+		                  std::to_string(hmac_hex.size()) + ")");
+	}
+	vector<uint8_t> hmac_bytes;
+	hmac_bytes.reserve(32);
+	for (size_t i = 0; i < 64; i += 2) {
+		string byte_str = hmac_hex.substr(i, 2);
+		uint8_t byte_val = static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16));
+		hmac_bytes.push_back(byte_val);
+	}
+
+	BOILSTREAM_LOG("DecryptResponse: Decoded - nonce=" << nonce_bytes.size()
+	                                                   << "B, ciphertext=" << ciphertext_with_tag.size()
+	                                                   << "B, hmac=" << hmac_bytes.size() << "B");
+
+	// 5. Verify HMAC BEFORE decryption (CRITICAL for security)
+	// hmac_input = nonce_bytes || ciphertext_with_tag
+	vector<uint8_t> hmac_input;
+	hmac_input.reserve(nonce_bytes.size() + ciphertext_with_tag.size());
+	hmac_input.insert(hmac_input.end(), nonce_bytes.begin(), nonce_bytes.end());
+	hmac_input.insert(hmac_input.end(), ciphertext_with_tag.begin(), ciphertext_with_tag.end());
+
+	char expected_hmac[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
+	                                        reinterpret_cast<const char *>(hmac_input.data()), hmac_input.size(),
+	                                        expected_hmac);
+
+	// Constant-time comparison (CRITICAL for security)
+	volatile uint8_t diff = 0;
+	for (size_t i = 0; i < 32; i++) {
+		diff |= (hmac_bytes[i] ^ static_cast<uint8_t>(expected_hmac[i]));
+	}
+
+	// Securely zero expected HMAC
+	SECURE_ZERO_MEMORY(expected_hmac, sizeof(expected_hmac));
+
+	if (diff != 0) {
+		BOILSTREAM_LOG("DecryptResponse: HMAC verification FAILED (tampering detected)");
+		throw IOException("DecryptResponse: Response tampering detected (HMAC verification failed)");
+	}
+
+	BOILSTREAM_LOG("DecryptResponse: HMAC verified successfully");
+
+	// 6. Decrypt ciphertext using AEAD (only after HMAC verification succeeds)
+	// ciphertext_with_tag format: ciphertext || 16-byte AEAD tag
+	// Per SECURITY_SPECIFICATION.md: AES-256-GCM produces ciphertext with 16-byte tag appended
+
+	if (cipher_suite == 0x0001) {
+		// AES-256-GCM AEAD decryption
+		BOILSTREAM_LOG("DecryptResponse: Using AES-256-GCM AEAD");
+
+		// Split ciphertext and tag (last 16 bytes is AEAD authentication tag)
+		constexpr size_t AEAD_TAG_SIZE = 16;
+		if (ciphertext_with_tag.size() < AEAD_TAG_SIZE) {
+			throw IOException("DecryptResponse: Ciphertext too short for AEAD tag");
+		}
+
+		size_t ciphertext_len = ciphertext_with_tag.size() - AEAD_TAG_SIZE;
+		vector<uint8_t> ciphertext_only(ciphertext_with_tag.begin(), ciphertext_with_tag.begin() + ciphertext_len);
+		vector<uint8_t> aead_tag(ciphertext_with_tag.begin() + ciphertext_len, ciphertext_with_tag.end());
+
+		BOILSTREAM_LOG("DecryptResponse: ciphertext=" << ciphertext_len << "B, tag=" << aead_tag.size() << "B");
+
+		// Create AES-256-GCM decryption state
+		duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_state(EncryptionTypes::CipherType::GCM,
+		                                                          32 // 256-bit key (32 bytes)
+		);
+
+		// Initialize decryption with nonce, key, and empty AAD (no additional authenticated data)
+		aes_state.InitializeDecryption(nonce_bytes.data(), nonce_bytes.size(),       // iv (nonce): 12 bytes
+		                               encryption_key.data(), encryption_key.size(), // key: 32 bytes
+		                               nullptr, 0 // aad: empty (no additional authenticated data)
+		);
+
+		// Allocate output buffer for plaintext
+		vector<uint8_t> plaintext_bytes(ciphertext_len);
+
+		// Process ciphertext (decrypt without verifying tag yet)
+		size_t processed = aes_state.Process(ciphertext_only.data(), ciphertext_only.size(), plaintext_bytes.data(),
+		                                     plaintext_bytes.size());
+
+		if (processed != ciphertext_len) {
+			throw IOException("DecryptResponse: AES-GCM Process size mismatch");
+		}
+
+		// Finalize and verify AEAD authentication tag (CRITICAL: verifies authenticity)
+		// This throws if tag verification fails (tampering/corruption detected)
+		aes_state.Finalize(plaintext_bytes.data(), 0,       // output buffer (already written by Process)
+		                   aead_tag.data(), aead_tag.size() // expected tag from ciphertext
+		);
+
+		BOILSTREAM_LOG("DecryptResponse: AEAD tag verified successfully");
+
+		// Convert to string
+		string plaintext(reinterpret_cast<char *>(plaintext_bytes.data()), plaintext_bytes.size());
+
+		// Securely zero keys and sensitive data
+		SECURE_ZERO_MEMORY(encryption_key.data(), encryption_key.size());
+		SECURE_ZERO_MEMORY(integrity_key.data(), integrity_key.size());
+		SECURE_ZERO_MEMORY(plaintext_bytes.data(), plaintext_bytes.size());
+
+		BOILSTREAM_LOG("DecryptResponse: Decryption successful, plaintext_len=" << plaintext.size());
+
+		return plaintext;
+
+	} else {
+		// ChaCha20-Poly1305 AEAD decryption (cipher_suite == 0x0002)
+		BOILSTREAM_LOG("DecryptResponse: ChaCha20-Poly1305 not yet implemented");
+		// TODO: Implement ChaCha20-Poly1305 when needed
+		throw IOException("DecryptResponse: ChaCha20-Poly1305 not yet implemented");
+	}
+}
+
+bool RestApiSecretStorage::IsResponseEncrypted(const case_insensitive_map_t<string> &headers) {
+	// Check for X-Boilstream-Encrypted header
+	auto it = headers.find("x-boilstream-encrypted");
+	if (it == headers.end()) {
+		// Header not present - response is not encrypted
+		return false;
+	}
+
+	// Check if value is "true" (case-insensitive)
+	string value = it->second;
+	std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+	return value == "true";
+}
+
+uint16_t RestApiSecretStorage::ParseCipherSuite(const case_insensitive_map_t<string> &headers) {
+	// Extract X-Boilstream-Cipher header
+	auto it = headers.find("x-boilstream-cipher");
+	if (it == headers.end()) {
+		throw IOException("ParseCipherSuite: X-Boilstream-Cipher header missing from encrypted response");
+	}
+
+	string cipher_str = it->second;
+	BOILSTREAM_LOG("ParseCipherSuite: Found cipher header: " << cipher_str);
+
+	// Parse cipher suite (format: "0x0001" or "0x0002")
+	if (cipher_str.size() < 3 || cipher_str.substr(0, 2) != "0x") {
+		throw IOException("ParseCipherSuite: Invalid cipher suite format '" + cipher_str + "' (expected 0xNNNN)");
+	}
+
+	// Parse hex value
+	try {
+		uint16_t cipher_suite = static_cast<uint16_t>(std::stoul(cipher_str, nullptr, 16));
+		BOILSTREAM_LOG("ParseCipherSuite: Parsed cipher suite: 0x" << std::hex << cipher_suite << std::dec);
+
+		// Validate supported cipher suites
+		if (cipher_suite != 0x0001 && cipher_suite != 0x0002) {
+			throw IOException("ParseCipherSuite: Unsupported cipher suite 0x" + std::to_string(cipher_suite) +
+			                  " (only 0x0001 and 0x0002 supported)");
+		}
+
+		return cipher_suite;
+	} catch (const std::invalid_argument &e) {
+		throw IOException("ParseCipherSuite: Failed to parse cipher suite '" + cipher_str + "': " + e.what());
+	} catch (const std::out_of_range &e) {
+		throw IOException("ParseCipherSuite: Cipher suite value out of range '" + cipher_str + "': " + e.what());
+	}
+}
+
+RestApiSecretStorage::SigningResult
+RestApiSecretStorage::SignRequest(const string &method, const string &url, const string &body, uint64_t timestamp,
+                                  uint64_t sequence, const vector<uint8_t> &session_key_param,
+                                  const string &access_token_param, const string &region_param) {
+	// AWS SigV4-style request signing
+	// Following SECURITY_SPECIFICATION.md format
+
+	// Derive base signing key from session_key using HKDF
+	auto base_signing_key = DeriveSigningKey(session_key_param);
+
+	// Format timestamp as ISO8601: YYYYMMDDTHHMMSSZ
+	auto timestamp_time_t = static_cast<time_t>(timestamp);
+	std::tm timestamp_tm;
+#ifdef _WIN32
+	gmtime_s(&timestamp_tm, &timestamp_time_t);
+#else
+	gmtime_r(&timestamp_time_t, &timestamp_tm);
+#endif
+
+	char date_time_buf[32];
+	std::strftime(date_time_buf, sizeof(date_time_buf), "%Y%m%dT%H%M%SZ", &timestamp_tm);
+	string date_time_str(date_time_buf);
+
+	// Extract date part: YYYYMMDD
+	char date_buf[16];
+	std::strftime(date_buf, sizeof(date_buf), "%Y%m%d", &timestamp_tm);
+	string date_str(date_buf);
+
+	// Get access token prefix (first 8 characters) and region
+	// Validate access_token length before substr
+	if (access_token_param.length() < 8) {
+		throw IOException("SignRequest: access_token too short (expected 64 chars, got " +
+		                  std::to_string(access_token_param.length()) + ")");
+	}
+	string access_token_prefix = access_token_param.substr(0, 8);
+	string current_region = region_param.empty() ? "us-east-1" : region_param;
+
+	// Build credential scope: <access-token-prefix>/<date>/<region>/<service>/boilstream_request
+	string service = "secrets";
+	string credential_scope =
+	    access_token_prefix + "/" + date_str + "/" + current_region + "/" + service + "/boilstream_request";
+
+	// Build canonical headers (sorted, lowercase, with trailing newline)
+	// Include ALL x-boilstream-* headers (except x-boilstream-signature)
+	// Following spec: All headers starting with x-boilstream- must be signed
+	string canonical_headers = "x-boilstream-cipher-version:1\n"
+	                           "x-boilstream-ciphers:0x0001, 0x0002\n"
+	                           "x-boilstream-credential:" +
+	                           credential_scope +
+	                           "\n"
+	                           "x-boilstream-date:" +
+	                           date_time_str +
+	                           "\n"
+	                           "x-boilstream-sequence:" +
+	                           std::to_string(sequence) + "\n";
+
+	// Signed headers list (semicolon-separated, sorted)
+	string signed_headers = "x-boilstream-cipher-version;x-boilstream-ciphers;x-boilstream-credential;x-boilstream-"
+	                        "date;x-boilstream-sequence";
+
+	// Extract URI path from URL (remove protocol and host)
+	string canonical_uri = "/";
+	auto uri_start = url.find("://");
+	if (uri_start != string::npos) {
+		auto path_start = url.find('/', uri_start + 3);
+		if (path_start != string::npos) {
+			canonical_uri = url.substr(path_start);
+		}
+	}
+
+	// Extract query string (if any)
+	string canonical_query = "";
+	auto query_pos = canonical_uri.find('?');
+	if (query_pos != string::npos) {
+		canonical_query = canonical_uri.substr(query_pos + 1);
+		canonical_uri = canonical_uri.substr(0, query_pos);
+	}
+
+	// Step 1: Build canonical request using Rust function
+	auto canonical_result = aws_build_canonical_request(
+	    method.c_str(), method.size(), canonical_uri.c_str(), canonical_uri.size(), canonical_query.c_str(),
+	    canonical_query.size(), canonical_headers.c_str(), canonical_headers.size(), signed_headers.c_str(),
+	    signed_headers.size(), reinterpret_cast<const uint8_t *>(body.c_str()), body.size());
+
+	if (canonical_result.error != OPAQUE_SUCCESS) {
+		throw IOException("AWS SigV4 signing failed: Could not build canonical request");
+	}
+
+	// Step 2: Derive date-scoped signing key using Rust function
+	// Use current_region and service from credential scope building above
+	auto signing_key_result =
+	    aws_derive_signing_key(base_signing_key.data(), base_signing_key.size(), date_str.c_str(), date_str.size(),
+	                           current_region.c_str(), current_region.size(), service.c_str(), service.size());
+
+	if (signing_key_result.error != OPAQUE_SUCCESS) {
+		opaque_free_buffer(canonical_result.buffer);
+		throw IOException("AWS SigV4 signing failed: Could not derive signing key");
+	}
+
+	// Step 3: Sign canonical request using Rust function
+	auto signature_result = aws_sign_canonical_request(signing_key_result.buffer.data, signing_key_result.buffer.len,
+	                                                   reinterpret_cast<const char *>(canonical_result.buffer.data),
+	                                                   canonical_result.buffer.len);
+
+	// Log canonical request for debugging
+	BOILSTREAM_LOG(
+	    "SignRequest: Canonical request:\n"
+	    << string(reinterpret_cast<const char *>(canonical_result.buffer.data), canonical_result.buffer.len));
+	BOILSTREAM_LOG("SignRequest: Credential scope: " << credential_scope);
+	BOILSTREAM_LOG("SignRequest: Date/time: " << date_time_str);
+	BOILSTREAM_LOG("SignRequest: Sequence: " << sequence);
+	BOILSTREAM_LOG("SignRequest: Access token prefix: " << access_token_prefix);
+
+	// Cleanup intermediate buffers
+	opaque_free_buffer(canonical_result.buffer);
+	opaque_free_buffer(signing_key_result.buffer);
+
+	if (signature_result.error != OPAQUE_SUCCESS) {
+		throw IOException("AWS SigV4 signing failed: Could not sign request");
+	}
+
+	// Extract base64 signature from result
+	string signature(reinterpret_cast<const char *>(signature_result.buffer.data), signature_result.buffer.len);
+	BOILSTREAM_LOG("SignRequest: Signature (base64): " << signature.substr(0, 32) << "...");
+
+	// Cleanup signature buffer
+	opaque_free_buffer(signature_result.buffer);
+
+	// Return signing result with all required information
+	SigningResult result;
+	result.signature = signature;
+	result.date_time = date_time_str;
+	result.credential_scope = credential_scope;
+	return result;
+}
+
 string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 	// Serialize secret to base64-encoded binary format
 	MemoryStream stream;
@@ -502,7 +1366,8 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 	serializer.End();
 
 	auto data = stream.GetData();
-	auto encoded = Blob::ToBase64(string_t((const char *)data, stream.GetPosition()));
+	string data_str((const char *)data, stream.GetPosition());
+	auto encoded = Blob::ToBase64(string_t(data_str));
 
 	// Create JSON with metadata using yyjson (safe from injection)
 	auto doc = yyjson_mut_doc_new(nullptr);
@@ -723,47 +1588,20 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 		return "";
 	}
 
+	// Build authenticated headers (or empty headers if no session)
 	HTTPHeaders headers(db);
+	vector<uint8_t> current_session_key;
+	bool has_session_key = false;
 
-	// Rotate token if needed (before using it) - with race condition protection
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		if (ShouldRotateToken() && !is_rotating) {
-			is_rotating = true;
-		} else {
-			// Another thread is rotating or no rotation needed
-			goto skip_rotation_get;
-		}
-	}
-
-	// Perform rotation outside lock (slow HTTP operation)
 	try {
-		RotateSessionToken();
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("HttpGet: Token rotation failed: " << e.what());
-
-		// If token is critically expired, fail the request
-		if (!IsSessionTokenValid()) {
-			lock_guard<mutex> lock(rotation_lock);
-			is_rotating = false;
-			throw IOException("Session expired and rotation failed. Please re-authenticate.");
-		}
-
-		BOILSTREAM_LOG("HttpGet: WARNING - Continuing with existing token");
-	}
-
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		is_rotating = false;
-	}
-
-skip_rotation_get:
-	// Add Authorization header with session token
-	{
+		headers = BuildAuthenticatedHeaders("GET", url, "");
+		// Save session key for response verification
 		lock_guard<mutex> lock(session_lock);
-		if (!session_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + session_token);
-		}
+		current_session_key = session_key;
+		has_session_key = !session_key.empty();
+	} catch (const IOException &e) {
+		// No active session - proceed without authentication
+		BOILSTREAM_LOG("HttpGet: No active session, proceeding unauthenticated");
 	}
 
 	// Retry configuration: 3 retries with short exponential backoff
@@ -771,11 +1609,18 @@ skip_rotation_get:
 	// Total worst-case delay: 100ms + 200ms + 400ms = 700ms
 	const int MAX_RETRIES = 3;
 	const int BASE_DELAY_MS = 100;
+	string response_body_result;
+	bool request_sent = false;
 
 	for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		BOILSTREAM_LOG("HttpGet: attempt " << (attempt + 1) << "/" << (MAX_RETRIES + 1));
+		request_sent = true; // Mark that we're attempting to send
 		string response_body;
+		HTTPHeaders response_headers_captured(db);
 		auto response_handler = [&](const HTTPResponse &response) {
 			response_body = response.body;
+			// Capture response headers for signature verification
+			response_headers_captured = response.headers;
 			return true;
 		};
 		auto content_handler = [&](const_data_ptr_t data, idx_t size) {
@@ -784,7 +1629,9 @@ skip_rotation_get:
 		};
 
 		GetRequestInfo request(url, headers, *params, response_handler, content_handler);
+		BOILSTREAM_LOG("HttpGet: sending request...");
 		auto response = http_util.Request(request);
+		BOILSTREAM_LOG("HttpGet: response received, status=" << static_cast<uint16_t>(response->status));
 
 		// Check if we should retry (only on transient errors)
 		if (response->ShouldRetry() && attempt < MAX_RETRIES) {
@@ -798,14 +1645,47 @@ skip_rotation_get:
 			return "";
 		}
 
-		// Check HTTP status code - must be 2xx for success
+		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
 
+		// Verify response signature and decrypt BEFORE checking status code
+		// This ensures error responses are also decrypted before being thrown
+		if (has_session_key) {
+			try {
+				VerifyAuthenticatedResponse(response_body, status_code, response_headers_captured, current_session_key);
+				BOILSTREAM_LOG("HttpGet: Response signature verified successfully");
+			} catch (const std::exception &e) {
+				BOILSTREAM_LOG("HttpGet: Response signature verification failed: " << e.what());
+				throw IOException("Response integrity check failed: " + string(e.what()));
+			}
+
+			// Check if response is encrypted and decrypt if needed
+			auto header_map = ExtractBoilstreamHeaders(response_headers_captured);
+			if (IsResponseEncrypted(header_map)) {
+				BOILSTREAM_LOG("HttpGet: Response is encrypted, decrypting...");
+				try {
+					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
+					BOILSTREAM_LOG("HttpGet: Response decrypted successfully, plaintext_len=" << response_body.size());
+				} catch (const std::exception &e) {
+					BOILSTREAM_LOG("HttpGet: Response decryption failed: " << e.what());
+					throw IOException("Response decryption failed: " + string(e.what()));
+				}
+			} else {
+				BOILSTREAM_LOG("HttpGet: Response is not encrypted (plaintext)");
+			}
+		}
+
+		// Now check status code with decrypted response body
 		// 4xx Client Errors - fail fast, don't retry
 		if (status_code >= 400 && status_code < 500) {
-			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (client error)");
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
+				error_body += "... (truncated)";
+			}
+			BOILSTREAM_LOG("HttpGet: HTTP " << status_code << " (client error), body: " << error_body);
 			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
-			                  " - Client error (check authentication/permissions)");
+			                  " - Client error: " + error_body);
 		}
 
 		// 5xx Server Errors - classify for retry decision
@@ -814,8 +1694,12 @@ skip_rotation_get:
 
 			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
 			if (status_code == 501 || status_code == 505) {
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
+					error_body += "... (truncated)";
+				}
 				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) +
-				                  " - Server does not support this operation");
+				                  " - Server does not support this operation: " + error_body);
 			}
 
 			// 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
@@ -824,8 +1708,12 @@ skip_rotation_get:
 				continue; // Will retry with exponential backoff
 			} else {
 				// All retries exhausted
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
+					error_body += "... (truncated)";
+				}
 				throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - Server error after " +
-				                  std::to_string(MAX_RETRIES + 1) + " attempts");
+				                  std::to_string(MAX_RETRIES + 1) + " attempts: " + error_body);
 			}
 		}
 
@@ -836,6 +1724,7 @@ skip_rotation_get:
 		}
 
 		BOILSTREAM_LOG("HttpGet: SUCCESS, body_len=" << response_body.size());
+
 		return response_body;
 	}
 
@@ -869,48 +1758,23 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 		throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 	}
 
+	// Build authenticated headers if not during OPAQUE authentication
+	// During OPAQUE login/registration, we don't have a session yet
 	HTTPHeaders headers(db);
-	headers.Insert("Content-Type", "application/json");
+	vector<uint8_t> current_session_key;
+	bool has_session_key = false;
+	bool is_exchanging_now = false;
 
-	// Rotate token if needed (before using it) - with race condition protection
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		if (ShouldRotateToken() && !is_rotating) {
-			is_rotating = true;
-		} else {
-			// Another thread is rotating or no rotation needed
-			goto skip_rotation_post;
-		}
-	}
-
-	// Perform rotation outside lock (slow HTTP operation)
-	try {
-		RotateSessionToken();
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("HttpPost: Token rotation failed: " << e.what());
-
-		// If token is critically expired, fail the request
-		if (!IsSessionTokenValid()) {
-			lock_guard<mutex> lock(rotation_lock);
-			is_rotating = false;
-			throw IOException("Session expired and rotation failed. Please re-authenticate.");
-		}
-
-		BOILSTREAM_LOG("HttpPost: WARNING - Continuing with existing token");
-	}
-
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		is_rotating = false;
-	}
-
-skip_rotation_post:
-	// Add Authorization header with session token
 	{
 		lock_guard<mutex> lock(session_lock);
-		if (!session_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + session_token);
-		}
+		is_exchanging_now = is_exchanging;
+		current_session_key = session_key;
+		has_session_key = !session_key.empty();
+	}
+
+	if (!is_exchanging_now) {
+		// Normal API request - add authenticated headers
+		headers = BuildAuthenticatedHeaders("POST", url, body);
 	}
 
 	// Generate idempotency key for safe retries (prevents duplicate secret creation)
@@ -939,9 +1803,39 @@ skip_rotation_post:
 			continue;
 		}
 
-		// Check HTTP status code - must be 2xx for success
+		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
 
+		// Verify response signature and decrypt BEFORE checking status code
+		// This ensures error responses are also decrypted before being thrown
+		if (has_session_key) {
+			try {
+				VerifyAuthenticatedResponse(request.buffer_out, status_code, response->headers, current_session_key);
+				BOILSTREAM_LOG("HttpPost: Response signature verified successfully");
+			} catch (const std::exception &e) {
+				BOILSTREAM_LOG("HttpPost: Response signature verification failed: " << e.what());
+				throw IOException("Response integrity check failed: " + string(e.what()));
+			}
+
+			// Check if response is encrypted and decrypt if needed
+			auto header_map = ExtractBoilstreamHeaders(response->headers);
+			if (IsResponseEncrypted(header_map)) {
+				BOILSTREAM_LOG("HttpPost: Response is encrypted, decrypting...");
+				try {
+					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
+					BOILSTREAM_LOG(
+					    "HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
+				} catch (const std::exception &e) {
+					BOILSTREAM_LOG("HttpPost: Response decryption failed: " << e.what());
+					throw IOException("Response decryption failed: " + string(e.what()));
+				}
+			} else {
+				BOILSTREAM_LOG("HttpPost: Response is not encrypted (plaintext)");
+			}
+		}
+
+		// Now check status code with decrypted response body
 		// 4xx Client Errors - fail fast, don't retry
 		if (status_code >= 400 && status_code < 500) {
 			string error_body = request.buffer_out.substr(0, 200);
@@ -949,6 +1843,8 @@ skip_rotation_post:
 				error_body += "... (truncated)";
 			}
 			BOILSTREAM_LOG("HttpPost: HTTP " << status_code << " (client error)");
+			BOILSTREAM_LOG("HttpPost: Response body length: " << request.buffer_out.size());
+			BOILSTREAM_LOG("HttpPost: Response body: " << error_body);
 			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) +
 			                  " - Client error: " + error_body);
 		}
@@ -986,6 +1882,7 @@ skip_rotation_post:
 		}
 
 		BOILSTREAM_LOG("HttpPost: SUCCESS, body_len=" << request.buffer_out.size());
+
 		return request.buffer_out;
 	}
 
@@ -1011,47 +1908,16 @@ void RestApiSecretStorage::HttpDelete(const string &url) {
 		throw IOException("HTTP DELETE failed: Could not initialize HTTP parameters");
 	}
 
-	HTTPHeaders headers(db);
+	// Build authenticated headers (throws if no session)
+	HTTPHeaders headers = BuildAuthenticatedHeaders("DELETE", url, "");
 
-	// Rotate token if needed (before using it) - with race condition protection
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		if (ShouldRotateToken() && !is_rotating) {
-			is_rotating = true;
-		} else {
-			// Another thread is rotating or no rotation needed
-			goto skip_rotation_delete;
-		}
-	}
-
-	// Perform rotation outside lock (slow HTTP operation)
-	try {
-		RotateSessionToken();
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("HttpDelete: Token rotation failed: " << e.what());
-
-		// If token is critically expired, fail the request
-		if (!IsSessionTokenValid()) {
-			lock_guard<mutex> lock(rotation_lock);
-			is_rotating = false;
-			throw IOException("Session expired and rotation failed. Please re-authenticate.");
-		}
-
-		BOILSTREAM_LOG("HttpDelete: WARNING - Continuing with existing token");
-	}
-
-	{
-		lock_guard<mutex> lock(rotation_lock);
-		is_rotating = false;
-	}
-
-skip_rotation_delete:
-	// Add Authorization header with session token
+	// Save session key for response verification
+	vector<uint8_t> current_session_key;
+	bool has_session_key = false;
 	{
 		lock_guard<mutex> lock(session_lock);
-		if (!session_token.empty()) {
-			headers.Insert("Authorization", "Bearer " + session_token);
-		}
+		current_session_key = session_key;
+		has_session_key = !session_key.empty();
 	}
 
 	// Retry configuration: 3 retries with short exponential backoff
@@ -1077,16 +1943,49 @@ skip_rotation_delete:
 			throw IOException("HTTP DELETE failed: " + response->GetError());
 		}
 
-		// Check HTTP status code - must be 2xx for success (404 is also OK for DELETE - already deleted)
+		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
 
+		// Store response body (may be decrypted below)
+		string response_body = response->body;
+
+		// Verify response signature and decrypt BEFORE checking status code
+		// This ensures error responses are also decrypted before being thrown
+		if (has_session_key) {
+			try {
+				VerifyAuthenticatedResponse(response_body, status_code, response->headers, current_session_key);
+				BOILSTREAM_LOG("HttpDelete: Response signature verified successfully");
+			} catch (const std::exception &e) {
+				BOILSTREAM_LOG("HttpDelete: Response signature verification failed: " << e.what());
+				throw IOException("Response integrity check failed: " + string(e.what()));
+			}
+
+			// Check if response is encrypted and decrypt if needed
+			auto header_map = ExtractBoilstreamHeaders(response->headers);
+			if (IsResponseEncrypted(header_map)) {
+				BOILSTREAM_LOG("HttpDelete: Response is encrypted, decrypting...");
+				try {
+					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
+					BOILSTREAM_LOG(
+					    "HttpDelete: Response decrypted successfully, plaintext_len=" << response_body.size());
+				} catch (const std::exception &e) {
+					BOILSTREAM_LOG("HttpDelete: Response decryption failed: " << e.what());
+					throw IOException("Response decryption failed: " + string(e.what()));
+				}
+			} else {
+				BOILSTREAM_LOG("HttpDelete: Response is not encrypted (plaintext)");
+			}
+		}
+
+		// Now check status code with decrypted response body
 		// 4xx Client Errors (except 404) - fail fast, don't retry
 		if (status_code >= 400 && status_code < 500 && status_code != 404) {
-			string error_body = response->body.substr(0, 200);
-			if (response->body.size() > 200) {
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
 				error_body += "... (truncated)";
 			}
-			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (client error)");
+			BOILSTREAM_LOG("HttpDelete: HTTP " << status_code << " (client error), body: " << error_body);
 			throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
 			                  " - Client error: " + error_body);
 		}
@@ -1097,8 +1996,8 @@ skip_rotation_delete:
 
 			// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
 			if (status_code == 501 || status_code == 505) {
-				string error_body = response->body.substr(0, 200);
-				if (response->body.size() > 200) {
+				string error_body = response_body.substr(0, 200);
+				if (response_body.size() > 200) {
 					error_body += "... (truncated)";
 				}
 				throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) +
@@ -1115,8 +2014,8 @@ skip_rotation_delete:
 
 		// Non-2xx status (except 404, including exhausted 5xx retries)
 		if (status_code < 200 || (status_code >= 300 && status_code != 404)) {
-			string error_body = response->body.substr(0, 200);
-			if (response->body.size() > 200) {
+			string error_body = response_body.substr(0, 200);
+			if (response_body.size() > 200) {
 				error_body += "... (truncated)";
 			}
 			throw IOException("HTTP DELETE failed: HTTP " + std::to_string(status_code) + " - " + error_body);
@@ -1137,17 +2036,21 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	auto trans = GetTransactionOrDefault(transaction);
 	auto secret_name = secret->GetName();
 
-	// Check if secret exists (in cache or remotely)
-	auto existing = GetSecretByName(secret_name, transaction);
-	if (existing) {
+	// Check if secret exists in LOCAL CACHE ONLY (don't make HTTP request here - server will handle duplicates)
+	// This prevents recursive HTTP calls during StoreSecret
+	auto existing_local = CatalogSetSecretStorage::GetSecretByName(secret_name, transaction);
+	if (existing_local) {
+		BOILSTREAM_LOG("StoreSecret: found existing secret in local cache");
 		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
-			throw InvalidInputException("Persistent secret with name '%s' already exists in secret storage '%s'!",
-			                            secret_name, storage_name);
+			// Let the server handle the duplicate check - we'll send the request and it will fail if duplicate
+			BOILSTREAM_LOG("StoreSecret: ERROR_ON_CONFLICT, will let server check for duplicates");
 		} else if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+			BOILSTREAM_LOG("StoreSecret: IGNORE_ON_CONFLICT, returning null");
 			return nullptr;
 		} else if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) {
 			throw InternalException("unknown OnCreateConflict found while registering secret");
 		} else if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+			BOILSTREAM_LOG("StoreSecret: REPLACE_ON_CONFLICT, removing from local cache");
 			// Remove from catalog if present (best effort)
 			if (secrets->GetEntry(trans, secret_name)) {
 				secrets->DropEntry(trans, secret_name, false, true);
@@ -1174,6 +2077,8 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 }
 
 void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) {
+	BOILSTREAM_LOG("WriteSecret: name=" << secret.GetName());
+
 	// Check if endpoint is configured
 	string url;
 	{
@@ -1181,13 +2086,18 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 		url = endpoint_url;
 	}
 
+	BOILSTREAM_LOG("WriteSecret: endpoint_url=" << url);
+
 	if (url.empty()) {
+		BOILSTREAM_LOG("WriteSecret: ERROR - endpoint is empty!");
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
 		                            "duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Serialize secret
+	BOILSTREAM_LOG("WriteSecret: serializing secret...");
 	string secret_json = SerializeSecret(secret);
+	BOILSTREAM_LOG("WriteSecret: secret serialized, json_len=" << secret_json.size());
 
 	// Prepare request body using yyjson (safe from injection)
 	auto doc = yyjson_mut_doc_new(nullptr);
@@ -1209,9 +2119,11 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
+	BOILSTREAM_LOG("WriteSecret: about to POST, body_len=" << body.size());
 	// Make HTTP POST request to the endpoint
 	// Token in Authorization header identifies the user
 	HttpPost(url, body);
+	BOILSTREAM_LOG("WriteSecret: POST successful");
 }
 
 SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string &type,
