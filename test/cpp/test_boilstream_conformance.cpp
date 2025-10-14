@@ -467,6 +467,60 @@ TEST_CASE("Tier 2: A.4.3 - Derive encryption_key", "[conformance][tier2][keyderi
 	REQUIRE(actual == expected);
 }
 
+TEST_CASE("Tier 2: A.4.4 - Derive refresh_token for Session Resumption", "[conformance][tier2][keyderiv][resumption]") {
+	BoilstreamTestFixture fixture;
+
+	// Derive refresh_token using HKDF-Expand ONLY (no Extract step)
+	// Per SECURITY_SPECIFICATION.md: refresh_token = HKDF-Expand(session_key, "session-resumption-v1", 32 bytes)
+	// We use session_key directly as PRK (no salt, no Extract step)
+
+	const std::string info_str = "session-resumption-v1";
+	std::string info_with_counter = info_str + std::string(1, 0x01); // info || 0x01
+
+	// Compute T(1) = HMAC-SHA256(session_key, info || 0x01)
+	char refresh_token[32];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(fixture.test_session_key.data()),
+	                                        fixture.test_session_key.size(), info_with_counter.c_str(),
+	                                        info_with_counter.size(), refresh_token);
+
+	// Convert to hex for comparison
+	std::string refresh_token_hex = BytesToHex(reinterpret_cast<const uint8_t *>(refresh_token), 32);
+
+	// Expected value (computed per spec: HKDF-Expand only, using session_key as PRK)
+	std::string expected_refresh_token = "870246bc83f0728dac2c1d486834a7eefe1565c6252469c895374fc733828942";
+
+	INFO("Expected refresh_token: " << expected_refresh_token);
+	INFO("Actual refresh_token:   " << refresh_token_hex);
+
+	if (refresh_token_hex != expected_refresh_token) {
+		WARN("refresh_token mismatch! Our implementation produced: " << refresh_token_hex);
+	}
+
+	REQUIRE(refresh_token_hex == expected_refresh_token);
+	REQUIRE(std::string(refresh_token, 32).size() == 32); // Verify it's 32 bytes
+
+	// Compute resume_user_id = SHA256(refresh_token)
+	char resume_user_id_bytes[32];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(refresh_token, 32, resume_user_id_bytes);
+	std::string resume_user_id = BytesToHex(reinterpret_cast<const uint8_t *>(resume_user_id_bytes), 32);
+
+	// Expected resume_user_id = SHA256(refresh_token)
+	std::string expected_resume_user_id = "4cf42b1fbdc10b41302f03978931de2ae6d4581c8531c6b740aa3a5c0043bd33";
+
+	INFO("Expected resume_user_id: " << expected_resume_user_id);
+	INFO("Actual resume_user_id:   " << resume_user_id);
+
+	if (resume_user_id != expected_resume_user_id) {
+		WARN("resume_user_id mismatch! Our implementation produced: " << resume_user_id);
+	}
+
+	REQUIRE(resume_user_id == expected_resume_user_id);
+	REQUIRE(resume_user_id.size() == 64); // 32 bytes = 64 hex chars
+
+	INFO("✓ refresh_token derivation matches SECURITY_SPECIFICATION.md (HKDF-Expand only)");
+	INFO("✓ resume_user_id = SHA256(refresh_token) verified");
+}
+
 TEST_CASE("Tier 2: A.4 - All derived keys are unique", "[conformance][tier2][keyderiv]") {
 	BoilstreamTestFixture fixture;
 
@@ -1022,9 +1076,10 @@ TEST_CASE("Conformance Summary", "[conformance][summary]") {
 	INFO("  - A.1: HMAC-SHA256 (RFC 4231) - 3 tests");
 	INFO("  - A.2: HKDF-SHA256 (RFC 5869) - 2 tests");
 	INFO("  - A.3: SHA-256 (FIPS 180-4) - 2 tests");
-	INFO("Tier 2: Boilstream Key Derivation - 6 tests (PRODUCTION CODE)");
+	INFO("Tier 2: Boilstream Key Derivation - 7 tests (PRODUCTION CODE)");
 	INFO("  - A.4.0: PRK verification - 1 test");
 	INFO("  - A.4.1-4.3: Three key derivations - 3 tests");
+	INFO("  - A.4.4: Refresh token derivation + resume_user_id - 1 test");
 	INFO("  - A.4: Key uniqueness - 1 test");
 	INFO("  - A.5: AWS-style chained HMAC - 1 test");
 	INFO("Tier 3: Canonical Message Formats - 3 tests");
