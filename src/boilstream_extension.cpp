@@ -240,6 +240,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 		global_rest_storage = storage_ptr;
 	}
 
+	// Attempt to resume session from stored refresh token
+	// This allows transparent reconnection without re-authentication
+	try {
+		storage_ptr->PerformOpaqueResume();
+		BOILSTREAM_LOG("LoadInternal: Session resumed automatically from stored refresh token");
+	} catch (const std::exception &e) {
+		// Resume failed - either no token, expired, or server rejected
+		// This is normal for first-time use or expired sessions
+		// User will need to use PRAGMA to establish new session
+		BOILSTREAM_LOG("LoadInternal: Session resumption not available: " << e.what());
+	}
+
 	// Set boilstream as the default persistent storage
 	secret_manager.SetDefaultStorage("boilstream");
 
@@ -263,7 +275,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.3.0";
+	return "0.3.1";
 #endif
 }
 
