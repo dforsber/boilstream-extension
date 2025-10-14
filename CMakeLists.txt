@@ -139,30 +139,20 @@ elseif(WIN32)
         # This handles the case where Rust provides some builtins and we need others from libgcc
         target_link_options(${EXTENSION_NAME} PRIVATE
             "LINKER:--allow-multiple-definition"  # Allow weak f16 symbols from both Rust and libgcc
-            "LINKER:--start-group"                # Start linker group for circular dependencies
         )
         target_link_libraries(${EXTENSION_NAME}
             -static-libgcc -static-libstdc++  # Static flags
             stdc++                             # C++ standard library (for RTTI, exceptions)
-            gcc_eh                             # GCC exception handling and stack checking (__chkstk)
-            gcc                                # GCC compiler builtins (f16, etc.)
-        )
-        target_link_options(${EXTENSION_NAME} PRIVATE
-            "LINKER:--end-group"              # End linker group
+            gcc                                # GCC compiler runtime (builtins, unwinding, __chkstk)
         )
 
         target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
             "LINKER:--allow-multiple-definition"
-            "LINKER:--start-group"
         )
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
             -static-libgcc -static-libstdc++
             stdc++
-            gcc_eh
             gcc
-        )
-        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
-            "LINKER:--end-group"
         )
     else()
         message(STATUS "Windows MSVC build: skipping GCC runtime libraries")
