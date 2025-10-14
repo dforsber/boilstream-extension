@@ -128,38 +128,28 @@ elseif(WIN32)
     # MinGW/GCC requires special handling for Rust library linking
     # MSVC doesn't need this (and doesn't have these libraries)
     if(NOT MSVC)
-        # MinGW: Wrap Rust library and all its dependencies in linker group
-        # This allows multiple passes to resolve symbols in any order
+        # MinGW: Wrap Rust library dependencies in linker group for multi-pass linking
         message(STATUS "Windows MinGW build: using linker groups for Rust dependencies")
 
-        # Use linker groups to wrap ALL libraries the Rust code depends on
-        # The linker will make multiple passes to resolve circular dependencies
-        target_link_options(${EXTENSION_NAME} PRIVATE
-            "LINKER:--allow-multiple-definition"  # Allow weak symbols
-            "LINKER:--start-group"                # Start group
-        )
+        # Put group flags INSIDE target_link_libraries so they stay together on link line
         target_link_libraries(${EXTENSION_NAME}
-            ws2_32 userenv bcrypt ntdll          # Windows APIs
-            -static-libgcc -static-libstdc++      # Static link flags
-            stdc++                                # C++ standard library (RTTI)
-            gcc                                   # GCC runtime (__chkstk, f16 builtins)
-        )
-        target_link_options(${EXTENSION_NAME} PRIVATE
-            "LINKER:--end-group"                  # End group
+            "-Wl,--allow-multiple-definition"  # Allow weak f16 symbols
+            "-Wl,--start-group"                # Start linker group - multiple passes
+            ws2_32 userenv bcrypt ntdll        # Windows APIs (WSARecv, etc.)
+            -static-libgcc -static-libstdc++    # Static linking flags
+            stdc++                              # C++ standard library (RTTI)
+            gcc                                 # GCC runtime (__chkstk, f16 builtins)
+            "-Wl,--end-group"                  # End linker group
         )
 
-        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
-            "LINKER:--allow-multiple-definition"
-            "LINKER:--start-group"
-        )
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
+            "-Wl,--allow-multiple-definition"
+            "-Wl,--start-group"
             ws2_32 userenv bcrypt ntdll
             -static-libgcc -static-libstdc++
             stdc++
             gcc
-        )
-        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
-            "LINKER:--end-group"
+            "-Wl,--end-group"
         )
     else()
         # MSVC: Simple linking without linker groups
