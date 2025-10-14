@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-# staticlib for C FFI on native platforms
-# cdylib for WASM (emscripten can link against .so)
-# rlib for Rust-to-Rust linking
-crate-type = ["staticlib", "cdylib", "rlib"]
+# staticlib for C FFI on all platforms (native and WASM)
+# Note: cdylib removed - not supported on musl targets and not needed for our use case
+crate-type = ["staticlib"]
 
 [dependencies]
 opaque-ke = "3.0.0"
