@@ -1,20 +1,45 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.15...3.30)
 project(BoilstreamTests)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Detect Rust library location (needed for OPAQUE and AWS signing)
-set(RUST_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/debug")
-if(EXISTS
-   "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/release/libopaque_client.a"
-)
-  set(RUST_LIB_DIR
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/release")
-endif()
+# Detect Rust library location
+# With Corrosion, libraries are built in: build/release/cargo/build/{target-triple}/release/
+# E.g., build/release/cargo/build/aarch64-apple-darwin/release/libopaque_client.a
+set(RUST_LIB_FOUND FALSE)
+set(RUST_LIB_PATH "")
 
 # Use DuckDB libraries from the extension build (not system DuckDB)
 set(EXTENSION_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build/release")
+
+# Priority 1: Look in Corrosion's cargo build directory (release builds)
+file(GLOB_RECURSE RUST_LIB_CANDIDATES
+     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a")
+
+if(RUST_LIB_CANDIDATES)
+  list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
+  set(RUST_LIB_FOUND TRUE)
+  message(STATUS "Found Corrosion Rust library: ${RUST_LIB_PATH}")
+else()
+  # Priority 2: Check if copied to extension directory
+  if(EXISTS "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
+    set(RUST_LIB_PATH "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
+    set(RUST_LIB_FOUND TRUE)
+    message(STATUS "Found Rust library in extension dir: ${RUST_LIB_PATH}")
+  else()
+    # Priority 3: Fall back to manual cargo build locations (debug builds)
+    file(GLOB_RECURSE RUST_LIB_CANDIDATES
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/*/debug/libopaque_client.a"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/debug/libopaque_client.a")
+    if(RUST_LIB_CANDIDATES)
+      list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
+      set(RUST_LIB_FOUND TRUE)
+      message(STATUS "Found Rust library (manual build): ${RUST_LIB_PATH}")
+    endif()
+  endif()
+endif()
+
 set(DUCKDB_LIBS
     "${EXTENSION_BUILD_DIR}/src/libduckdb_static.a"
     "${EXTENSION_BUILD_DIR}/extension/boilstream/libboilstream_extension.a"
@@ -69,34 +94,45 @@ target_include_directories(
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_test PRIVATE BOILSTREAM_DEBUG)
 
+# Helper function to link Rust library and platform dependencies
+function(link_rust_dependencies target_name)
+  if(RUST_LIB_FOUND)
+    target_link_libraries(${target_name} PRIVATE "${RUST_LIB_PATH}")
+
+    # Platform-specific system libraries for Rust
+    # Match the same libraries used in main CMakeLists.txt for Corrosion
+    if(APPLE)
+      target_link_libraries(${target_name} PRIVATE
+        "-framework Security"
+        "-framework Foundation"
+        "-framework CoreFoundation"
+        resolv)
+    elseif(UNIX)
+      target_link_libraries(${target_name} PRIVATE dl pthread)
+    elseif(WIN32)
+      # Include ALL Windows libraries needed by Rust (not just ws2_32, userenv, bcrypt)
+      # These match what Corrosion links automatically
+      if(MINGW)
+        target_link_libraries(${target_name} PRIVATE
+          ws2_32 userenv bcrypt ntdll
+          stdc++ gcc
+          -static-libgcc -static-libstdc++)
+      else()
+        # MSVC
+        target_link_libraries(${target_name} PRIVATE
+          ws2_32 userenv bcrypt ntdll)
+      endif()
+    endif()
+  else()
+    message(WARNING "Rust library not found - ${target_name} may not link correctly")
+  endif()
+endfunction()
+
 # Link extension's DuckDB and mbedTLS libraries
 target_link_libraries(boilstream_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 
-# Link with Rust OPAQUE library (needed for OPAQUE authentication and AWS
-# signing)
-if(EXISTS "${RUST_LIB_DIR}/libopaque_client.a")
-  target_link_libraries(boilstream_test
-                        PRIVATE "${RUST_LIB_DIR}/libopaque_client.a")
-
-  # Platform-specific system libraries for Rust
-  if(UNIX AND NOT APPLE)
-    target_link_libraries(boilstream_test PRIVATE dl pthread)
-  elseif(APPLE)
-    target_link_libraries(boilstream_test PRIVATE "-framework Security"
-                                                  "-framework Foundation")
-  elseif(WIN32)
-    target_link_libraries(boilstream_test PRIVATE ws2_32 userenv bcrypt)
-  endif()
-
-  message(
-    STATUS
-      "boilstream_test will be built with Rust library from ${RUST_LIB_DIR}")
-else()
-  message(
-    WARNING
-      "Rust library not found at ${RUST_LIB_DIR} - boilstream_test may not link"
-  )
-endif()
+# Link Rust dependencies
+link_rust_dependencies(boilstream_test)
 
 # Integration test executable
 add_executable(boilstream_integration_test test_boilstream_integration.cpp)
@@ -130,31 +166,8 @@ target_include_directories(
   aws_signing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include)
 
 # Link with Rust OPAQUE client library
-if(EXISTS "${RUST_LIB_DIR}/libopaque_client.a")
-  target_link_libraries(
-    aws_signing_test PRIVATE Catch2::Catch2
-                             "${RUST_LIB_DIR}/libopaque_client.a")
-
-  # Platform-specific system libraries for Rust
-  if(UNIX AND NOT APPLE)
-    target_link_libraries(aws_signing_test PRIVATE dl pthread)
-  elseif(APPLE)
-    target_link_libraries(aws_signing_test PRIVATE "-framework Security"
-                                                   "-framework Foundation")
-  elseif(WIN32)
-    target_link_libraries(aws_signing_test PRIVATE ws2_32 userenv bcrypt)
-  endif()
-
-  message(
-    STATUS
-      "AWS signing tests will be built with Rust library from ${RUST_LIB_DIR}")
-else()
-  target_link_libraries(aws_signing_test PRIVATE Catch2::Catch2)
-  message(
-    WARNING
-      "Rust library not found at ${RUST_LIB_DIR} - AWS signing tests may not link"
-  )
-endif()
+target_link_libraries(aws_signing_test PRIVATE Catch2::Catch2)
+link_rust_dependencies(aws_signing_test)
 
 # Crypto test executable (integrity, HMAC, key derivation)
 add_executable(
@@ -174,35 +187,10 @@ target_include_directories(
 target_compile_definitions(boilstream_crypto_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_crypto_test PRIVATE ${DUCKDB_LIBS}
-                                                     Catch2::Catch2)
+target_link_libraries(boilstream_crypto_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 
-# Link with Rust OPAQUE library (needed for OPAQUE authentication and AWS
-# signing)
-if(EXISTS "${RUST_LIB_DIR}/libopaque_client.a")
-  target_link_libraries(boilstream_crypto_test
-                        PRIVATE "${RUST_LIB_DIR}/libopaque_client.a")
-
-  # Platform-specific system libraries for Rust
-  if(UNIX AND NOT APPLE)
-    target_link_libraries(boilstream_crypto_test PRIVATE dl pthread)
-  elseif(APPLE)
-    target_link_libraries(boilstream_crypto_test
-                          PRIVATE "-framework Security" "-framework Foundation")
-  elseif(WIN32)
-    target_link_libraries(boilstream_crypto_test PRIVATE ws2_32 userenv bcrypt)
-  endif()
-
-  message(
-    STATUS
-      "boilstream_crypto_test will be built with Rust library from ${RUST_LIB_DIR}"
-  )
-else()
-  message(
-    WARNING
-      "Rust library not found at ${RUST_LIB_DIR} - boilstream_crypto_test may not link"
-  )
-endif()
+# Link Rust dependencies
+link_rust_dependencies(boilstream_crypto_test)
 
 # Conformance test executable (RFC 4231, RFC 5869, AWS SigV4 standards
 # validation)
@@ -223,36 +211,10 @@ target_include_directories(
 target_compile_definitions(boilstream_conformance_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_conformance_test PRIVATE ${DUCKDB_LIBS}
-                                                          Catch2::Catch2)
+target_link_libraries(boilstream_conformance_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 
-# Link with Rust OPAQUE library (needed for OPAQUE authentication and AWS
-# signing)
-if(EXISTS "${RUST_LIB_DIR}/libopaque_client.a")
-  target_link_libraries(boilstream_conformance_test
-                        PRIVATE "${RUST_LIB_DIR}/libopaque_client.a")
-
-  # Platform-specific system libraries for Rust
-  if(UNIX AND NOT APPLE)
-    target_link_libraries(boilstream_conformance_test PRIVATE dl pthread)
-  elseif(APPLE)
-    target_link_libraries(boilstream_conformance_test
-                          PRIVATE "-framework Security" "-framework Foundation")
-  elseif(WIN32)
-    target_link_libraries(boilstream_conformance_test PRIVATE ws2_32 userenv
-                                                              bcrypt)
-  endif()
-
-  message(
-    STATUS
-      "boilstream_conformance_test will be built with Rust library from ${RUST_LIB_DIR}"
-  )
-else()
-  message(
-    WARNING
-      "Rust library not found at ${RUST_LIB_DIR} - boilstream_conformance_test may not link"
-  )
-endif()
+# Link Rust dependencies
+link_rust_dependencies(boilstream_conformance_test)
 
 # Encryption test executable (response encryption/decryption)
 add_executable(
@@ -272,36 +234,10 @@ target_include_directories(
 target_compile_definitions(boilstream_encryption_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_encryption_test PRIVATE ${DUCKDB_LIBS}
-                                                         Catch2::Catch2)
+target_link_libraries(boilstream_encryption_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 
-# Link with Rust OPAQUE library (needed for OPAQUE authentication and AWS
-# signing)
-if(EXISTS "${RUST_LIB_DIR}/libopaque_client.a")
-  target_link_libraries(boilstream_encryption_test
-                        PRIVATE "${RUST_LIB_DIR}/libopaque_client.a")
-
-  # Platform-specific system libraries for Rust
-  if(UNIX AND NOT APPLE)
-    target_link_libraries(boilstream_encryption_test PRIVATE dl pthread)
-  elseif(APPLE)
-    target_link_libraries(boilstream_encryption_test
-                          PRIVATE "-framework Security" "-framework Foundation")
-  elseif(WIN32)
-    target_link_libraries(boilstream_encryption_test PRIVATE ws2_32 userenv
-                                                             bcrypt)
-  endif()
-
-  message(
-    STATUS
-      "boilstream_encryption_test will be built with Rust library from ${RUST_LIB_DIR}"
-  )
-else()
-  message(
-    WARNING
-      "Rust library not found at ${RUST_LIB_DIR} - boilstream_encryption_test may not link"
-  )
-endif()
+# Link Rust dependencies
+link_rust_dependencies(boilstream_encryption_test)
 
 # Enable testing
 enable_testing()
