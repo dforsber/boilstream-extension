@@ -4,9 +4,9 @@ project(BoilstreamTests)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Detect Rust library location
-# With Corrosion, libraries are built in: build/release/cargo/build/{target-triple}/release/
-# E.g., build/release/cargo/build/aarch64-apple-darwin/release/libopaque_client.a
+# Detect Rust library location With Corrosion, libraries are built in:
+# build/release/cargo/build/{target-triple}/release/ E.g.,
+# build/release/cargo/build/aarch64-apple-darwin/release/libopaque_client.a
 set(RUST_LIB_FOUND FALSE)
 set(RUST_LIB_PATH "")
 
@@ -24,14 +24,18 @@ if(RUST_LIB_CANDIDATES)
 else()
   # Priority 2: Check if copied to extension directory
   if(EXISTS "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
-    set(RUST_LIB_PATH "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
+    set(RUST_LIB_PATH
+        "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
     set(RUST_LIB_FOUND TRUE)
     message(STATUS "Found Rust library in extension dir: ${RUST_LIB_PATH}")
   else()
     # Priority 3: Fall back to manual cargo build locations (debug builds)
-    file(GLOB_RECURSE RUST_LIB_CANDIDATES
-         "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/*/debug/libopaque_client.a"
-         "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/debug/libopaque_client.a")
+    file(
+      GLOB_RECURSE
+      RUST_LIB_CANDIDATES
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/*/debug/libopaque_client.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/debug/libopaque_client.a"
+    )
     if(RUST_LIB_CANDIDATES)
       list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
       set(RUST_LIB_FOUND TRUE)
@@ -99,32 +103,37 @@ function(link_rust_dependencies target_name)
   if(RUST_LIB_FOUND)
     target_link_libraries(${target_name} PRIVATE "${RUST_LIB_PATH}")
 
-    # Platform-specific system libraries for Rust
-    # Match the same libraries used in main CMakeLists.txt for Corrosion
+    # Platform-specific system libraries for Rust Match the same libraries used
+    # in main CMakeLists.txt for Corrosion
     if(APPLE)
-      target_link_libraries(${target_name} PRIVATE
-        "-framework Security"
-        "-framework Foundation"
-        "-framework CoreFoundation"
-        resolv)
+      target_link_libraries(
+        ${target_name} PRIVATE "-framework Security" "-framework Foundation"
+                               "-framework CoreFoundation" resolv)
     elseif(UNIX)
       target_link_libraries(${target_name} PRIVATE dl pthread)
     elseif(WIN32)
-      # Include ALL Windows libraries needed by Rust (not just ws2_32, userenv, bcrypt)
-      # These match what Corrosion links automatically
+      # Include ALL Windows libraries needed by Rust (not just ws2_32, userenv,
+      # bcrypt) These match what Corrosion links automatically
       if(MINGW)
-        target_link_libraries(${target_name} PRIVATE
-          ws2_32 userenv bcrypt ntdll
-          stdc++ gcc
-          -static-libgcc -static-libstdc++)
+        target_link_libraries(
+          ${target_name}
+          PRIVATE ws2_32
+                  userenv
+                  bcrypt
+                  ntdll
+                  stdc++
+                  gcc
+                  -static-libgcc
+                  -static-libstdc++)
       else()
         # MSVC
-        target_link_libraries(${target_name} PRIVATE
-          ws2_32 userenv bcrypt ntdll)
+        target_link_libraries(${target_name} PRIVATE ws2_32 userenv bcrypt
+                                                     ntdll)
       endif()
     endif()
   else()
-    message(WARNING "Rust library not found - ${target_name} may not link correctly")
+    message(
+      WARNING "Rust library not found - ${target_name} may not link correctly")
   endif()
 endfunction()
 
@@ -187,7 +196,8 @@ target_include_directories(
 target_compile_definitions(boilstream_crypto_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_crypto_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
+target_link_libraries(boilstream_crypto_test PRIVATE ${DUCKDB_LIBS}
+                                                     Catch2::Catch2)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_crypto_test)
@@ -211,7 +221,8 @@ target_include_directories(
 target_compile_definitions(boilstream_conformance_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_conformance_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
+target_link_libraries(boilstream_conformance_test PRIVATE ${DUCKDB_LIBS}
+                                                          Catch2::Catch2)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_conformance_test)
@@ -234,7 +245,8 @@ target_include_directories(
 target_compile_definitions(boilstream_encryption_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_encryption_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
+target_link_libraries(boilstream_encryption_test PRIVATE ${DUCKDB_LIBS}
+                                                         Catch2::Catch2)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_encryption_test)
