@@ -110,14 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed: Force-load Rust library with -Wl,-force_load linker flag
   - Added: CoreFoundation framework and resolv library for Rust dependencies
 - **HIGH**: Windows build errors
-  - MinGW/GCC: Statically link full compiler runtime
-    - Libraries: -static-libgcc, -static-libstdc++, stdc++, gcc
-    - Provides f16 compiler builtins (__extendhfsf2, __truncsfhf2)
-    - Provides C++ RTTI (??_7type_info@@6B@) and exception handling
-    - Provides stack checking (__chkstk) and unwinding support
-    - Uses --allow-multiple-definition for Rust/libgcc weak symbol conflicts
+  - MinGW/GCC: Use linker groups for Rust library dependencies
+    - Wraps all Rust dependencies in --start-group/--end-group for multi-pass linking
+    - Libraries in group: ws2_32, userenv, bcrypt, ntdll, stdc++, gcc (with -static-libgcc/-static-libstdc++)
+    - Provides f16 compiler builtins (__extendhfsf2, __truncsfhf2) from gcc
+    - Provides C++ RTTI (??_7type_info@@6B@) from stdc++
+    - Provides stack checking (__chkstk) from gcc
+    - Uses --allow-multiple-definition for weak symbol conflicts
+    - Resolves link order issues - symbols found regardless of library order
   - MSVC: Fixed min/max macro conflicts with std::chrono (added NOMINMAX define)
-  - MSVC: Removed gcc.lib linking (only needed for MinGW, not MSVC)
   - MSVC: Added ntdll.lib for Rust std NT native functions (NtReadFile, NtWriteFile, NtOpenFile, etc.)
   - Fixes: Both MinGW/rtools42 and MSVC builds now compile successfully
 - **HIGH**: WASM build support

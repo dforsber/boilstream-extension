@@ -125,37 +125,47 @@ elseif(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
 elseif(WIN32)
-    # Link Windows system libraries
-    # ntdll: Required for Rust std library NT native functions (NtReadFile, NtWriteFile, etc.)
-    target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
-
-    # MinGW/GCC requires full compiler runtime for Rust
+    # MinGW/GCC requires special handling for Rust library linking
     # MSVC doesn't need this (and doesn't have these libraries)
     if(NOT MSVC)
-        # Not MSVC, so assume MinGW/GCC - link full runtime stack
-        message(STATUS "Windows MinGW build: linking full compiler runtime for Rust support")
-        # Use linker groups to resolve circular dependencies and allow multiple passes
-        # This handles the case where Rust provides some builtins and we need others from libgcc
+        # MinGW: Wrap Rust library and all its dependencies in linker group
+        # This allows multiple passes to resolve symbols in any order
+        message(STATUS "Windows MinGW build: using linker groups for Rust dependencies")
+
+        # Use linker groups to wrap ALL libraries the Rust code depends on
+        # The linker will make multiple passes to resolve circular dependencies
         target_link_options(${EXTENSION_NAME} PRIVATE
-            "LINKER:--allow-multiple-definition"  # Allow weak f16 symbols from both Rust and libgcc
+            "LINKER:--allow-multiple-definition"  # Allow weak symbols
+            "LINKER:--start-group"                # Start group
         )
         target_link_libraries(${EXTENSION_NAME}
-            -static-libgcc -static-libstdc++  # Static flags
-            stdc++                             # C++ standard library (for RTTI, exceptions)
-            gcc                                # GCC compiler runtime (builtins, unwinding, __chkstk)
+            ws2_32 userenv bcrypt ntdll          # Windows APIs
+            -static-libgcc -static-libstdc++      # Static link flags
+            stdc++                                # C++ standard library (RTTI)
+            gcc                                   # GCC runtime (__chkstk, f16 builtins)
+        )
+        target_link_options(${EXTENSION_NAME} PRIVATE
+            "LINKER:--end-group"                  # End group
         )
 
         target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
             "LINKER:--allow-multiple-definition"
+            "LINKER:--start-group"
         )
         target_link_libraries(${LOADABLE_EXTENSION_NAME}
+            ws2_32 userenv bcrypt ntdll
             -static-libgcc -static-libstdc++
             stdc++
             gcc
         )
+        target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
+            "LINKER:--end-group"
+        )
     else()
-        message(STATUS "Windows MSVC build: skipping GCC runtime libraries")
+        # MSVC: Simple linking without linker groups
+        message(STATUS "Windows MSVC build: standard library linking")
+        target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
     endif()
 endif()
 
