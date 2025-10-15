@@ -102,21 +102,25 @@ target_link_libraries(${EXTENSION_NAME} opaque_client_rust)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
 
 # Platform-specific configuration
-if(NOT IS_WASM_BUILD)
-    if(APPLE)
-        # macOS frameworks for Rust
-        target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
-    elseif(UNIX)
-        # Linux system libraries
-        target_link_libraries(${EXTENSION_NAME} dl pthread)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread)
-    elseif(WIN32)
-        # Windows: Corrosion handles most dependencies, but we need to add bcrypt explicitly
-        # bcrypt is needed by the getrandom crate (BCryptGenRandom function)
-        target_link_libraries(${EXTENSION_NAME} bcrypt)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
-    endif()
+if(IS_WASM_BUILD)
+    # WASM: Skip wasm-opt to avoid --enable-bulk-memory-opt compatibility issues
+    # Use -O1 for basic optimizations without wasm-opt (newer Emscripten removed this flag)
+    target_link_options(${EXTENSION_NAME} PRIVATE "-O1")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-O1")
+    message(STATUS "WASM: Using -O1 link flags to skip wasm-opt")
+elseif(APPLE)
+    # macOS frameworks for Rust
+    target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
+elseif(UNIX)
+    # Linux system libraries
+    target_link_libraries(${EXTENSION_NAME} dl pthread)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread)
+elseif(WIN32)
+    # Windows: Corrosion handles most dependencies, but we need to add bcrypt explicitly
+    # bcrypt is needed by the getrandom crate (BCryptGenRandom function)
+    target_link_libraries(${EXTENSION_NAME} bcrypt)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
 endif()
 
 install(

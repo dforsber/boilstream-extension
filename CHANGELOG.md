@@ -5,6 +5,33 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2025-10-15
+
+### Fixed
+
+- **WASM Build**: Added explicit `LINKED_LIBS` configuration for WASM builds
+  - Added to `extension_config.cmake`: Explicit path to Rust OPAQUE client library
+  - Path: `opaque-client/target/wasm32-unknown-emscripten/release/libopaque_client.a`
+  - Required by DuckDB extension build system to locate static library during WASM linking
+  - Issue: WASM builds failed with missing library errors in CI/CD pipeline
+  - Resolution: Extension build system now correctly links Rust library for all WASM variants (mvp, eh, threads)
+- **WASM wasm-opt compatibility**: Skip wasm-opt for WASM builds to avoid deprecated flag errors
+  - Added to `CMakeLists.txt`: `-O1` link flags for WASM builds
+  - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
+  - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking
+  - Resolution: Use `-O1` optimization level which skips wasm-opt entirely
+  - Impact: Basic optimizations still applied, but without problematic wasm-opt step
+  - Note: This matches the workaround already in `.cargo/config.toml` for Rust builds
+
+### Technical Details
+
+- **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
+- **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
+- **Link Optimization**: `-O1` flag for both `boilstream_extension` and `boilstream_loadable_extension` targets
+- **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
+- **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0
+- **Emscripten Versions**: Tested with 3.1.71 (deprecated flag issue present)
+
 ## [0.3.1] - 2025-10-15
 
 ### Added
@@ -363,6 +390,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
+[0.3.2]: https://github.com/yourusername/boilstream-extension/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yourusername/boilstream-extension/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yourusername/boilstream-extension/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yourusername/boilstream-extension/compare/v0.1.0...v0.2.0
