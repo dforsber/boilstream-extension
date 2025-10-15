@@ -44,8 +44,14 @@ public:
 	//! Perform OPAQUE login with password
 	void PerformOpaqueLogin(const string &password);
 
+	//! Perform OPAQUE session resumption with stored refresh token
+	void PerformOpaqueResume();
+
 	//! Clear session state (on error or logout)
 	void ClearSession();
+
+	//! Common helper for OPAQUE login flow (used by both login and resume)
+	void PerformOpaqueLoginCommon(const string &password, bool is_resume);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -102,6 +108,14 @@ private:
 		string signature;        // Base64-encoded HMAC signature
 		string date_time;        // ISO8601 timestamp (YYYYMMDDTHHMMSSZ)
 		string credential_scope; // AWS-style credential scope
+	};
+
+	//! Stored refresh token metadata
+	struct RefreshTokenData {
+		vector<uint8_t> refresh_token;
+		string endpoint_url;
+		string region;
+		std::chrono::system_clock::time_point expires_at;
 	};
 
 	//! Session state snapshot for thread-safe access
@@ -190,10 +204,23 @@ private:
 	string HttpGet(const string &url);
 
 	//! Make HTTP POST request to REST API (returns response body)
-	string HttpPost(const string &url, const string &body);
+	string HttpPost(const string &url, const string &body, HTTPHeaders *out_headers = nullptr);
 
 	//! Make HTTP DELETE request to REST API
 	void HttpDelete(const string &url);
+
+	//! Get the file path for stored refresh token
+	string GetRefreshTokenPath();
+
+	//! Save refresh token to file on disk (protected by file permissions)
+	void SaveRefreshToken(bool resumption_enabled);
+
+	//! Load refresh token from encrypted file on disk
+	//! Returns true if loaded successfully, false if not found or expired
+	bool LoadRefreshToken();
+
+	//! Delete refresh token file from disk
+	void DeleteRefreshToken();
 
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;

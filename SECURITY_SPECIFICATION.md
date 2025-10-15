@@ -1893,12 +1893,12 @@ da33e0fe781a362817e8e8aaa7af0ce141c7dc676ef385f83a1920d667b54f32
 **Expected refresh_token** (32 bytes, hex):
 
 ```
-2393750165661631cb83244bd0399b2ff822ee18a86d110bb1a3d2feb95d9e4f
+870246bc83f0728dac2c1d486834a7eefe1565c6252469c895374fc733828942
 ```
 
 **Usage**: OPAQUE password for session resumption (never transmitted, one-time use).
 
-**Validation**: Implementation must use validated HKDF from A.2 with Boilstream salt and this info string.
+**Validation**: Implementation must use HKDF-Expand ONLY (no Extract step). Use session_key directly as PRK with this info string. DO NOT use salt (unlike other derived keys in A.4.1-A.4.3).
 
 ---
 

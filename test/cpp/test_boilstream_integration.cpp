@@ -15,6 +15,11 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch.hpp>
 #include <iostream>
+#include <fstream>
+#include <thread>
+#include <chrono>
+#include <cstdio>
+#include <sys/stat.h>
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/config.hpp"
@@ -465,5 +470,174 @@ TEST_CASE("Session Persistence", "[boilstream][server][session]") {
 		auto verify = con.Query("SELECT name FROM duckdb_secrets() WHERE name = 'test_sequence';");
 		REQUIRE_FALSE(verify->HasError());
 		REQUIRE(verify->RowCount() == 0);
+	}
+}
+
+//===----------------------------------------------------------------------===//
+// Test: Session Resumption (Server Tests)
+//===----------------------------------------------------------------------===//
+TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
+	const char *home = std::getenv("HOME");
+#ifdef _WIN32
+	if (!home) {
+		home = std::getenv("USERPROFILE");
+	}
+#endif
+	REQUIRE(home != nullptr);
+
+	string token_path = string(home) + "/.duckdb/.boilstream_refresh_token";
+
+	SECTION("Refresh token is saved when server enables resumption") {
+		// Clean up any existing token file
+		std::remove(token_path.c_str());
+
+		DBConfig config;
+		config.options.allow_unsigned_extensions = true;
+		DuckDB db(nullptr, &config);
+		Connection con(db);
+
+		LoadExtensions(con);
+
+		// Request a NEW bootstrap token
+		string endpoint = RequestNewBootstrapToken("Session Resumption - Save Token");
+
+		// Authenticate with PRAGMA
+		string pragma_sql = "PRAGMA duckdb_secrets_boilstream_endpoint('" + endpoint + "');";
+		auto auth_result = con.Query(pragma_sql);
+		if (auth_result->HasError()) {
+			WARN("Authentication failed, skipping test: " << auth_result->GetError());
+			return;
+		}
+
+		// Check if refresh token file was created (only if server sent X-Boilstream-Session-Resumption: enabled)
+		// Note: This test may pass or fail depending on server configuration
+		bool file_exists = (std::ifstream(token_path).good());
+		if (file_exists) {
+			INFO("Server enabled session resumption, token file created");
+			REQUIRE(file_exists);
+
+			// Verify file has restricted permissions (Unix only)
+#ifndef _WIN32
+			struct stat st;
+			REQUIRE(stat(token_path.c_str(), &st) == 0);
+			REQUIRE((st.st_mode & 0777) == 0600);
+#endif
+		} else {
+			WARN("Server did not enable session resumption (X-Boilstream-Session-Resumption not set to 'enabled')");
+		}
+	}
+
+	SECTION("Can resume session after restarting DuckDB") {
+		// First, create a session and save refresh token
+		{
+			DBConfig config;
+			config.options.allow_unsigned_extensions = true;
+			DuckDB db(nullptr, &config);
+			Connection con(db);
+
+			LoadExtensions(con);
+
+			// Request a NEW bootstrap token
+			string endpoint = RequestNewBootstrapToken("Session Resumption - Initial Login");
+
+			// Authenticate with PRAGMA
+			string pragma_sql = "PRAGMA duckdb_secrets_boilstream_endpoint('" + endpoint + "');";
+			auto auth_result = con.Query(pragma_sql);
+			if (auth_result->HasError()) {
+				WARN("Authentication failed, skipping test: " << auth_result->GetError());
+				return;
+			}
+
+			// Create a test secret to verify session works
+			auto create = con.Query("CREATE OR REPLACE PERSISTENT SECRET test_resumption IN boilstream ("
+			                        "    TYPE S3,"
+			                        "    KEY_ID 'resumption_test_key'"
+			                        ");");
+			REQUIRE_FALSE(create->HasError());
+
+			// Database goes out of scope here, simulating restart
+		}
+
+		// Check if refresh token file exists
+		bool file_exists = (std::ifstream(token_path).good());
+		if (!file_exists) {
+			WARN("No refresh token saved (server did not enable resumption), skipping resume test");
+			return;
+		}
+
+		// Now create a new database instance (simulating restart)
+		{
+			DBConfig config;
+			config.options.allow_unsigned_extensions = true;
+			DuckDB db(nullptr, &config);
+			Connection con(db);
+
+			LoadExtensions(con);
+
+			// Extension should auto-resume from stored token
+			// Try to list secrets - this should work if resume was successful
+			auto list = con.Query("SELECT name FROM duckdb_secrets() WHERE name = 'test_resumption';");
+
+			// Resume MUST succeed - fail hard if it doesn't
+			// This will expose any issues with refresh token derivation or server HKDF implementation
+			INFO("Session resumption successful!");
+			REQUIRE_FALSE(list->HasError());
+			REQUIRE(list->RowCount() >= 1);
+		}
+
+		// Clean up token file
+		std::remove(token_path.c_str());
+	}
+
+	SECTION("Expired refresh token is deleted automatically") {
+		// This test would require creating a token with a past expiration
+		// For now, we'll just verify the deletion mechanism works
+
+		// Create a fake expired token file
+		std::ofstream out(token_path);
+		out << "{\n"
+		    << "  \"version\": 1,\n"
+		    << "  \"refresh_token\": \"dGVzdA==\",\n" // base64 "test"
+		    << "  \"endpoint_url\": \"https://localhost/secrets\",\n"
+		    << "  \"region\": \"us-east-1\",\n"
+		    << "  \"expires_at\": \"2020-01-01T00:00:00Z\"\n" // Expired
+		    << "}\n";
+		out.close();
+
+		DBConfig config;
+		config.options.allow_unsigned_extensions = true;
+		DuckDB db(nullptr, &config);
+		Connection con(db);
+
+		LoadExtensions(con);
+
+		// Extension should try to load, detect expiration, and delete the file
+		// Give it a moment to process
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		// File should be deleted now
+		bool file_exists = (std::ifstream(token_path).good());
+		REQUIRE_FALSE(file_exists);
+	}
+
+	SECTION("Invalid refresh token file is deleted automatically") {
+		// Create an invalid token file (malformed JSON)
+		std::ofstream out(token_path);
+		out << "{invalid json\n";
+		out.close();
+
+		DBConfig config;
+		config.options.allow_unsigned_extensions = true;
+		DuckDB db(nullptr, &config);
+		Connection con(db);
+
+		LoadExtensions(con);
+
+		// Extension should try to load, detect invalid format, and delete the file
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		// File should be deleted now
+		bool file_exists = (std::ifstream(token_path).good());
+		REQUIRE_FALSE(file_exists);
 	}
 }

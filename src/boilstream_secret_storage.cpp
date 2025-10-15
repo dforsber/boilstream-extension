@@ -26,12 +26,14 @@
 #include <chrono>
 #include <cstring>
 #include <iomanip>
+#include <sys/stat.h>
 
 // Platform-specific secure memory zeroization
 // Prevents compiler from optimizing away memory clearing operations
 #if defined(_WIN32)
 #define NOMINMAX // Prevent Windows from defining min/max macros that conflict with std::min/std::max
 #include <windows.h>
+#undef CreateDirectory // Undefine Windows macro that conflicts with DuckDB FileSystem::CreateDirectory
 #define SECURE_ZERO_MEMORY(ptr, size) SecureZeroMemory(ptr, size)
 #elif defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasm32__)
 // WASM: Use volatile loop (portable, works in browser environment)
@@ -171,6 +173,231 @@ std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt() 
 	return token_expires_at;
 }
 
+string RestApiSecretStorage::GetRefreshTokenPath() {
+	// Get home directory
+	const char *home = std::getenv("HOME");
+	if (!home) {
+#ifdef _WIN32
+		home = std::getenv("USERPROFILE");
+#endif
+	}
+	if (!home) {
+		throw IOException("Cannot determine home directory for refresh token storage");
+	}
+
+	// Create ~/.duckdb directory if it doesn't exist
+	string duckdb_dir = string(home) + "/.duckdb";
+	auto &fs = FileSystem::GetFileSystem(db);
+
+	if (!fs.DirectoryExists(duckdb_dir)) {
+		fs.CreateDirectory(duckdb_dir);
+	}
+
+	return duckdb_dir + "/.boilstream_refresh_token";
+}
+
+void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
+	if (!resumption_enabled) {
+		BOILSTREAM_LOG("SaveRefreshToken: Session resumption disabled, not persisting refresh token");
+		return;
+	}
+
+	BOILSTREAM_LOG("SaveRefreshToken: Saving refresh token to disk");
+
+	// Get current session data
+	RefreshTokenData data;
+	{
+		lock_guard<mutex> lock(session_lock);
+		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
+
+		if (refresh_token.empty()) {
+			throw IOException("SaveRefreshToken: No refresh token to save");
+		}
+
+		data.refresh_token = refresh_token;
+		data.endpoint_url = endpoint_url;
+		data.region = region;
+		data.expires_at = token_expires_at;
+	}
+
+	// Serialize data to JSON (unencrypted, protected by file permissions)
+	auto doc = yyjson_mut_doc_new(nullptr);
+	auto obj = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, obj);
+
+	yyjson_mut_obj_add_int(doc, obj, "version", 1);
+
+	// Convert refresh_token to base64
+	string refresh_token_b64 = Blob::ToBase64(string_t(string(data.refresh_token.begin(), data.refresh_token.end())));
+	yyjson_mut_obj_add_strcpy(doc, obj, "refresh_token", refresh_token_b64.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "endpoint_url", data.endpoint_url.c_str());
+	yyjson_mut_obj_add_strcpy(doc, obj, "region", data.region.c_str());
+
+	// Format expires_at as ISO8601 UTC
+	auto expires_time_t = std::chrono::system_clock::to_time_t(data.expires_at);
+	std::tm tm_utc;
+#ifdef _WIN32
+	gmtime_s(&tm_utc, &expires_time_t);
+#else
+	gmtime_r(&expires_time_t, &tm_utc);
+#endif
+	char expires_str[64];
+	std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+	yyjson_mut_obj_add_strcpy(doc, obj, "expires_at", expires_str);
+
+	auto json_str = yyjson_mut_write(doc, 0, nullptr);
+	string json_output(json_str);
+	free(json_str);
+	yyjson_mut_doc_free(doc);
+
+	// Write to file (overwrite if exists for token rotation)
+	string file_path = GetRefreshTokenPath();
+	auto &fs = FileSystem::GetFileSystem(db);
+
+	// Delete existing file if present (for token rotation)
+	if (fs.FileExists(file_path)) {
+		fs.RemoveFile(file_path);
+	}
+
+	auto handle = fs.OpenFile(file_path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+	fs.Write(*handle, const_cast<char *>(json_output.data()), json_output.size());
+	handle->Close();
+
+	// Set file permissions to 0600 (owner read/write only)
+	// This provides protection against other users on the system
+#ifndef _WIN32
+	chmod(file_path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+
+	BOILSTREAM_LOG("SaveRefreshToken: Successfully saved to " << file_path);
+}
+
+bool RestApiSecretStorage::LoadRefreshToken() {
+	BOILSTREAM_LOG("LoadRefreshToken: Attempting to load refresh token from disk");
+
+	string file_path = GetRefreshTokenPath();
+	auto &fs = FileSystem::GetFileSystem(db);
+
+	if (!fs.FileExists(file_path)) {
+		BOILSTREAM_LOG("LoadRefreshToken: File does not exist");
+		return false;
+	}
+
+	// Read file
+	auto handle = fs.OpenFile(file_path, FileFlags::FILE_FLAGS_READ);
+	auto file_size = fs.GetFileSize(*handle);
+	string file_contents(file_size, '\0');
+	fs.Read(*handle, const_cast<char *>(file_contents.data()), file_size);
+	handle->Close();
+
+	// Parse JSON
+	auto doc = yyjson_read(file_contents.c_str(), file_contents.size(), 0);
+	if (!doc) {
+		BOILSTREAM_LOG("LoadRefreshToken: Failed to parse JSON");
+		DeleteRefreshToken();
+		return false;
+	}
+
+	auto root = yyjson_doc_get_root(doc);
+	auto version_val = yyjson_obj_get(root, "version");
+	auto refresh_token_val = yyjson_obj_get(root, "refresh_token");
+	auto endpoint_val = yyjson_obj_get(root, "endpoint_url");
+	auto region_val = yyjson_obj_get(root, "region");
+	auto expires_val = yyjson_obj_get(root, "expires_at");
+
+	if (!version_val || !yyjson_is_int(version_val) || yyjson_get_int(version_val) != 1) {
+		yyjson_doc_free(doc);
+		BOILSTREAM_LOG("LoadRefreshToken: Invalid or unsupported version");
+		DeleteRefreshToken();
+		return false;
+	}
+
+	if (!refresh_token_val || !yyjson_is_str(refresh_token_val) || !endpoint_val || !yyjson_is_str(endpoint_val) ||
+	    !region_val || !yyjson_is_str(region_val) || !expires_val || !yyjson_is_str(expires_val)) {
+		yyjson_doc_free(doc);
+		BOILSTREAM_LOG("LoadRefreshToken: Missing required fields");
+		DeleteRefreshToken();
+		return false;
+	}
+
+	string refresh_token_b64 = yyjson_get_str(refresh_token_val);
+	string endpoint = yyjson_get_str(endpoint_val);
+	string region_str = yyjson_get_str(region_val);
+	string expires_str = yyjson_get_str(expires_val);
+
+	yyjson_doc_free(doc);
+
+	// Decode refresh token from base64
+	BOILSTREAM_LOG("LoadRefreshToken: Base64 token from file: " << refresh_token_b64);
+	string refresh_token_bytes_str = Blob::FromBase64(refresh_token_b64);
+	// Refresh token is derived using HKDF-Expand and should be exactly 32 bytes
+	if (refresh_token_bytes_str.size() != 32) {
+		BOILSTREAM_LOG("LoadRefreshToken: Invalid refresh token size: " << refresh_token_bytes_str.size()
+		                                                                << " (expected 32)");
+		DeleteRefreshToken();
+		return false;
+	}
+	BOILSTREAM_LOG("LoadRefreshToken: Loaded refresh token, size=" << refresh_token_bytes_str.size() << " bytes");
+
+	// Debug: compute and log what user_id SHOULD be from this token
+	char debug_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(refresh_token_bytes_str.c_str(), refresh_token_bytes_str.size(),
+	                                                  debug_hash);
+	string debug_user_id;
+	debug_user_id.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+		unsigned char byte = static_cast<unsigned char>(debug_hash[i]);
+		debug_user_id += hex_chars[(byte >> 4) & 0xF];
+		debug_user_id += hex_chars[byte & 0xF];
+	}
+	BOILSTREAM_LOG("LoadRefreshToken: Expected resume_user_id=" << debug_user_id);
+
+	// Parse expiration timestamp
+	std::chrono::system_clock::time_point expires_at;
+	try {
+		expires_at = ParseExpiresAt(expires_str);
+	} catch (...) {
+		BOILSTREAM_LOG("LoadRefreshToken: Failed to parse expires_at");
+		DeleteRefreshToken();
+		return false;
+	}
+
+	// Check if expired
+	auto now = std::chrono::system_clock::now();
+	if (now >= expires_at) {
+		BOILSTREAM_LOG("LoadRefreshToken: Refresh token has expired");
+		DeleteRefreshToken();
+		return false;
+	}
+
+	// Store in session
+	{
+		lock_guard<mutex> lock(session_lock);
+		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
+
+		refresh_token.assign(refresh_token_bytes_str.begin(), refresh_token_bytes_str.end());
+		endpoint_url = endpoint;
+		region = region_str;
+		token_expires_at = expires_at;
+	}
+
+	BOILSTREAM_LOG("LoadRefreshToken: Successfully loaded refresh token");
+	return true;
+}
+
+void RestApiSecretStorage::DeleteRefreshToken() {
+	BOILSTREAM_LOG("DeleteRefreshToken: Deleting refresh token file");
+
+	string file_path = GetRefreshTokenPath();
+	auto &fs = FileSystem::GetFileSystem(db);
+
+	if (fs.FileExists(file_path)) {
+		fs.RemoveFile(file_path);
+		BOILSTREAM_LOG("DeleteRefreshToken: File deleted");
+	}
+}
+
 void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string &context) {
 	// Validate token is not empty
 	if (token.empty()) {
@@ -298,8 +525,9 @@ void RestApiSecretStorage::PerformOpaqueRegistration(const string &password) {
 	BOILSTREAM_LOG("PerformOpaqueRegistration: SUCCESS - registration complete");
 }
 
-void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
-	BOILSTREAM_LOG("PerformOpaqueLogin: starting OPAQUE login");
+void RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool is_resume) {
+	BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+	               << ": starting OPAQUE " << (is_resume ? "resume" : "login"));
 
 	// Mark exchange as in progress
 	{
@@ -451,9 +679,11 @@ void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
 
 	BOILSTREAM_LOG("PerformOpaqueLogin: login-finish request: " << final_body);
 
+	// Use HttpPost with out_headers parameter to capture X-Boilstream-Session-Resumption
+	HTTPHeaders final_response_headers(db);
 	string final_response;
 	try {
-		final_response = HttpPost(finalize_url, final_body);
+		final_response = HttpPost(finalize_url, final_body, &final_response_headers);
 	} catch (const std::exception &e) {
 		lock_guard<mutex> lock(session_lock);
 		session_key.clear(); // Clear session_key on error
@@ -461,7 +691,8 @@ void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
 		throw IOException("OPAQUE login failed (finalization): " + string(e.what()));
 	}
 
-	BOILSTREAM_LOG("PerformOpaqueLogin: login-finish response: " << final_response);
+	BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+	               << ": login-finish response: " << final_response);
 
 	// Parse finalization response (contains access_token and expires_at)
 	auto final_response_doc = yyjson_read(final_response.c_str(), final_response.size(), 0);
@@ -469,7 +700,7 @@ void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
 		lock_guard<mutex> lock(session_lock);
 		session_key.clear(); // Clear session_key on error
 		is_exchanging = false;
-		throw IOException("OPAQUE login failed: Invalid finalization response from server");
+		throw IOException("OPAQUE login failed: Invalid finalization response from server (JSON parse error)");
 	}
 
 	auto final_response_root = yyjson_doc_get_root(final_response_doc);
@@ -552,9 +783,18 @@ void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
 		lock_guard<mutex> lock(session_lock);
 		access_token = new_access_token;
 
-		// Store OPAQUE session_key and refresh_token (convert string to vector<uint8_t>)
+		// Store OPAQUE session_key (convert string to vector<uint8_t>)
 		session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
-		refresh_token.assign(export_key_decoded.begin(), export_key_decoded.end());
+
+		// Derive refresh_token from session_key using HKDF-Expand per SECURITY_SPECIFICATION.md:158
+		// refresh_token = HKDF-Expand(session_key, "session-resumption-v1", 32 bytes)
+		// We use session_key directly as PRK (no Extract step needed since session_key is already derived)
+		const string info = "session-resumption-v1";
+		string info_with_counter = info + string(1, 0x01); // info || 0x01
+		char derived_key[32];
+		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(session_key.data()), session_key.size(),
+		                                        info_with_counter.c_str(), info_with_counter.size(), derived_key);
+		refresh_token.assign(derived_key, derived_key + 32);
 
 		// Reset sequence counter (starts at 0 for new session)
 		client_sequence = 0;
@@ -566,10 +806,103 @@ void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
 		is_exchanging = false;
 	}
 
+	// Check for X-Boilstream-Session-Resumption header to determine if we should persist refresh token
+	bool resumption_enabled = false;
+	auto header_map = ExtractBoilstreamHeaders(final_response_headers);
+	auto resumption_it = header_map.find("x-boilstream-session-resumption");
+	if (resumption_it != header_map.end()) {
+		string resumption_value = resumption_it->second;
+		std::transform(resumption_value.begin(), resumption_value.end(), resumption_value.begin(), ::tolower);
+		resumption_enabled = (resumption_value == "enabled");
+		BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+		               << ": X-Boilstream-Session-Resumption=" << resumption_value);
+	} else {
+		BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+		               << ": X-Boilstream-Session-Resumption header not present, assuming disabled");
+	}
+
+	// Save refresh token to disk if resumption is enabled
+	if (resumption_enabled) {
+		try {
+			SaveRefreshToken(true);
+			BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+			               << ": Refresh token saved for session resumption");
+		} catch (const std::exception &e) {
+			// Log but don't fail the login if we can't persist the token
+			BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+			               << ": WARNING - Failed to save refresh token: " << e.what());
+		}
+	}
+
 	BOILSTREAM_LOG(
-	    "PerformOpaqueLogin: SUCCESS, token expires in "
+	    (is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
+	    << ": SUCCESS, token expires in "
 	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
 	    << " hours");
+}
+
+void RestApiSecretStorage::PerformOpaqueLogin(const string &password) {
+	PerformOpaqueLoginCommon(password, false);
+}
+
+void RestApiSecretStorage::PerformOpaqueResume() {
+	BOILSTREAM_LOG("PerformOpaqueResume: Loading refresh token from disk");
+
+	// Load refresh token from disk
+	if (!LoadRefreshToken()) {
+		throw IOException("Session resumption failed: No valid refresh token found");
+	}
+
+	// Extract refresh token as password for OPAQUE
+	string refresh_token_password;
+	{
+		lock_guard<mutex> lock(session_lock);
+		if (refresh_token.empty()) {
+			throw IOException("Session resumption failed: Refresh token is empty");
+		}
+		refresh_token_password.assign(reinterpret_cast<const char *>(refresh_token.data()), refresh_token.size());
+	}
+
+	BOILSTREAM_LOG("PerformOpaqueResume: Loaded refresh token, starting OPAQUE resume");
+
+	// Use the common login flow with the refresh token
+	try {
+		PerformOpaqueLoginCommon(refresh_token_password, true);
+
+		// On successful resume, the old refresh token is now invalid
+		// The new one has been saved by PerformOpaqueLoginCommon
+		BOILSTREAM_LOG("PerformOpaqueResume: Session resumed successfully");
+	} catch (const std::exception &e) {
+		// Only delete token if it's actually invalid (not transient network/httpfs errors)
+		string error_msg = e.what();
+		bool is_transient_error = (error_msg.find("scheme is not supported") != string::npos) || // httpfs not loaded
+		                          (error_msg.find("not implemented") != string::npos) ||         // missing HTTP support
+		                          (error_msg.find("Connection refused") != string::npos) ||      // server down
+		                          (error_msg.find("Could not connect") != string::npos) ||       // network issue
+		                          (error_msg.find("Failed to connect") != string::npos) ||       // network issue
+		                          (error_msg.find("Timeout") != string::npos) ||                 // network timeout
+		                          (error_msg.find("timed out") != string::npos);                 // network timeout
+
+		if (is_transient_error) {
+			// Keep token AND endpoint for transient errors - user can retry later
+			BOILSTREAM_LOG(
+			    "PerformOpaqueResume: Resume failed due to transient error, keeping token and endpoint: " << error_msg);
+			// Don't clear endpoint - it's still valid, just couldn't connect right now
+		} else {
+			// Delete token for authentication failures (invalid/expired token)
+			BOILSTREAM_LOG("PerformOpaqueResume: Resume failed, deleting invalid token: " << error_msg);
+			DeleteRefreshToken();
+
+			// Clear endpoint since token is invalid
+			// This ensures tests expecting "endpoint not configured" work correctly
+			SetEndpoint("");
+		}
+
+		throw;
+	}
+
+	// Securely zero the refresh token password
+	SECURE_ZERO_MEMORY(const_cast<char *>(refresh_token_password.data()), refresh_token_password.size());
 }
 
 void RestApiSecretStorage::SetUserContextForConnection(idx_t connection_id, const string &user_id) {
@@ -1732,7 +2065,7 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 	return ""; // All retries exhausted
 }
 
-string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
+string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTTPHeaders *out_headers) {
 	BOILSTREAM_LOG("HttpPost: url=" << url << ", body_len=" << body.size());
 
 	// Check if URL is empty
@@ -1805,6 +2138,11 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body) {
 
 		// Get HTTP status code
 		auto status_code = static_cast<uint16_t>(response->status);
+
+		// Capture response headers if requested
+		if (out_headers) {
+			*out_headers = response->headers;
+		}
 
 		// Verify response signature and decrypt BEFORE checking status code
 		// This ensures error responses are also decrypted before being thrown
@@ -2330,12 +2668,29 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 
 	// Build URL using the endpoint URL
 	string url;
+	bool has_endpoint = false;
+	bool has_session = false;
 	{
-		lock_guard<mutex> lock(endpoint_lock);
+		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
+		lock_guard<mutex> session_lock_guard(session_lock);
 		url = endpoint_url;
+		has_endpoint = !endpoint_url.empty();
+		has_session = !access_token.empty();
 	}
 
 	BOILSTREAM_LOG("AllSecrets: endpoint_url=" << url);
+
+	// If endpoint is set but no active session, try to resume from refresh token
+	if (has_endpoint && !has_session) {
+		BOILSTREAM_LOG("AllSecrets: Endpoint set but no session, attempting resume");
+		try {
+			PerformOpaqueResume();
+			BOILSTREAM_LOG("AllSecrets: Resume successful");
+		} catch (const std::exception &e) {
+			BOILSTREAM_LOG("AllSecrets: Resume failed: " << e.what());
+			// Continue - will try unauthenticated or fail appropriately
+		}
+	}
 
 	// If endpoint not configured, return what's in local catalog
 	if (url.empty()) {
