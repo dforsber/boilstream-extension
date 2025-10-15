@@ -33,6 +33,7 @@
 #if defined(_WIN32)
 #define NOMINMAX // Prevent Windows from defining min/max macros that conflict with std::min/std::max
 #include <windows.h>
+#undef CreateDirectory // Undefine Windows macro that conflicts with DuckDB FileSystem::CreateDirectory
 #define SECURE_ZERO_MEMORY(ptr, size) SecureZeroMemory(ptr, size)
 #elif defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasm32__)
 // WASM: Use volatile loop (portable, works in browser environment)
