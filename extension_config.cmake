@@ -5,6 +5,7 @@ duckdb_extension_load(boilstream
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
     REQUIRES httpfs
+    LINKED_LIBS "${CMAKE_CURRENT_LIST_DIR}/opaque-client/target/wasm32-unknown-emscripten/release/libopaque_client.a"
 )
 
 # Any extra extensions that should be built
