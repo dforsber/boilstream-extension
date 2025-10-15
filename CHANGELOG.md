@@ -16,11 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Issue: WASM builds failed with missing library errors in CI/CD pipeline
   - Resolution: Extension build system now correctly links Rust library for all WASM variants (mvp, eh, threads)
 - **WASM wasm-opt compatibility**: Skip wasm-opt for WASM builds to avoid deprecated flag errors
-  - Added to `CMakeLists.txt`: `-O1` link flags for WASM builds
   - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
-  - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking
-  - Resolution: Use `-O1` optimization level which skips wasm-opt entirely
+  - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking in CI
+  - Root cause: DuckDB's global `-O3` optimization triggers wasm-opt with deprecated flags
+  - Resolution: Override CMAKE global flags early in CMakeLists.txt (lines 22-26)
+    - Set `CMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG"` for WASM builds
+    - Set `CMAKE_C_FLAGS_RELEASE="-O1 -DNDEBUG"` for WASM builds
+    - Previous fix (target_link_options) was insufficient - global flags take precedence
   - Impact: Basic optimizations still applied, but without problematic wasm-opt step
+  - Works locally vs CI: Local (Emscripten 4.0.16) vs CI (Emscripten 3.1.71)
   - Note: This matches the workaround already in `.cargo/config.toml` for Rust builds
 
 ### Technical Details

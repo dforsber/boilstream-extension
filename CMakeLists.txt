@@ -18,6 +18,12 @@ set(IS_WASM_BUILD OFF)
 if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
+
+    # Override DuckDB's default -O3 with -O1 for WASM to avoid wasm-opt
+    # This prevents the deprecated --enable-bulk-memory-opt flag error
+    set(CMAKE_CXX_FLAGS_RELEASE "-O1 -DNDEBUG")
+    set(CMAKE_C_FLAGS_RELEASE "-O1 -DNDEBUG")
+    message(STATUS "WASM: Overriding CMAKE optimization flags to -O1")
 endif()
 
 # Build the Rust OPAQUE client library
@@ -103,11 +109,12 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
 
 # Platform-specific configuration
 if(IS_WASM_BUILD)
-    # WASM: Skip wasm-opt to avoid --enable-bulk-memory-opt compatibility issues
-    # Use -O1 for basic optimizations without wasm-opt (newer Emscripten removed this flag)
+    # WASM: Additional link options
+    # Note: -O1 is set globally via CMAKE_CXX_FLAGS_RELEASE (line 24-25)
+    # This prevents DuckDB's -O3 from triggering wasm-opt with deprecated flags
     target_link_options(${EXTENSION_NAME} PRIVATE "-O1")
     target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-O1")
-    message(STATUS "WASM: Using -O1 link flags to skip wasm-opt")
+    message(STATUS "WASM: Using -O1 link flags (global CMAKE flags also set)")
 elseif(APPLE)
     # macOS frameworks for Rust
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
