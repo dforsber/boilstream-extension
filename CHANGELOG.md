@@ -5,6 +5,84 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-10-15
+
+### Added
+
+- **Session Resumption**: Persistent sessions across DuckDB restarts
+  - Refresh tokens derived from `session_key` using HKDF-Expand (RFC 5869)
+  - Derivation: `refresh_token = HKDF-Expand(session_key, "session-resumption-v1", 32 bytes)`
+  - Server-controlled via `X-Boilstream-Session-Resumption: enabled` header
+  - Refresh tokens saved to `~/.duckdb/.boilstream_refresh_token` (encrypted JSON format)
+  - Automatic session resumption on extension load (no re-authentication needed)
+  - File permissions: 0600 (owner read/write only) on Unix systems
+  - Expires after server-specified duration (included in refresh token metadata)
+- **Refresh Token Security**:
+  - `resume_user_id = SHA256(refresh_token)` for server-side lookup
+  - Encrypted storage format with version, endpoint, region, and expiration metadata
+  - Automatic deletion of expired or invalid tokens
+  - Protected by filesystem permissions (not readable by other users)
+- **New API Methods**:
+  - `SaveRefreshToken(bool resumption_enabled)`: Save refresh token to disk (if enabled)
+  - `LoadRefreshToken()`: Load and validate refresh token from disk
+  - `DeleteRefreshToken()`: Remove refresh token file
+  - `GetRefreshTokenPath()`: Get platform-specific path to token file
+- **Conformance Tests**: Added test coverage for session resumption
+  - A.4.4: Refresh token derivation with specification test vectors
+  - Integration tests for save/load/resume workflows
+  - Security tests for expired and invalid token handling
+
+### Changed
+
+- Extension now automatically attempts session resumption on load
+- `PerformOpaqueLogin()` saves refresh token when server enables resumption
+- Refresh token replaces `export_key` from OPAQUE protocol (same derivation, different purpose)
+- Session resumption is opt-in via server configuration (not client-controlled)
+
+### Fixed
+
+- **CRITICAL**: Windows build failure with `CreateDirectory` macro conflict
+  - Error: `'CreateDirectoryA': is not a member of 'duckdb::FileSystem'`
+  - Fixed: Added `#undef CreateDirectory` after `<windows.h>` include (src/boilstream_secret_storage.cpp:36)
+  - Windows.h defines `CreateDirectory` macro that expands to `CreateDirectoryA`
+  - Now properly calls DuckDB's `FileSystem::CreateDirectory` method
+  - Issue: Windows build failed on both MSVC and MinGW/rtools42
+  - Resolution: Platform-specific macro cleanup (similar to existing `NOMINMAX` pattern)
+
+### Security
+
+- **Enhanced**: Session resumption uses cryptographic derivation from session_key
+  - Refresh tokens are single-use and server-invalidated after use
+  - Cannot be replayed or reused once consumed
+- **Enhanced**: File permissions prevent other users from reading refresh tokens (Unix)
+- **Enhanced**: Automatic cleanup of expired tokens prevents stale credential accumulation
+- **Enhanced**: `resume_user_id` prevents refresh token enumeration attacks
+  - Server stores SHA256(refresh_token), not the token itself
+  - Attacker cannot reconstruct refresh token from database
+
+### Technical Details
+
+- **Refresh Token Derivation**: HKDF-Expand only (no Extract step)
+  - PRK: `session_key` (from OPAQUE protocol, 32 bytes)
+  - Info: `"session-resumption-v1"` (string literal)
+  - OKM: 32 bytes (256-bit refresh token)
+- **File Format**: JSON with encrypted metadata
+  - `version`: Schema version (currently 1)
+  - `refresh_token`: Base64-encoded token bytes
+  - `endpoint_url`: API endpoint for resumption
+  - `region`: Service region for request signing
+  - `expires_at`: ISO 8601 timestamp (UTC)
+- **File Path**: Platform-specific
+  - Unix/macOS: `~/.duckdb/.boilstream_refresh_token`
+  - Windows: `%USERPROFILE%\.duckdb\.boilstream_refresh_token`
+- **Test Coverage**: 3 new integration tests
+  - Refresh token save when server enables resumption
+  - Session resumption after DuckDB restart
+  - Automatic deletion of expired/invalid tokens
+- **Conformance**: Test vector validation (SECURITY_SPECIFICATION.md A.4.4)
+  - Expected refresh_token: `870246bc83f0728dac2c1d486834a7eefe1565c6252469c895374fc733828942`
+  - Expected resume_user_id: `4cf42b1fbdc10b41302f03978931de2ae6d4581c8531c6b740aa3a5c0043bd33`
+
 ## [0.3.0] - 2025-10-13
 
 ### Added
