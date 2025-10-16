@@ -15,28 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Required by DuckDB extension build system to locate static library during WASM linking
   - Issue: WASM builds failed with missing library errors in CI/CD pipeline
   - Resolution: Extension build system now correctly links Rust library for all WASM variants (mvp, eh, threads)
-- **WASM wasm-opt compatibility**: Skip wasm-opt for WASM builds to avoid deprecated flag errors
-  - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
+- **WASM wasm-opt compatibility**: Automatic emsdk 4.0.16 installation for WASM builds
+  - Issue: Emscripten 3.1.71 removed `--enable-bulk-memory-opt` flag from wasm-opt
   - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking in CI
   - Root cause: DuckDB's global `-O3` optimization triggers wasm-opt with deprecated flags
-  - Resolution: Override CMAKE global flags early in CMakeLists.txt (lines 22-26)
-    - Set `CMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG"` for WASM builds
-    - Set `CMAKE_C_FLAGS_RELEASE="-O1 -DNDEBUG"` for WASM builds
-    - Previous fix (target_link_options) was insufficient - global flags take precedence
-  - Impact: Basic optimizations still applied, but without problematic wasm-opt step
-  - Works locally vs CI: Local (Emscripten 4.0.16) vs CI (Emscripten 3.1.71)
-  - Note: This matches the workaround already in `.cargo/config.toml` for Rust builds
+  - Resolution: CMakeLists.txt automatically downloads and uses emsdk 4.0.16 (lines 22-58)
+    - Downloads emsdk to build directory during CMake configuration
+    - Installs and activates version 4.0.16 (one-time, then cached)
+    - Overrides CMAKE compilers (emcc, em++, emar, emranlib) to use new version
+    - Works without `.github` modifications (compatible with DuckDB community extensions)
+  - Fallback: Also sets `-O1` flags to prevent wasm-opt if emsdk override fails (lines 60-69)
+  - Impact: Full compatibility with both old (3.1.71) and new (4.0.16+) Emscripten versions
+  - Note: Rust builds already use `-O1` via `.cargo/config.toml` for consistency
 
 ### Technical Details
 
 - **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
 - **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
-- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (CMakeLists.txt:22-26)
-  - Additional target_link_options also set for defense-in-depth (lines 115-116)
-  - Global flags override necessary because DuckDB's build system sets `-O3` by default
+- **Emsdk Override**: Automatic installation during CMake configuration (CMakeLists.txt:22-58)
+  - Clones emsdk to `${CMAKE_CURRENT_BINARY_DIR}/emsdk` (cached between builds)
+  - Installs version 4.0.16 using `./emsdk install && ./emsdk activate`
+  - Overrides CMAKE_C_COMPILER, CMAKE_CXX_COMPILER, CMAKE_AR, CMAKE_RANLIB
+  - Path: `${EMSDK_DIR}/upstream/emscripten/emcc` and related tools
+- **Optimization Fallback**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 60-69)
+  - Provides defense-in-depth if compiler override doesn't work
+  - Additional target_link_options also set (lines 156-158)
 - **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
-- **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0
-- **Emscripten Versions**: CI uses 3.1.71 (deprecated flag issue), local development on 4.0.16 (works)
+- **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0 (no .github changes needed)
+- **Emscripten Versions**: Automatically uses 4.0.16 on all platforms (CI and local development)
 
 ## [0.3.1] - 2025-10-15
 

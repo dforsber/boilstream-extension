@@ -19,6 +19,44 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
+    # Override emsdk to use version 4.0.16 (fixes deprecated --enable-bulk-memory-opt flag in 3.1.71)
+    # This allows the extension to work in community extensions repo without .github modifications
+    set(EMSDK_VERSION "4.0.16")
+    set(EMSDK_DIR "${CMAKE_CURRENT_BINARY_DIR}/emsdk")
+    set(EMSCRIPTEN_DIR "${EMSDK_DIR}/upstream/emscripten")
+
+    if(NOT EXISTS "${EMSCRIPTEN_DIR}/emcc")
+        message(STATUS "WASM: Installing emsdk ${EMSDK_VERSION} to ${EMSDK_DIR}")
+        execute_process(
+            COMMAND git clone --depth 1 https://github.com/emscripten-core/emsdk.git "${EMSDK_DIR}"
+            RESULT_VARIABLE EMSDK_CLONE_RESULT
+        )
+        if(NOT EMSDK_CLONE_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to clone emsdk repository")
+        endif()
+
+        execute_process(
+            COMMAND bash -c "cd '${EMSDK_DIR}' && ./emsdk install ${EMSDK_VERSION} && ./emsdk activate ${EMSDK_VERSION}"
+            RESULT_VARIABLE EMSDK_INSTALL_RESULT
+        )
+        if(NOT EMSDK_INSTALL_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to install emsdk ${EMSDK_VERSION}")
+        endif()
+
+        message(STATUS "WASM: Successfully installed emsdk ${EMSDK_VERSION}")
+    else()
+        message(STATUS "WASM: Using cached emsdk at ${EMSDK_DIR}")
+    endif()
+
+    # Override CMAKE compilers to use our emsdk version
+    if(EXISTS "${EMSCRIPTEN_DIR}/emcc")
+        message(STATUS "WASM: Overriding compilers to use emsdk ${EMSDK_VERSION}")
+        set(CMAKE_C_COMPILER "${EMSCRIPTEN_DIR}/emcc" CACHE FILEPATH "C compiler" FORCE)
+        set(CMAKE_CXX_COMPILER "${EMSCRIPTEN_DIR}/em++" CACHE FILEPATH "C++ compiler" FORCE)
+        set(CMAKE_AR "${EMSCRIPTEN_DIR}/emar" CACHE FILEPATH "Archiver" FORCE)
+        set(CMAKE_RANLIB "${EMSCRIPTEN_DIR}/emranlib" CACHE FILEPATH "Ranlib" FORCE)
+    endif()
+
     # FORCE override DuckDB's -O3 flags to prevent wasm-opt with deprecated flags
     # DuckDB's CMakeLists.txt sets these with APPEND, so we need FORCE to override
     set(CMAKE_CXX_FLAGS_RELEASE "-O1 -DNDEBUG" CACHE STRING "Flags used by the compiler during release builds" FORCE)
