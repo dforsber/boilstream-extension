@@ -31,10 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
 - **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
-- **Link Optimization**: `-O1` flag for both `boilstream_extension` and `boilstream_loadable_extension` targets
+- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (CMakeLists.txt:22-26)
+  - Additional target_link_options also set for defense-in-depth (lines 115-116)
+  - Global flags override necessary because DuckDB's build system sets `-O3` by default
 - **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
 - **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0
-- **Emscripten Versions**: Tested with 3.1.71 (deprecated flag issue present)
+- **Emscripten Versions**: CI uses 3.1.71 (deprecated flag issue), local development on 4.0.16 (works)
 
 ## [0.3.1] - 2025-10-15
 

@@ -19,11 +19,12 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
-    # Override DuckDB's default -O3 with -O1 for WASM to avoid wasm-opt
-    # This prevents the deprecated --enable-bulk-memory-opt flag error
-    set(CMAKE_CXX_FLAGS_RELEASE "-O1 -DNDEBUG")
-    set(CMAKE_C_FLAGS_RELEASE "-O1 -DNDEBUG")
-    message(STATUS "WASM: Overriding CMAKE optimization flags to -O1")
+    # FORCE override DuckDB's -O3 flags to prevent wasm-opt with deprecated flags
+    # DuckDB's CMakeLists.txt sets these with APPEND, so we need FORCE to override
+    set(CMAKE_CXX_FLAGS_RELEASE "-O1 -DNDEBUG" CACHE STRING "Flags used by the compiler during release builds" FORCE)
+    set(CMAKE_C_FLAGS_RELEASE "-O1 -DNDEBUG" CACHE STRING "Flags used by the compiler during release builds" FORCE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O1" CACHE STRING "General C++ flags" FORCE)
+    message(STATUS "WASM: FORCE overriding CMAKE flags to -O1 to prevent wasm-opt")
 endif()
 
 # Build the Rust OPAQUE client library
