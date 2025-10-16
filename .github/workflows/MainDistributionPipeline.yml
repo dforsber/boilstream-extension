@@ -17,7 +17,7 @@ jobs:
     uses: dforsber/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       duckdb_version: v1.4.0
-      ci_tools_version: v1.4.0
+      ci_tools_version: main
       extension_name: boilstream
       extra_toolchains: 'rust'
       override_ci_tools_repository: 'dforsber/extension-ci-tools'
