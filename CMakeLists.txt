@@ -19,43 +19,20 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
-    # Override emsdk to use version 4.0.16 (fixes deprecated --enable-bulk-memory-opt flag in 3.1.71)
-    # This allows the extension to work in community extensions repo without .github modifications
-    set(EMSDK_VERSION "4.0.16")
-    set(EMSDK_DIR "${CMAKE_CURRENT_BINARY_DIR}/emsdk")
-    set(EMSCRIPTEN_DIR "${EMSDK_DIR}/upstream/emscripten")
+    # Install wasm-opt wrapper to filter deprecated --enable-bulk-memory-opt flag
+    # This works with Emscripten 3.1.71+ which removed this flag
+    # Create wrapper in scripts directory
+    set(WASM_OPT_WRAPPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+    set(WASM_OPT_WRAPPER "${WASM_OPT_WRAPPER_DIR}/wasm-opt")
 
-    if(NOT EXISTS "${EMSCRIPTEN_DIR}/emcc")
-        message(STATUS "WASM: Installing emsdk ${EMSDK_VERSION} to ${EMSDK_DIR}")
-        execute_process(
-            COMMAND git clone --depth 1 https://github.com/emscripten-core/emsdk.git "${EMSDK_DIR}"
-            RESULT_VARIABLE EMSDK_CLONE_RESULT
-        )
-        if(NOT EMSDK_CLONE_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to clone emsdk repository")
-        endif()
+    # Create wrapper script that calls wasm-opt-wrapper.sh
+    file(WRITE "${WASM_OPT_WRAPPER}"
+        "#!/bin/bash\nexec \"${CMAKE_CURRENT_SOURCE_DIR}/scripts/wasm-opt-wrapper.sh\" \"$@\"\n")
+    execute_process(COMMAND chmod +x "${WASM_OPT_WRAPPER}")
 
-        execute_process(
-            COMMAND bash -c "cd '${EMSDK_DIR}' && ./emsdk install ${EMSDK_VERSION} && ./emsdk activate ${EMSDK_VERSION}"
-            RESULT_VARIABLE EMSDK_INSTALL_RESULT
-        )
-        if(NOT EMSDK_INSTALL_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to install emsdk ${EMSDK_VERSION}")
-        endif()
-
-        message(STATUS "WASM: Successfully installed emsdk ${EMSDK_VERSION}")
-    else()
-        message(STATUS "WASM: Using cached emsdk at ${EMSDK_DIR}")
-    endif()
-
-    # Override CMAKE compilers to use our emsdk version
-    if(EXISTS "${EMSCRIPTEN_DIR}/emcc")
-        message(STATUS "WASM: Overriding compilers to use emsdk ${EMSDK_VERSION}")
-        set(CMAKE_C_COMPILER "${EMSCRIPTEN_DIR}/emcc" CACHE FILEPATH "C compiler" FORCE)
-        set(CMAKE_CXX_COMPILER "${EMSCRIPTEN_DIR}/em++" CACHE FILEPATH "C++ compiler" FORCE)
-        set(CMAKE_AR "${EMSCRIPTEN_DIR}/emar" CACHE FILEPATH "Archiver" FORCE)
-        set(CMAKE_RANLIB "${EMSCRIPTEN_DIR}/emranlib" CACHE FILEPATH "Ranlib" FORCE)
-    endif()
+    # Prepend wrapper directory to PATH so our wasm-opt is found first
+    set(ENV{PATH} "${WASM_OPT_WRAPPER_DIR}:$ENV{PATH}")
+    message(STATUS "WASM: Installed wasm-opt wrapper at ${WASM_OPT_WRAPPER}")
 
     # FORCE override DuckDB's -O3 flags to prevent wasm-opt with deprecated flags
     # DuckDB's CMakeLists.txt sets these with APPEND, so we need FORCE to override

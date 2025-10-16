@@ -15,16 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Required by DuckDB extension build system to locate static library during WASM linking
   - Issue: WASM builds failed with missing library errors in CI/CD pipeline
   - Resolution: Extension build system now correctly links Rust library for all WASM variants (mvp, eh, threads)
-- **WASM wasm-opt compatibility**: Automatic emsdk 4.0.16 installation for WASM builds
-  - Issue: Emscripten 3.1.71 removed `--enable-bulk-memory-opt` flag from wasm-opt
+- **WASM wasm-opt compatibility**: Wrapper script filters deprecated `--enable-bulk-memory-opt` flag
+  - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
   - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking in CI
-  - Root cause: DuckDB's global `-O3` optimization triggers wasm-opt with deprecated flags
-  - Resolution: CMakeLists.txt automatically downloads and uses emsdk 4.0.16 (lines 22-58)
-    - Downloads emsdk to build directory during CMake configuration
-    - Installs and activates version 4.0.16 (one-time, then cached)
-    - Overrides CMAKE compilers (emcc, em++, emar, emranlib) to use new version
+  - Root cause: DuckDB's hard-coded `-O3` optimization (line 957) triggers wasm-opt with deprecated flags
+  - Resolution: `scripts/wasm-opt-wrapper.sh` intercepts wasm-opt calls and filters the flag
+    - CMakeLists.txt creates symlink in build directory (lines 22-42)
+    - Prepends wrapper directory to PATH so wrapper is called instead of real wasm-opt
+    - Wrapper finds real wasm-opt and passes through all args except deprecated flag
     - Works without `.github` modifications (compatible with DuckDB community extensions)
-  - Fallback: Also sets `-O1` flags to prevent wasm-opt if emsdk override fails (lines 60-69)
+  - Defense-in-depth: Also sets `-O1` CMAKE flags to reduce wasm-opt usage (lines 44-49)
   - Impact: Full compatibility with both old (3.1.71) and new (4.0.16+) Emscripten versions
   - Note: Rust builds already use `-O1` via `.cargo/config.toml` for consistency
 
@@ -32,17 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
 - **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
-- **Emsdk Override**: Automatic installation during CMake configuration (CMakeLists.txt:22-58)
-  - Clones emsdk to `${CMAKE_CURRENT_BINARY_DIR}/emsdk` (cached between builds)
-  - Installs version 4.0.16 using `./emsdk install && ./emsdk activate`
-  - Overrides CMAKE_C_COMPILER, CMAKE_CXX_COMPILER, CMAKE_AR, CMAKE_RANLIB
-  - Path: `${EMSDK_DIR}/upstream/emscripten/emcc` and related tools
-- **Optimization Fallback**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 60-69)
-  - Provides defense-in-depth if compiler override doesn't work
-  - Additional target_link_options also set (lines 156-158)
+- **wasm-opt Wrapper**: Filters deprecated flags during build (CMakeLists.txt:22-42)
+  - Script location: `scripts/wasm-opt-wrapper.sh`
+  - Symlink created: `${CMAKE_CURRENT_BINARY_DIR}/wasm-opt-wrapper/wasm-opt`
+  - PATH modification: Prepends wrapper directory via `set(ENV{PATH})`
+  - Wrapper logic: Finds real wasm-opt, filters `--enable-bulk-memory-opt`, passes through other args
+- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 44-49)
+  - Provides defense-in-depth by reducing wasm-opt invocations
+  - Additional target_link_options also set (lines 118-120)
+  - FORCE flag ensures DuckDB's -O3 defaults are overridden
 - **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
 - **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0 (no .github changes needed)
-- **Emscripten Versions**: Automatically uses 4.0.16 on all platforms (CI and local development)
+- **Emscripten Versions**: Works with 3.1.71+ and 4.0.16+ (deprecated flag filtered transparently)
 
 ## [0.3.1] - 2025-10-15
 
