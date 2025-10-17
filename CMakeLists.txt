@@ -19,20 +19,63 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
-    # Install wasm-opt wrapper to filter deprecated --enable-bulk-memory-opt flag
+    # Replace wasm-opt with wrapper to filter deprecated --enable-bulk-memory-opt flag
     # This works with Emscripten 3.1.71+ which removed this flag
-    # Create wrapper in scripts directory
-    set(WASM_OPT_WRAPPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
-    set(WASM_OPT_WRAPPER "${WASM_OPT_WRAPPER_DIR}/wasm-opt")
+    # emcc uses absolute paths to wasm-opt, so we must replace the binary itself
 
-    # Create wrapper script that calls wasm-opt-wrapper.sh
-    file(WRITE "${WASM_OPT_WRAPPER}"
-        "#!/bin/bash\nexec \"${CMAKE_CURRENT_SOURCE_DIR}/scripts/wasm-opt-wrapper.sh\" \"$@\"\n")
-    execute_process(COMMAND chmod +x "${WASM_OPT_WRAPPER}")
+    # Find wasm-opt in PATH (should be from emsdk)
+    execute_process(
+        COMMAND which wasm-opt
+        OUTPUT_VARIABLE WASM_OPT_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
 
-    # Prepend wrapper directory to PATH so our wasm-opt is found first
-    set(ENV{PATH} "${WASM_OPT_WRAPPER_DIR}:$ENV{PATH}")
-    message(STATUS "WASM: Installed wasm-opt wrapper at ${WASM_OPT_WRAPPER}")
+    if(WASM_OPT_PATH)
+        message(STATUS "WASM: Found wasm-opt at ${WASM_OPT_PATH}")
+
+        # Backup the original wasm-opt
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E copy "${WASM_OPT_PATH}" "${WASM_OPT_PATH}.original"
+            RESULT_VARIABLE BACKUP_RESULT
+            ERROR_QUIET
+        )
+
+        if(BACKUP_RESULT EQUAL 0)
+            message(STATUS "WASM: Backed up original wasm-opt to ${WASM_OPT_PATH}.original")
+
+            # Create wrapper script that calls the original wasm-opt
+            file(WRITE "${WASM_OPT_PATH}.tmp"
+                "#!/bin/bash\n"
+                "# Wrapper to filter deprecated --enable-bulk-memory-opt flag\n"
+                "FILTERED_ARGS=()\n"
+                "for arg in \"$@\"; do\n"
+                "    if [ \"$arg\" != \"--enable-bulk-memory-opt\" ]; then\n"
+                "        FILTERED_ARGS+=(\"$arg\")\n"
+                "    fi\n"
+                "done\n"
+                "exec \"${WASM_OPT_PATH}.original\" \"${FILTERED_ARGS[@]}\"\n"
+            )
+
+            # Replace wasm-opt with our wrapper
+            execute_process(COMMAND chmod +x "${WASM_OPT_PATH}.tmp")
+            execute_process(
+                COMMAND ${CMAKE_COMMAND} -E copy "${WASM_OPT_PATH}.tmp" "${WASM_OPT_PATH}"
+                RESULT_VARIABLE REPLACE_RESULT
+            )
+            execute_process(COMMAND ${CMAKE_COMMAND} -E remove "${WASM_OPT_PATH}.tmp")
+
+            if(REPLACE_RESULT EQUAL 0)
+                message(STATUS "WASM: Replaced wasm-opt with wrapper to filter deprecated flags")
+            else()
+                message(WARNING "WASM: Failed to replace wasm-opt with wrapper")
+            endif()
+        else()
+            message(WARNING "WASM: Failed to backup wasm-opt, skipping wrapper installation")
+        endif()
+    else()
+        message(WARNING "WASM: Could not find wasm-opt in PATH")
+    endif()
 
     # FORCE override DuckDB's -O3 flags to prevent wasm-opt with deprecated flags
     # DuckDB's CMakeLists.txt sets these with APPEND, so we need FORCE to override

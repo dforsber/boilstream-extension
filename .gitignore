@@ -6,6 +6,3 @@ duckdb_unittest_tempdir/
 testext
 test/python/__pycache__/
 .Rhistory
-
-# Generated wasm-opt wrapper (created by CMakeLists.txt)
-scripts/wasm-opt
