@@ -15,45 +15,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Required by DuckDB extension build system to locate static library during WASM linking
   - Issue: WASM builds failed with missing library errors in CI/CD pipeline
   - Resolution: Extension build system now correctly links Rust library for all WASM variants (mvp, eh, threads)
-- **WASM wasm-opt compatibility**: Replace wasm-opt binary to filter deprecated `--enable-bulk-memory-opt` flag
-  - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
+- **WASM wasm-opt compatibility**: Replace wasm-opt binary with Binaryen version_124
+  - Issue: Emscripten 3.1.71 uses Binaryen 120 which removed `--enable-bulk-memory-opt` flag
   - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking in CI
   - Root cause: DuckDB's hard-coded `-O3` optimization triggers wasm-opt with deprecated flags
-  - Resolution: Custom build target replaces wasm-opt before linking (CMakeLists.txt:22-78, 170-171)
-    - Creates `install_wasm_opt_wrapper` custom target during CMake configuration
-    - Target runs shell script during build (after emsdk is activated)
-    - Script finds wasm-opt using `which wasm-opt` (now available in PATH)
+  - Resolution: Replace wasm-opt binary during CMake configuration (CMakeLists.txt:22-93)
+    - Detects emsdk location from `$EMSDK` environment variable
+    - Downloads Binaryen version_124 from GitHub releases (same as Emscripten 4.0.16)
+    - Extracts wasm-opt binary from archive
     - Backs up original to `wasm-opt.original`
-    - Replaces binary with wrapper that filters `--enable-bulk-memory-opt`
-    - Wrapper calls original wasm-opt with filtered arguments
-    - Extension targets depend on wrapper target (ensures proper ordering)
+    - Replaces emsdk's wasm-opt with newer version
+    - Idempotent: skips if backup already exists (supports incremental builds)
     - Works without `.github` modifications (compatible with DuckDB community extensions)
-  - Defense-in-depth: Also sets `-O1` CMAKE flags to reduce wasm-opt usage (lines 72-77)
-  - Impact: Full compatibility with both old (3.1.71) and new (4.0.16+) Emscripten versions
+  - Defense-in-depth: Also sets `-O1` CMAKE flags to reduce wasm-opt usage (lines 95-100)
+  - Impact: Full compatibility - uses Binaryen 124 which doesn't have deprecated flags
   - Note: Rust builds already use `-O1` via `.cargo/config.toml` for consistency
 
 ### Technical Details
 
 - **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
 - **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
-- **wasm-opt Binary Replacement**: Custom build target approach (CMakeLists.txt:22-78, 170-171)
-  - Configuration phase: Creates `install_wasm_opt_wrapper.sh` script and custom target
-  - Build phase: Target executes before extension linking (dependency added at line 170-171)
-  - Detection: Script uses `which wasm-opt` to find binary (runs after emsdk activation)
-  - Idempotency: Skips if `wasm-opt.original` already exists (supports incremental builds)
-  - Backup: Copies original to `wasm-opt.original`
-  - Wrapper: Creates inline bash script that filters `--enable-bulk-memory-opt` from arguments
-  - Replacement: Atomically replaces wasm-opt binary (creates `.new`, then `mv`)
-  - Execution: Wrapper finds and calls `wasm-opt.original` with filtered arguments
-  - Reason: emcc uses absolute paths to wasm-opt; must replace actual binary, not PATH
-  - Timing: Must run during build (not CMake config) because emsdk activates later
-- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 72-77)
+- **wasm-opt Binary Replacement**: Direct binary upgrade approach (CMakeLists.txt:22-93)
+  - Detection: Uses `$EMSDK` environment variable to locate emsdk installation
+  - Target path: `$EMSDK/upstream/bin/wasm-opt`
+  - Source: Downloads Binaryen version_124 tarball from GitHub releases
+  - Download URL: `https://github.com/WebAssembly/binaryen/releases/download/version_124/binaryen-version_124-x86_64-linux.tar.gz`
+  - Extraction: Uses CMake's built-in tar extraction
+  - Binary path: `binaryen-version_124/bin/wasm-opt`
+  - Backup: Copies original to `wasm-opt.original` before replacement
+  - Installation: Copies new binary over original, preserves execute permissions
+  - Idempotency: Skips if backup exists (incremental builds work)
+  - Timing: Runs during CMake configuration (before build starts)
+  - Binaryen 124: Matches Emscripten 4.0.16, doesn't have deprecated `--enable-bulk-memory-opt`
+- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 95-100)
   - Provides defense-in-depth by reducing wasm-opt invocations
-  - Additional target_link_options also set (lines 166-167)
+  - Additional target_link_options also set (lines 189-190)
   - FORCE flag attempts to override DuckDB's -O3 defaults (limited effectiveness)
 - **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
 - **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0 (no .github changes needed)
-- **Emscripten Versions**: Works with 3.1.71+ and 4.0.16+ (deprecated flag filtered transparently)
+- **Binaryen Compatibility**: Uses version_124 which is compatible with both old and new Emscripten
 
 ## [0.3.1] - 2025-10-15
 

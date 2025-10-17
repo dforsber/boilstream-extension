@@ -19,55 +19,78 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
-    # Create a custom target to replace wasm-opt with wrapper at build time
-    # This must run during build, not CMake configuration, because emsdk isn't activated yet
+    # Replace wasm-opt from emsdk 3.1.71 with version from 4.0.16
+    # Use $EMSDK environment variable to find the installation
+    if(DEFINED ENV{EMSDK})
+        set(EMSDK_PATH "$ENV{EMSDK}")
+        set(WASM_OPT_PATH "${EMSDK_PATH}/upstream/bin/wasm-opt")
 
-    # Create the wrapper installation script
-    set(WASM_OPT_WRAPPER_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_wasm_opt_wrapper.sh")
-    file(WRITE "${WASM_OPT_WRAPPER_SCRIPT}"
-        "#!/bin/bash\n"
-        "set -e\n"
-        "# Find wasm-opt in PATH\n"
-        "WASM_OPT_PATH=\$(which wasm-opt 2>/dev/null || true)\n"
-        "if [ -z \"\$WASM_OPT_PATH\" ]; then\n"
-        "    echo 'Warning: wasm-opt not found in PATH'\n"
-        "    exit 0\n"
-        "fi\n"
-        "# Skip if already wrapped\n"
-        "if [ -f \"\${WASM_OPT_PATH}.original\" ]; then\n"
-        "    echo \"wasm-opt wrapper already installed at \$WASM_OPT_PATH\"\n"
-        "    exit 0\n"
-        "fi\n"
-        "echo \"Installing wasm-opt wrapper at \$WASM_OPT_PATH\"\n"
-        "# Backup original\n"
-        "cp \"\$WASM_OPT_PATH\" \"\${WASM_OPT_PATH}.original\"\n"
-        "# Create wrapper\n"
-        "cat > \"\${WASM_OPT_PATH}.new\" << 'WRAPPER_EOF'\n"
-        "#!/bin/bash\n"
-        "# Wrapper to filter deprecated --enable-bulk-memory-opt flag\n"
-        "WASM_OPT_ORIGINAL=\"\$(dirname \"\$0\")/\$(basename \"\$0\").original\"\n"
-        "FILTERED_ARGS=()\n"
-        "for arg in \"\$@\"; do\n"
-        "    if [ \"\$arg\" != \"--enable-bulk-memory-opt\" ]; then\n"
-        "        FILTERED_ARGS+=(\"\$arg\")\n"
-        "    fi\n"
-        "done\n"
-        "exec \"\$WASM_OPT_ORIGINAL\" \"\${FILTERED_ARGS[@]}\"\n"
-        "WRAPPER_EOF\n"
-        "chmod +x \"\${WASM_OPT_PATH}.new\"\n"
-        "mv \"\${WASM_OPT_PATH}.new\" \"\$WASM_OPT_PATH\"\n"
-        "echo \"Successfully installed wasm-opt wrapper\"\n"
-    )
-    execute_process(COMMAND chmod +x "${WASM_OPT_WRAPPER_SCRIPT}")
+        message(STATUS "WASM: Found EMSDK at ${EMSDK_PATH}")
 
-    # Create a custom target that runs before building our extension
-    add_custom_target(install_wasm_opt_wrapper
-        COMMAND ${WASM_OPT_WRAPPER_SCRIPT}
-        COMMENT "Installing wasm-opt wrapper to filter deprecated flags"
-        VERBATIM
-    )
+        if(EXISTS "${WASM_OPT_PATH}" AND NOT EXISTS "${WASM_OPT_PATH}.original")
+            message(STATUS "WASM: Downloading wasm-opt from Emscripten 4.0.16")
 
-    message(STATUS "WASM: Will install wasm-opt wrapper during build")
+            # Download Binaryen (contains wasm-opt) from Emscripten storage
+            # Emscripten 4.0.16 uses Binaryen version 124
+            # Get it from the same source that emsdk uses
+            set(BINARYEN_VERSION "version_124")
+            set(BINARYEN_URL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz")
+            set(BINARYEN_ARCHIVE "${CMAKE_CURRENT_BINARY_DIR}/binaryen.tar.gz")
+            set(BINARYEN_EXTRACT_DIR "${CMAKE_CURRENT_BINARY_DIR}/binaryen-extracted")
+
+            message(STATUS "WASM: Downloading Binaryen ${BINARYEN_VERSION}")
+            file(DOWNLOAD "${BINARYEN_URL}" "${BINARYEN_ARCHIVE}"
+                STATUS DOWNLOAD_STATUS
+                SHOW_PROGRESS
+            )
+
+            list(GET DOWNLOAD_STATUS 0 DOWNLOAD_RESULT)
+            if(DOWNLOAD_RESULT EQUAL 0)
+                message(STATUS "WASM: Extracting Binaryen archive")
+
+                # Extract the archive
+                execute_process(
+                    COMMAND ${CMAKE_COMMAND} -E tar xzf "${BINARYEN_ARCHIVE}"
+                    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+                    RESULT_VARIABLE EXTRACT_RESULT
+                )
+
+                if(EXTRACT_RESULT EQUAL 0)
+                    # Find the wasm-opt binary in extracted files
+                    set(NEW_WASM_OPT "${CMAKE_CURRENT_BINARY_DIR}/binaryen-${BINARYEN_VERSION}/bin/wasm-opt")
+
+                    if(EXISTS "${NEW_WASM_OPT}")
+                        # Backup original
+                        execute_process(
+                            COMMAND ${CMAKE_COMMAND} -E copy "${WASM_OPT_PATH}" "${WASM_OPT_PATH}.original"
+                        )
+
+                        # Replace with new version
+                        execute_process(
+                            COMMAND ${CMAKE_COMMAND} -E copy "${NEW_WASM_OPT}" "${WASM_OPT_PATH}"
+                        )
+                        execute_process(COMMAND chmod +x "${WASM_OPT_PATH}")
+
+                        message(STATUS "WASM: Successfully replaced wasm-opt with Binaryen ${BINARYEN_VERSION}")
+                    else()
+                        message(WARNING "WASM: wasm-opt not found in extracted archive at ${NEW_WASM_OPT}")
+                    endif()
+                else()
+                    message(WARNING "WASM: Failed to extract Binaryen archive")
+                endif()
+            else()
+                message(WARNING "WASM: Failed to download Binaryen - ${DOWNLOAD_STATUS}")
+            endif()
+        elseif(EXISTS "${WASM_OPT_PATH}.original")
+            message(STATUS "WASM: wasm-opt already replaced (backup exists)")
+        else()
+            message(WARNING "WASM: wasm-opt not found at expected path: ${WASM_OPT_PATH}")
+        endif()
+    else()
+        message(WARNING "WASM: EMSDK environment variable not set")
+    endif()
+
+    message(STATUS "WASM: Configured to use updated wasm-opt")
 
     # FORCE override DuckDB's -O3 flags to prevent wasm-opt with deprecated flags
     # DuckDB's CMakeLists.txt sets these with APPEND, so we need FORCE to override
@@ -161,14 +184,10 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
 # Platform-specific configuration
 if(IS_WASM_BUILD)
     # WASM: Additional link options
-    # Note: -O1 is set globally via CMAKE_CXX_FLAGS_RELEASE (line 24-25)
-    # This prevents DuckDB's -O3 from triggering wasm-opt with deprecated flags
+    # Note: -O1 is set globally via CMAKE_CXX_FLAGS_RELEASE
+    # This provides defense-in-depth even though we replaced wasm-opt
     target_link_options(${EXTENSION_NAME} PRIVATE "-O1")
     target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-O1")
-
-    # Ensure wasm-opt wrapper is installed before linking
-    add_dependencies(${EXTENSION_NAME} install_wasm_opt_wrapper)
-    add_dependencies(${LOADABLE_EXTENSION_NAME} install_wasm_opt_wrapper)
 
     message(STATUS "WASM: Using -O1 link flags (global CMAKE flags also set)")
 elseif(APPLE)
