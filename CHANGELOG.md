@@ -19,13 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Issue: Emscripten 3.1.71+ removed `--enable-bulk-memory-opt` flag from wasm-opt
   - Error: `Unknown option '--enable-bulk-memory-opt'` during final WASM linking in CI
   - Root cause: DuckDB's hard-coded `-O3` optimization triggers wasm-opt with deprecated flags
-  - Resolution: CMakeLists.txt replaces wasm-opt binary with filtering wrapper (lines 22-78)
-    - Finds wasm-opt in PATH using `which wasm-opt`
+  - Resolution: Custom build target replaces wasm-opt before linking (CMakeLists.txt:22-78, 170-171)
+    - Creates `install_wasm_opt_wrapper` custom target during CMake configuration
+    - Target runs shell script during build (after emsdk is activated)
+    - Script finds wasm-opt using `which wasm-opt` (now available in PATH)
     - Backs up original to `wasm-opt.original`
-    - Replaces binary with wrapper script that filters `--enable-bulk-memory-opt`
+    - Replaces binary with wrapper that filters `--enable-bulk-memory-opt`
     - Wrapper calls original wasm-opt with filtered arguments
+    - Extension targets depend on wrapper target (ensures proper ordering)
     - Works without `.github` modifications (compatible with DuckDB community extensions)
-  - Defense-in-depth: Also sets `-O1` CMAKE flags to reduce wasm-opt usage (lines 80-85)
+  - Defense-in-depth: Also sets `-O1` CMAKE flags to reduce wasm-opt usage (lines 72-77)
   - Impact: Full compatibility with both old (3.1.71) and new (4.0.16+) Emscripten versions
   - Note: Rust builds already use `-O1` via `.cargo/config.toml` for consistency
 
@@ -33,16 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Build Configuration**: `extension_config.cmake` now includes `LINKED_LIBS` parameter
 - **Library Path**: Uses `${CMAKE_CURRENT_LIST_DIR}` for absolute path resolution
-- **wasm-opt Binary Replacement**: Filters deprecated flags by replacing the binary (CMakeLists.txt:22-78)
-  - Detection: Uses `which wasm-opt` to find binary in emsdk PATH
+- **wasm-opt Binary Replacement**: Custom build target approach (CMakeLists.txt:22-78, 170-171)
+  - Configuration phase: Creates `install_wasm_opt_wrapper.sh` script and custom target
+  - Build phase: Target executes before extension linking (dependency added at line 170-171)
+  - Detection: Script uses `which wasm-opt` to find binary (runs after emsdk activation)
+  - Idempotency: Skips if `wasm-opt.original` already exists (supports incremental builds)
   - Backup: Copies original to `wasm-opt.original`
-  - Wrapper: Creates bash script that filters `--enable-bulk-memory-opt` from arguments
-  - Replacement: Overwrites wasm-opt binary with wrapper script
-  - Execution: Wrapper calls original binary with filtered arguments
-  - Reason: emcc uses absolute paths to wasm-opt, so PATH modification doesn't work
-- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 80-85)
+  - Wrapper: Creates inline bash script that filters `--enable-bulk-memory-opt` from arguments
+  - Replacement: Atomically replaces wasm-opt binary (creates `.new`, then `mv`)
+  - Execution: Wrapper finds and calls `wasm-opt.original` with filtered arguments
+  - Reason: emcc uses absolute paths to wasm-opt; must replace actual binary, not PATH
+  - Timing: Must run during build (not CMake config) because emsdk activates later
+- **Optimization Override**: `-O1` set via CMAKE_CXX_FLAGS_RELEASE and CMAKE_C_FLAGS_RELEASE (lines 72-77)
   - Provides defense-in-depth by reducing wasm-opt invocations
-  - Additional target_link_options also set (lines 156-158)
+  - Additional target_link_options also set (lines 166-167)
   - FORCE flag attempts to override DuckDB's -O3 defaults (limited effectiveness)
 - **Affected Targets**: wasm32-unknown-emscripten (all variants: mvp, eh, threads)
 - **Build System**: Compatible with DuckDB extension-ci-tools v1.4.0 (no .github changes needed)
