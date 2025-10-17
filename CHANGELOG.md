@@ -5,7 +5,7 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.2] - 2025-10-15
+## [0.3.2] - 2025-10-17
 
 ### Fixed
 
@@ -241,9 +241,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - MinGW/GCC: Use linker groups for Rust library dependencies
     - Wraps all Rust dependencies in --start-group/--end-group for multi-pass linking
     - Libraries in group: ws2_32, userenv, bcrypt, ntdll, stdc++, gcc (with -static-libgcc/-static-libstdc++)
-    - Provides f16 compiler builtins (__extendhfsf2, __truncsfhf2) from gcc
-    - Provides C++ RTTI (??_7type_info@@6B@) from stdc++
-    - Provides stack checking (__chkstk) from gcc
+    - Provides f16 compiler builtins (**extendhfsf2, **truncsfhf2) from gcc
+    - Provides C++ RTTI (??\_7type_info@@6B@) from stdc++
+    - Provides stack checking (\_\_chkstk) from gcc
     - Uses --allow-multiple-definition for weak symbol conflicts
     - Resolves link order issues - symbols found regardless of library order
   - MSVC: Fixed min/max macro conflicts with std::chrono (added NOMINMAX define)
