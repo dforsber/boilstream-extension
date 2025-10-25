@@ -1,0 +1,16 @@
+{
+  "name": "opaque-client-wasm-test",
+  "version": "0.1.0",
+  "description": "Standalone WASM test for opaque-client",
+  "scripts": {
+    "build": "cd .. && cargo build --target wasm32-unknown-emscripten --release",
+    "build:integration": "./build-integration-test.sh",
+    "test": "node test-opaque.cjs",
+    "test:ffi": "./test-ffi.sh",
+    "test:integration": "node run-integration-test.cjs",
+    "test:integration:interactive": "node run-integration-test.cjs --interactive",
+    "test:all": "npm run build && npm test && npm run build:integration && npm run test:integration"
+  },
+  "devDependencies": {},
+  "dependencies": {}
+}
