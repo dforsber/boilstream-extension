@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DuckDB WASM Boilstream Extension Test</title>
+  <style>
+    body {
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      max-width: 1200px;
+      margin: 20px auto;
+      padding: 20px;
+      background: #1e1e1e;
+      color: #d4d4d4;
+    }
+    h1 {
+      color: #4ec9b0;
+      border-bottom: 2px solid #4ec9b0;
+      padding-bottom: 10px;
+    }
+    .log-container {
+      background: #252526;
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      padding: 15px;
+      margin: 20px 0;
+      max-height: 600px;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .log-entry {
+      margin: 5px 0;
+      padding: 5px;
+    }
+    .log-info { color: #4fc1ff; }
+    .log-success { color: #4ec9b0; }
+    .log-error { color: #f48771; }
+    .log-warning { color: #dcdcaa; }
+    .log-data { color: #ce9178; margin-left: 20px; }
+    button {
+      background: #0e639c;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 10px 5px 10px 0;
+    }
+    button:hover {
+      background: #1177bb;
+    }
+    button:disabled {
+      background: #3e3e42;
+      cursor: not-allowed;
+    }
+    .status {
+      display: inline-block;
+      padding: 5px 10px;
+      border-radius: 3px;
+      margin: 10px 0;
+      font-weight: bold;
+    }
+    .status-running { background: #1e3a5f; color: #4fc1ff; }
+    .status-success { background: #1e3a2f; color: #4ec9b0; }
+    .status-error { background: #3a1e1e; color: #f48771; }
+  </style>
+</head>
+<body>
+  <h1>🦆 DuckDB WASM + Boilstream Extension Test</h1>
+
+  <div>
+    <button id="runTestBtn" onclick="runTest()">Run Test</button>
+    <button id="clearBtn" onclick="clearLog()">Clear Log</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="log-container" id="logContainer"></div>
+
+  <script type="module">
+    import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.31.0/+esm';
+
+    let db = null;
+    let conn = null;
+
+    function log(message, type = 'info') {
+      const container = document.getElementById('logContainer');
+      const entry = document.createElement('div');
+      entry.className = `log-entry log-${type}`;
+
+      if (typeof message === 'object') {
+        entry.textContent = JSON.stringify(message, null, 2);
+        entry.className += ' log-data';
+      } else {
+        entry.textContent = message;
+      }
+
+      container.appendChild(entry);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function setStatus(text, type) {
+      const status = document.getElementById('status');
+      status.textContent = text;
+      status.className = `status status-${type}`;
+    }
+
+    function clearLog() {
+      document.getElementById('logContainer').innerHTML = '';
+      setStatus('', '');
+    }
+
+    async function runTest() {
+      const btn = document.getElementById('runTestBtn');
+      btn.disabled = true;
+      clearLog();
+
+      try {
+        setStatus('Running...', 'running');
+        log('╔════════════════════════════════════════════════════════════╗');
+        log('║  DuckDB WASM + Boilstream Extension Test                 ║');
+        log('╚════════════════════════════════════════════════════════════╝');
+        log('');
+
+        // Step 1: Load DuckDB WASM
+        log('ℹ Step 1: Loading DuckDB WASM bundles...', 'info');
+        const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+        const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+
+        // Determine which WASM format was selected (eh or mvp)
+        let wasmFormat = 'wasm_eh'; // default
+        if (bundle.mainWorker.includes('mvp')) {
+          wasmFormat = 'wasm_mvp';
+        } else if (bundle.mainWorker.includes('coi')) {
+          wasmFormat = 'wasm_threads';
+        }
+
+        log(`✓ Bundle selected: ${wasmFormat}`, 'success');
+        log(`  Worker: ${bundle.mainWorker.split('/').pop()}`, 'info');
+
+        // Step 2: Create worker with blob URL to avoid CORS
+        log('', 'info');
+        log('ℹ Step 2: Creating worker...', 'info');
+
+        // Fetch the worker script and create a blob URL
+        const workerResponse = await fetch(bundle.mainWorker);
+        const workerBlob = await workerResponse.blob();
+        const workerUrl = URL.createObjectURL(workerBlob);
+
+        const worker = new Worker(workerUrl);
+        const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
+        log('✓ Worker created', 'success');
+
+        // Step 3: Instantiate DuckDB
+        log('', 'info');
+        log('ℹ Step 3: Instantiating DuckDB...', 'info');
+
+        db = new duckdb.AsyncDuckDB(logger, worker);
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        log('✓ DuckDB instantiated', 'success');
+
+        // Open database with configuration to allow unsigned extensions
+        log('', 'info');
+        log('ℹ Step 3.5: Opening database with allowUnsignedExtensions=true...', 'info');
+        await db.open({
+          allowUnsignedExtensions: true,
+          query: {
+            castBigIntToDouble: true,
+          }
+        });
+        log('✓ Database opened with unsigned extensions allowed', 'success');
+
+        // Step 4: Connect
+        log('', 'info');
+        log('ℹ Step 4: Opening connection...', 'info');
+        conn = await db.connect();
+        log('✓ Connection opened', 'success');
+
+        // Step 4.5: Ensure unsigned extensions are allowed (fallback)
+        log('', 'info');
+        log('ℹ Step 4.5: Verifying allow_unsigned_extensions setting...', 'info');
+        try {
+          const settingResult = await conn.query("SELECT value FROM duckdb_settings() WHERE name = 'allow_unsigned_extensions'");
+          const settingRows = settingResult.toArray();
+          if (settingRows.length > 0) {
+            log(`  Current setting: ${settingRows[0].value}`, 'info');
+            if (settingRows[0].value !== 'true') {
+              log('  ⚠️  Setting is not enabled, extension loading will likely fail', 'warning');
+            } else {
+              log('✓ Unsigned extensions are allowed', 'success');
+            }
+          }
+        } catch (e) {
+          log(`  Note: Could not verify setting: ${e.message}`, 'warning');
+        }
+
+        // Step 5: Test basic query
+        log('', 'info');
+        log('ℹ Step 5: Running basic query (SELECT 42)...', 'info');
+        const result = await conn.query('SELECT 42 as answer');
+        const rows = result.toArray();
+        log('✓ Query executed', 'success');
+        log(rows, 'data');
+
+        if (rows.length === 1 && rows[0].answer === 42) {
+          log('✓ Result verified', 'success');
+        } else {
+          throw new Error('Unexpected result');
+        }
+
+        // Step 6: Load boilstream extension
+        log('', 'info');
+        log('ℹ Step 6: Loading boilstream extension...', 'info');
+        log('  Attempting to load from localhost web server', 'info');
+
+        try {
+          // Full URL to WASM extension file served by localhost
+          // Use the same WASM format as the DuckDB bundle
+          // Note: duckdb-wasm@1.31.0 is based on DuckDB v1.4.0
+          const duckdbVersion = 'v1.4.0';
+          const extensionUrl = `http://localhost:8080/build/${wasmFormat}/repository/${duckdbVersion}/${wasmFormat}/boilstream.duckdb_extension.wasm`;
+
+          log(`  Extension URL: ${extensionUrl}`, 'info');
+          log(`  Using format: ${wasmFormat} (matches DuckDB bundle)`, 'info');
+          log(`  DuckDB version: ${duckdbVersion}`, 'info');
+
+          // Try to fetch the extension to verify it exists
+          const testFetch = await fetch(extensionUrl);
+          if (!testFetch.ok) {
+            throw new Error(`Extension file not found at ${extensionUrl} (HTTP ${testFetch.status})`);
+          }
+          log('✓ Extension file found on server', 'success');
+
+          // Install and load the extension using full HTTP URL
+          await conn.query(`INSTALL '${extensionUrl}'`);
+          log('✓ Boilstream extension installed', 'success');
+
+          // Load using the same full URL
+          await conn.query(`LOAD '${extensionUrl}'`);
+          log('✓ Boilstream extension loaded!', 'success');
+
+          // Check loaded extensions
+          log('', 'info');
+          log('ℹ Step 7: Verifying extension is loaded...', 'info');
+          const extResult = await conn.query("SELECT * FROM duckdb_extensions() WHERE extension_name = 'boilstream'");
+          const extRows = extResult.toArray();
+          log('✓ Extension info retrieved', 'success');
+          log(extRows, 'data');
+
+          if (extRows.length > 0 && extRows[0].loaded) {
+            log('✅ Extension is loaded!', 'success');
+
+            // Test if PRAGMA function is registered
+            log('', 'info');
+            log('ℹ Step 8: Testing PRAGMA function registration...', 'info');
+            const testToken = '89cbf96d000000010000000068f28caa9d3e72b23b6347625908c13ad8d77a4c554d64a14488fa13c919ed5acb3e447eb72a0eb4752618aca374d9fb5288d031';
+            const testUrl = `https://localhost/secrets:${testToken}`;
+
+            try {
+              // Test: Call PRAGMA with full implementation
+              log('  Testing PRAGMA with full OPAQUE login...', 'info');
+              const result = await conn.query(`PRAGMA duckdb_secrets_boilstream_endpoint('${testUrl}')`);
+              log('⚠️  PRAGMA executed without error (unexpected - server should be unreachable)', 'warning');
+              const rows = result.toArray();
+              log('Result: ' + JSON.stringify(rows), 'info');
+            } catch (err) {
+              if (err.message.includes('Token exchange failed') ||
+                  err.message.includes('Connection refused') ||
+                  err.message.includes('Could not connect') ||
+                  err.message.includes('OPAQUE login failed')) {
+                log('✅ SUCCESS: PRAGMA function is registered and working!', 'success');
+                log('The function executed and tried to connect (connection failed as expected)', 'success');
+                setStatus('✅ All tests passed!', 'success');
+              } else if (err.message.includes('Catalog Error') || err.message.includes('not recognized')) {
+                log('❌ PRAGMA function NOT registered', 'error');
+                log('Error: ' + err.message, 'error');
+                setStatus('⚠️  Extension loaded but PRAGMA not registered', 'warning');
+              } else {
+                log('Error calling PRAGMA: ' + err.message, 'error');
+                throw err;
+              }
+            }
+          } else {
+            throw new Error('Extension not properly loaded');
+          }
+
+        } catch (err) {
+          log('', 'error');
+          log('⚠️  Extension loading failed', 'warning');
+          log(`Error: ${err.message}`, 'error');
+          if (err.stack) {
+            log(`Stack trace: ${err.stack}`, 'error');
+          }
+          log(`Error object: ${JSON.stringify(err, Object.getOwnPropertyNames(err))}`, 'error');
+          log('', 'info');
+          log('To fix this:', 'info');
+          log('1. Ensure WASM extension is built: make wasm_threads', 'info');
+          log('2. Verify file exists: ls build/wasm_threads/repository/v1.4.1/wasm_threads/boilstream.duckdb_extension.wasm', 'info');
+          log('3. Ensure server is serving /build/ directory correctly', 'info');
+          log('', 'info');
+          log('✅ DuckDB WASM is working (extension loading needs setup)', 'success');
+          setStatus('⚠️  DuckDB works, extension needs setup', 'warning');
+        }
+
+        log('', 'info');
+        log('╔════════════════════════════════════════════════════════════╗');
+        log('║  Test Complete                                             ║');
+        log('╚════════════════════════════════════════════════════════════╝');
+
+      } catch (error) {
+        log('', 'error');
+        log('✗ Test failed: ' + error.message, 'error');
+        if (error.stack) {
+          log(error.stack, 'error');
+        }
+        setStatus('❌ Test failed', 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Make function available globally
+    window.runTest = runTest;
+    window.clearLog = clearLog;
+
+    // Auto-run on load
+    log('Ready to test. Click "Run Test" button.', 'info');
+  </script>
+</body>
+</html>

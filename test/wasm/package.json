@@ -1,10 +1,11 @@
 {
   "name": "boilstream-wasm-test",
   "version": "1.0.0",
-  "description": "Node.js tests for boilstream DuckDB WASM extension",
+  "description": "Tests for boilstream DuckDB WASM extension",
   "type": "module",
   "scripts": {
-    "test": "node test-native.js"
+    "test": "node test-native.js",
+    "serve": "node server.js"
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.31.0",

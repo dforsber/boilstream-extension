@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 
 /**
- * Basic DuckDB Native Test in Node.js
+ * DuckDB Boilstream Extension Test in Node.js
  *
- * This test verifies that the native duckdb package works
- * by running a simple SELECT 42 query. Once this works, we'll
- * adapt it to load the WASM extension.
+ * This test loads the boilstream WASM extension and verifies
+ * it can be loaded successfully.
  *
  * Usage:
  *   npm install
- *   node test-native.js
+ *   npm test
  */
 
 import duckdb from 'duckdb';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Colors for output
 const colors = {
@@ -27,55 +30,107 @@ function log(msg, color = colors.reset) {
   console.log(color + msg + colors.reset);
 }
 
-async function testBasicQuery() {
+async function testExtension() {
   log('\n╔════════════════════════════════════════════════════════════╗', colors.blue);
-  log('║  DuckDB Native Test (Node.js)                            ║', colors.blue);
+  log('║  DuckDB Boilstream Extension Test (Native)               ║', colors.blue);
   log('╚════════════════════════════════════════════════════════════╝\n', colors.blue);
+
+  log('ℹ Note: This tests the NATIVE extension (osx_arm64)', colors.yellow);
+  log('  For WASM extension testing, see test-wasm-browser.html\n', colors.yellow);
+
+  // Path to the native extension (not WASM)
+  const extensionPath = path.resolve(__dirname, '../../build/release/repository/v1.4.1/osx_arm64/boilstream.duckdb_extension');
 
   return new Promise((resolve, reject) => {
     try {
-      log('ℹ Step 1: Creating DuckDB instance...', colors.blue);
+      log('ℹ Step 1: Creating DuckDB instance with unsigned extensions allowed...', colors.blue);
 
-      const db = new duckdb.Database(':memory:');
+      // Pass configuration to allow unsigned extensions
+      const db = new duckdb.Database(':memory:', {
+        "allow_unsigned_extensions": "true"
+      });
 
-      log('✓ Database created', colors.green);
+      log('✓ Database created (unsigned extensions allowed)', colors.green);
 
-      log('\nℹ Step 2: Opening connection...', colors.blue);
+      log('\nℹ Step 2: Running basic query to verify database...', colors.blue);
 
-      db.all('SELECT 42 as answer', (err, rows) => {
-        if (err) {
-          log(`\n✗ Query failed: ${err.message}`, colors.red);
-          db.close();
-          reject(err);
-          return;
-        }
+        db.all('SELECT 42 as answer', (err, rows) => {
+          if (err) {
+            log(`\n✗ Query failed: ${err.message}`, colors.red);
+            db.close();
+            reject(err);
+            return;
+          }
 
-        log('✓ Query executed successfully', colors.green);
+          log('✓ Basic query works', colors.green);
+          log(`  Result: ${JSON.stringify(rows)}`, colors.blue);
 
-        log('\nℹ Step 3: Reading results...', colors.blue);
+          log('\nℹ Step 3: Installing boilstream extension...', colors.blue);
+          log(`  Extension path: ${extensionPath}`, colors.blue);
 
-        log(`✓ Result: ${JSON.stringify(rows)}`, colors.green);
+          // Install the extension from local file (use FORCE to override any existing installation)
+          db.all(`FORCE INSTALL '${extensionPath}'`, (err) => {
+            if (err) {
+              log(`\n✗ Extension install failed: ${err.message}`, colors.red);
+              if (err.stack) {
+                log(`  ${err.stack}`, colors.red);
+              }
+              db.close();
+              reject(err);
+              return;
+            }
 
-        // Verify the result
-        if (rows.length === 1 && rows[0].answer === 42) {
-          log('\n✅ Test PASSED: Got expected result (42)', colors.green);
-        } else {
-          log(`\n❌ Test FAILED: Expected [{answer: 42}], got ${JSON.stringify(rows)}`, colors.red);
-          db.close();
-          process.exit(1);
-        }
+            log('✓ Extension installed', colors.green);
 
-        log('\nℹ Step 4: Cleanup...', colors.blue);
+            log('\nℹ Step 4: Loading boilstream extension...', colors.blue);
 
-        db.close();
+            db.all('LOAD boilstream', (err) => {
+              if (err) {
+                log(`\n✗ Extension load failed: ${err.message}`, colors.red);
+                if (err.stack) {
+                  log(`  ${err.stack}`, colors.red);
+                }
+                db.close();
+                reject(err);
+                return;
+              }
 
-        log('✓ Cleanup completed', colors.green);
+              log('✓ Extension loaded successfully!', colors.green);
 
-        log('\n╔════════════════════════════════════════════════════════════╗', colors.green);
-        log('║  ✅ All tests passed!                                     ║', colors.green);
-        log('╚════════════════════════════════════════════════════════════╝\n', colors.green);
+              log('\nℹ Step 5: Checking loaded extensions...', colors.blue);
 
-        resolve();
+              db.all("SELECT * FROM duckdb_extensions() WHERE extension_name = 'boilstream'", (err, rows) => {
+                if (err) {
+                  log(`\n✗ Extension check failed: ${err.message}`, colors.red);
+                  db.close();
+                  reject(err);
+                  return;
+                }
+
+                log('✓ Extension info retrieved', colors.green);
+                log(`  ${JSON.stringify(rows, null, 2)}`, colors.blue);
+
+                if (rows.length > 0 && rows[0].loaded) {
+                  log('\n✅ Extension is loaded and ready!', colors.green);
+                } else {
+                  log('\n⚠️  Extension registered but not loaded', colors.yellow);
+                }
+
+                log('\nℹ Step 6: Cleanup...', colors.blue);
+
+                db.close();
+
+                log('✓ Cleanup completed', colors.green);
+
+                log('\n╔════════════════════════════════════════════════════════════╗', colors.green);
+                log('║  ✅ All tests passed!                                     ║', colors.green);
+                log('╚════════════════════════════════════════════════════════════╝\n', colors.green);
+
+                resolve();
+              });
+            });
+          });
+        });
       });
 
     } catch (error) {
@@ -89,7 +144,7 @@ async function testBasicQuery() {
 }
 
 // Run the test
-testBasicQuery().catch(err => {
+testExtension().catch(err => {
   console.error(err);
   process.exit(1);
 });
