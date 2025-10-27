@@ -20,9 +20,8 @@ void opaque_client_sha256(const uint8_t *input, size_t input_len, uint8_t *outpu
 /// @param data Pointer to data to authenticate
 /// @param data_len Length of data in bytes
 /// @param output Pointer to output buffer (must be at least 32 bytes)
-void opaque_client_hmac_sha256(const uint8_t *key, size_t key_len,
-                                const uint8_t *data, size_t data_len,
-                                uint8_t *output);
+void opaque_client_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
+                               uint8_t *output);
 
 /// Derive integrity key using HKDF-SHA256
 /// salt="boilstream-session-v1", info="request-integrity-v1"
@@ -66,10 +65,8 @@ int opaque_client_derive_refresh_token(const uint8_t *session_key, size_t sessio
 /// @param plaintext_out Pointer to output buffer (must be at least ciphertext_len bytes)
 /// @param plaintext_out_len Size of output buffer
 /// @return Length of plaintext on success, -1 on error (including auth tag verification failure)
-long opaque_client_aes_gcm_decrypt(
-    const uint8_t *ciphertext_with_tag, size_t ciphertext_with_tag_len,
-    const uint8_t *nonce, size_t nonce_len,
-    const uint8_t *encryption_key, size_t encryption_key_len,
-    uint8_t *plaintext_out, size_t plaintext_out_len);
+long opaque_client_aes_gcm_decrypt(const uint8_t *ciphertext_with_tag, size_t ciphertext_with_tag_len,
+                                   const uint8_t *nonce, size_t nonce_len, const uint8_t *encryption_key,
+                                   size_t encryption_key_len, uint8_t *plaintext_out, size_t plaintext_out_len);
 
 } // extern "C"

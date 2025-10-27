@@ -94,7 +94,7 @@ EM_JS(char *, js_localStorage_getItem, (const char *key), {
 	const keyStr = UTF8ToString(key);
 	try {
 		const value = localStorage.getItem(keyStr);
-		if (value === null)
+		if (value == = null)
 			return null;
 		const len = lengthBytesUTF8(value) + 1;
 		const ptr = _malloc(len);
@@ -2020,7 +2020,8 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 			bool is_encrypted_via_body = (response_body.find("\"encrypted\"") != string::npos &&
 			                              response_body.find("\"ciphertext\"") != string::npos);
 
-			BOILSTREAM_LOG("HttpGet: is_encrypted_via_header=" << is_encrypted_via_header << ", is_encrypted_via_body=" << is_encrypted_via_body);
+			BOILSTREAM_LOG("HttpGet: is_encrypted_via_header=" << is_encrypted_via_header
+			                                                   << ", is_encrypted_via_body=" << is_encrypted_via_body);
 
 			if (is_encrypted_via_header || is_encrypted_via_body) {
 				if (is_encrypted_via_body && !is_encrypted_via_header) {
@@ -2035,7 +2036,8 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
 						cipher_suite = ParseCipherSuite(header_map);
 					} else {
-						BOILSTREAM_LOG("HttpGet: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+						BOILSTREAM_LOG(
+						    "HttpGet: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
 					}
 					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
 					BOILSTREAM_LOG("HttpGet: Response decrypted successfully, plaintext_len=" << response_body.size());
@@ -2232,7 +2234,8 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
 						cipher_suite = ParseCipherSuite(header_map);
 					} else {
-						BOILSTREAM_LOG("HttpPost: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+						BOILSTREAM_LOG(
+						    "HttpPost: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
 					}
 					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
 					BOILSTREAM_LOG(

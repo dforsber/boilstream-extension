@@ -345,9 +345,8 @@ TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 		cerr << "Actual error message: " << error << endl;
 		INFO("Actual error: " << error);
 		// Accept either "endpoint not configured" or "No active session" as valid errors for unauthenticated operations
-		REQUIRE(
-		    (error.find("endpoint not configured") != string::npos || error.find("not configured") != string::npos ||
-		     error.find("No active session") != string::npos));
+		REQUIRE((error.find("endpoint not configured") != string::npos ||
+		         error.find("not configured") != string::npos || error.find("No active session") != string::npos));
 	}
 }
 
