@@ -306,7 +306,7 @@ void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
 		fs.RemoveFile(file_path);
 	}
 
-	auto handle = fs.OpenFile(file_path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+	auto handle = fs.OpenFile(file_path, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
 	fs.Write(*handle, const_cast<char *>(json_output.data()), json_output.size());
 	handle->Close();
 
@@ -346,7 +346,7 @@ bool RestApiSecretStorage::LoadRefreshToken() {
 	}
 
 	// Read file
-	auto handle = fs.OpenFile(file_path, FileFlags::FILE_FLAGS_READ);
+	auto handle = fs.OpenFile(file_path, FileOpenFlags::FILE_FLAGS_READ);
 	auto file_size = fs.GetFileSize(*handle);
 	file_contents.resize(file_size);
 	fs.Read(*handle, const_cast<char *>(file_contents.data()), file_size);
