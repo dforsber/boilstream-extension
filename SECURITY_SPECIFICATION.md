@@ -557,7 +557,7 @@ Cipher suites follow the naming convention: `BOILSTREAM-<KDF>-<AEAD>-<MAC>`
 **Client Request Headers**:
 
 ```
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -570,13 +570,13 @@ X-Boilstream-Cipher-Version: 1
 
 ### Negotiation Rules
 
-1. **Client sends supported suites**: Client lists all supported cipher suite IDs (order irrelevant)
+1. **Client sends supported suites**: Client lists all supported cipher suite IDs (order irrelevant). **Format**: Comma-separated hex values **with NO spaces** (e.g., `0x0001,0x0002`). Spaces cause signature verification failures in WASM/browser environments due to URL encoding.
 2. **Server selects most secure**: Server MUST select highest priority (lowest priority number) from mutually-supported suites
 3. **Fallback**: If client omits `X-Boilstream-Ciphers` header, server MUST use `0x0001` (mandatory suite)
 4. **Version mismatch**: If `X-Boilstream-Cipher-Version` incompatible, server returns `426 Upgrade Required`
 5. **No common suite**: Server returns `400 Bad Request` with `{"error": "No supported cipher suite"}`
 
-**Example**: Client sends `0x0001, 0x0002`. Server supports both. Server selects `0x0001` (priority 1 < priority 2).
+**Example**: Client sends `0x0001,0x0002`. Server supports both. Server selects `0x0001` (priority 1 < priority 2).
 
 ### Version Compatibility
 
@@ -705,7 +705,7 @@ POST
 /secrets
 
 x-boilstream-cipher-version:1
-x-boilstream-ciphers:0x0001, 0x0002
+x-boilstream-ciphers:0x0001,0x0002
 x-boilstream-credential:a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
 x-boilstream-date:20251009T120000Z
 x-boilstream-sequence:42
@@ -782,7 +782,7 @@ X-Boilstream-Date: <ISO8601 timestamp>
 X-Boilstream-Sequence: <sequence_number>
 X-Boilstream-Signature: <base64_signature>
 X-Boilstream-Credential: <credential_scope>
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -1541,7 +1541,7 @@ X-Boilstream-Date: 20251009T120000Z
 X-Boilstream-Sequence: 42
 X-Boilstream-Signature: <base64-HMAC>
 X-Boilstream-Credential: a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -2007,7 +2007,7 @@ Before testing Boilstream-specific requests, implementations SHOULD validate can
 - Query: `` (empty)
 - Headers:
   - `X-Boilstream-Cipher-Version: 1`
-  - `X-Boilstream-Ciphers: 0x0001, 0x0002`
+  - `X-Boilstream-Ciphers: 0x0001,0x0002`
   - `X-Boilstream-Credential: c3e5d7b9/20251009/us-east-1/secrets/boilstream_request`
   - `X-Boilstream-Date: 20251009T120000Z`
   - `X-Boilstream-Sequence: 42`
@@ -2026,7 +2026,7 @@ POST
 /secrets
 
 x-boilstream-cipher-version:1
-x-boilstream-ciphers:0x0001, 0x0002
+x-boilstream-ciphers:0x0001,0x0002
 x-boilstream-credential:c3e5d7b9/20251009/us-east-1/secrets/boilstream_request
 x-boilstream-date:20251009T120000Z
 x-boilstream-sequence:42
@@ -2244,7 +2244,7 @@ TBjZBAXiayRe/JfkrPtM4aRJAH6fnIeVeUs1d4GvDas=
 **Client Request Headers**:
 
 ```
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 ```
 
 **Server Response Body** (plaintext JSON, before encryption):
@@ -2261,16 +2261,16 @@ X-Boilstream-Ciphers: 0x0001, 0x0002
 
 #### Test Vector A.10.1: Cipher Suite Negotiation
 
-**Input**: Client cipher preference: `"0x0001, 0x0002"`
+**Input**: Client cipher preference: `"0x0001,0x0002"`
 
 **Server Selection Process**:
 
-1. Parse client cipher list: `[0x0001, 0x0002]`
+1. Parse client cipher list: `[0x0001,0x0002]`
 2. Select highest priority (lowest number): `0x0001`
 
 **Selected Cipher Suite**: `0x0001` (AES-256-GCM-HMACSHA256)
 
-**Validation**: Server MUST select `0x0001` when client sends `"0x0001, 0x0002"`.
+**Validation**: Server MUST select `0x0001` when client sends `"0x0001,0x0002"`.
 
 #### Test Vector A.10.2: AES-256-GCM Encryption
 
