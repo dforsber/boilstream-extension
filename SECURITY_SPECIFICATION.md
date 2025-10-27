@@ -928,8 +928,10 @@ When server encrypts responses, use the following JSON structure:
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "<base64-encoded nonce>",
-  "ciphertext": "<base64-encoded ciphertext+tag>"
+  "ciphertext": "<base64-encoded ciphertext+tag>",
+  "hmac": "<hex-encoded hmac>"
 }
 ```
 
@@ -1564,6 +1566,53 @@ X-Boilstream-Encrypted: true
 ```
 
 **Note**: Response is signed using `integrity_key` and encrypted using `encryption_key`, both derived from `session_key`.
+
+### POST /secrets (Write Secret)
+
+**Request Headers**:
+
+```
+Authorization: Bearer <session_token>
+X-Boilstream-Date: 20251009T120000Z
+X-Boilstream-Sequence: 43
+X-Boilstream-Signature: <base64-HMAC>
+X-Boilstream-Credential: a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
+Idempotency-Key: <optional-uuid>
+```
+
+**Request Body**:
+
+```json
+{
+  "secret": {
+    "name": "my_s3_secret",
+    "secret_type": "S3",
+    "key_id": "AKIAIOSFODNN7EXAMPLE",
+    "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "region": "us-east-1",
+    "session_token": null,
+    "endpoint": null,
+    "scope": "duckdb"
+  },
+  "on_conflict": "fail"
+}
+```
+
+**Response (204 No Content)**:
+
+```
+HTTP/1.1 204 No Content
+```
+
+**Note**: Write operations (POST /secrets, DELETE /secrets/{name}) return **HTTP 204 No Content** with no response body. Since there is no body to encrypt, these responses are NOT encrypted and do NOT include encryption headers (`X-Boilstream-Cipher`, `X-Boilstream-Encrypted`). This follows REST API best practices for successful write/delete operations that don't return data.
+
+**When to Encrypt Responses**:
+
+- ✅ **DO encrypt**: Responses that return sensitive data (GET /secrets, POST /secrets/get, POST /secrets/match)
+- ❌ **DO NOT encrypt**: Empty responses (204 No Content) for write/delete operations
+- ❌ **DO NOT encrypt**: Error responses with no sensitive information (optional - implementation choice)
+
+**Important**: Never return HTTP 200 OK with an empty body for write operations, as this creates a 0-byte plaintext that encrypts to just a 16-byte AEAD tag, causing client-side decryption confusion.
 
 ---
 
@@ -2346,6 +2395,7 @@ e49ca878f21cf72a5eb27c8aab528064
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "[Base64(nonce_12_bytes)]",
   "ciphertext": "[Base64(ciphertext_with_tag_64_bytes)]",
   "hmac": "[hex(hmac_32_bytes)]"
@@ -2357,6 +2407,7 @@ e49ca878f21cf72a5eb27c8aab528064
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "AAECAwQFBgcICQoL",
   "ciphertext": "euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==",
   "hmac": "8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"
@@ -2366,7 +2417,7 @@ e49ca878f21cf72a5eb27c8aab528064
 **Expected EncryptedResponse JSON** (compact, actual HTTP response body):
 
 ```
-{"encrypted":true,"nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"}
+{"encrypted":true,"cipher":"0x0001","nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"}
 ```
 
 **Validation**:
