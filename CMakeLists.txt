@@ -24,6 +24,44 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(IS_WASM_BUILD ON)
     message(STATUS "Detected WASM build with Emscripten")
 
+    # Workaround for wasm-opt incompatibility with newer Emscripten versions
+    # Replace wasm-opt in EMSDK with a wrapper that filters out --enable-bulk-memory-opt
+    if(DEFINED ENV{EMSDK})
+        set(EMSDK_WASM_OPT "$ENV{EMSDK}/upstream/bin/wasm-opt")
+        set(EMSDK_WASM_OPT_REAL "$ENV{EMSDK}/upstream/bin/wasm-opt.real")
+
+        # Only create wrapper if we haven't already
+        if(EXISTS "${EMSDK_WASM_OPT}" AND NOT EXISTS "${EMSDK_WASM_OPT_REAL}")
+            message(STATUS "WASM: Creating wasm-opt wrapper to fix --enable-bulk-memory-opt incompatibility")
+
+            # Backup original wasm-opt
+            execute_process(
+                COMMAND ${CMAKE_COMMAND} -E rename "${EMSDK_WASM_OPT}" "${EMSDK_WASM_OPT_REAL}"
+                RESULT_VARIABLE RENAME_RESULT
+            )
+
+            if(RENAME_RESULT EQUAL 0)
+                # Read template and replace placeholder with real path
+                file(READ "${CMAKE_CURRENT_SOURCE_DIR}/scripts/wasm-opt-wrapper-template.sh" WRAPPER_CONTENT)
+                string(REPLACE "WASM_OPT_REAL_PATH" "${EMSDK_WASM_OPT_REAL}" WRAPPER_CONTENT "${WRAPPER_CONTENT}")
+
+                # Write wrapper script
+                file(WRITE "${EMSDK_WASM_OPT}" "${WRAPPER_CONTENT}")
+
+                # Make executable
+                execute_process(COMMAND chmod +x "${EMSDK_WASM_OPT}")
+
+                message(STATUS "WASM: Wrapper created, original wasm-opt backed up to wasm-opt.real")
+            else()
+                message(WARNING "WASM: Failed to rename wasm-opt, build may fail")
+            endif()
+        elseif(EXISTS "${EMSDK_WASM_OPT_REAL}")
+            message(STATUS "WASM: wasm-opt wrapper already exists (using existing)")
+        endif()
+    else()
+        message(WARNING "WASM: EMSDK environment variable not set, cannot install wasm-opt wrapper")
+    endif()
+
     # Add WASM-specific compile definitions required by DuckDB extensions
     add_compile_definitions(WASM_LOADABLE_EXTENSIONS=1)
 
