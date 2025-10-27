@@ -70,6 +70,17 @@
 <body>
   <h1>🦆 DuckDB WASM + Boilstream Extension Test</h1>
 
+  <div style="margin: 20px 0; padding: 15px; background: #252526; border: 1px solid #3e3e42; border-radius: 4px;">
+    <label for="bootstrapToken" style="display: block; margin-bottom: 5px; color: #4ec9b0;">Bootstrap Token:</label>
+    <input
+      type="text"
+      id="bootstrapToken"
+      placeholder="Paste your bootstrap token here"
+      style="width: 100%; padding: 8px; background: #1e1e1e; border: 1px solid #3e3e42; color: #d4d4d4; border-radius: 3px; font-family: inherit; font-size: 13px; margin-bottom: 8px;"
+    />
+    <small style="color: #858585; display: block;">Will be used with endpoint: https://localhost/secrets:TOKEN</small>
+  </div>
+
   <div>
     <button id="runTestBtn" onclick="runTest()">Run Test</button>
     <button id="clearBtn" onclick="clearLog()">Clear Log</button>
@@ -254,31 +265,68 @@
             // Test if PRAGMA function is registered
             log('', 'info');
             log('ℹ Step 8: Testing PRAGMA function registration...', 'info');
-            const testToken = '89cbf96d000000010000000068f28caa9d3e72b23b6347625908c13ad8d77a4c554d64a14488fa13c919ed5acb3e447eb72a0eb4752618aca374d9fb5288d031';
-            const testUrl = `https://localhost/secrets:${testToken}`;
 
-            try {
-              // Test: Call PRAGMA with full implementation
-              log('  Testing PRAGMA with full OPAQUE login...', 'info');
-              const result = await conn.query(`PRAGMA duckdb_secrets_boilstream_endpoint('${testUrl}')`);
-              log('⚠️  PRAGMA executed without error (unexpected - server should be unreachable)', 'warning');
-              const rows = result.toArray();
-              log('Result: ' + JSON.stringify(rows), 'info');
-            } catch (err) {
-              if (err.message.includes('Token exchange failed') ||
-                  err.message.includes('Connection refused') ||
-                  err.message.includes('Could not connect') ||
-                  err.message.includes('OPAQUE login failed')) {
-                log('✅ SUCCESS: PRAGMA function is registered and working!', 'success');
-                log('The function executed and tried to connect (connection failed as expected)', 'success');
-                setStatus('✅ All tests passed!', 'success');
-              } else if (err.message.includes('Catalog Error') || err.message.includes('not recognized')) {
-                log('❌ PRAGMA function NOT registered', 'error');
-                log('Error: ' + err.message, 'error');
-                setStatus('⚠️  Extension loaded but PRAGMA not registered', 'warning');
-              } else {
-                log('Error calling PRAGMA: ' + err.message, 'error');
-                throw err;
+            // Get bootstrap token from input field
+            const tokenInput = document.getElementById('bootstrapToken');
+            const bootstrapToken = tokenInput.value.trim();
+
+            if (!bootstrapToken) {
+              log('⚠️  No bootstrap token provided - skipping authentication test', 'warning');
+              log('✅ Extension loaded successfully (provide token to test authentication)', 'success');
+              setStatus('✅ Extension loaded (no token)', 'success');
+            } else {
+              // Construct full URL with token
+              const endpointUrl = `https://localhost/secrets:${bootstrapToken}`;
+              log(`  Using endpoint: https://localhost/secrets:${bootstrapToken.substring(0, 20)}...`, 'info');
+
+              try {
+                // Test: Call PRAGMA with full implementation
+                log('  Testing PRAGMA with full OPAQUE login...', 'info');
+                const result = await conn.query(`PRAGMA duckdb_secrets_boilstream_endpoint('${endpointUrl}')`);
+                const rows = result.toArray();
+                log('✅ PRAGMA executed successfully!', 'success');
+                log('Result:', 'success');
+                log(rows, 'data');
+
+                // Step 9: List secrets after successful authentication
+                log('', 'info');
+                log('ℹ Step 9: Listing secrets from DuckDB...', 'info');
+                try {
+                  const secretsResult = await conn.query("SELECT * FROM duckdb_secrets()");
+                  const secretsRows = secretsResult.toArray();
+                  log('✓ Secrets retrieved', 'success');
+                  log(`Found ${secretsRows.length} secret(s):`, 'success');
+
+                  if (secretsRows.length > 0) {
+                    secretsRows.forEach((secret, index) => {
+                      log(`\nSecret #${index + 1}:`, 'info');
+                      log(secret, 'data');
+                    });
+                  } else {
+                    log('  No secrets found in storage', 'warning');
+                  }
+                } catch (secretsErr) {
+                  log('⚠️  Could not retrieve secrets: ' + secretsErr.message, 'warning');
+                }
+
+                setStatus('✅ Authentication successful!', 'success');
+              } catch (err) {
+                if (err.message.includes('Token exchange failed') ||
+                    err.message.includes('Connection refused') ||
+                    err.message.includes('Could not connect') ||
+                    err.message.includes('OPAQUE login failed')) {
+                  log('⚠️  PRAGMA function executed but authentication failed', 'warning');
+                  log('Error: ' + err.message, 'warning');
+                  log('This is expected if the auth server is not running or token is invalid', 'info');
+                  setStatus('⚠️ Extension works, auth failed', 'warning');
+                } else if (err.message.includes('Catalog Error') || err.message.includes('not recognized')) {
+                  log('❌ PRAGMA function NOT registered', 'error');
+                  log('Error: ' + err.message, 'error');
+                  setStatus('⚠️  Extension loaded but PRAGMA not registered', 'warning');
+                } else {
+                  log('Error calling PRAGMA: ' + err.message, 'error');
+                  throw err;
+                }
               }
             }
           } else {

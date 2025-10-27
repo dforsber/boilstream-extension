@@ -113,11 +113,16 @@ set(EXTENSION_SOURCES src/boilstream_extension.cpp src/boilstream_secret_storage
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# Enable debug logging for WASM builds
-if(IS_WASM_BUILD)
+# Enable debug logging conditionally (set -DBOILSTREAM_DEBUG=ON to enable)
+# For WASM, always enable for easier browser debugging
+if(IS_WASM_BUILD OR BOILSTREAM_DEBUG)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
-    message(STATUS "WASM: Debug logging enabled")
+    if(IS_WASM_BUILD)
+        message(STATUS "WASM: Debug logging enabled (browser console)")
+    else()
+        message(STATUS "Native: Debug logging enabled (stderr)")
+    endif()
 endif()
 
 # Link Rust OPAQUE client library (includes all crypto operations)

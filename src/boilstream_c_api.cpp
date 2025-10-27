@@ -21,8 +21,8 @@
 // The DUCKDB_EXTENSION_ENTRYPOINT macro creates:
 // 1. An internal function: boilstream_init_c_api_internal(connection, info, access)
 // 2. An exported function: boilstream_init_c_api(info, access) that opens a connection
-DUCKDB_EXTENSION_ENTRYPOINT
-(duckdb_connection connection, duckdb_extension_info info, struct duckdb_extension_access *access) {
+DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection, duckdb_extension_info info,
+                            struct duckdb_extension_access *access) {
 	BOILSTREAM_LOG("C API entrypoint called!");
 
 	// Test if we can call C API functions

@@ -25,11 +25,12 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <sstream>
-#define BOILSTREAM_LOG(msg) do { \
-	std::ostringstream oss; \
-	oss << "[BOILSTREAM] " << msg; \
-	emscripten_log(EM_LOG_CONSOLE, "%s", oss.str().c_str()); \
-} while(0)
+#define BOILSTREAM_LOG(msg)                                                                                            \
+	do {                                                                                                               \
+		std::ostringstream oss;                                                                                        \
+		oss << "[BOILSTREAM] " << msg;                                                                                 \
+		emscripten_log(EM_LOG_CONSOLE, "%s", oss.str().c_str());                                                       \
+	} while (0)
 #elif defined(BOILSTREAM_DEBUG)
 #include <iostream>
 #define BOILSTREAM_LOG(msg) std::cerr << "[BOILSTREAM] " << msg << std::endl
@@ -160,8 +161,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 12: Computing SHA256 hash using Rust");
 
 	uint8_t hash_bytes[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t*>(bootstrap_token.c_str()),
-	                     bootstrap_token.size(),
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(bootstrap_token.c_str()), bootstrap_token.size(),
 	                     hash_bytes);
 
 	// Convert to hex string (lowercase)
@@ -277,7 +277,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	BOILSTREAM_LOG("LoadInternal: Secret storage registered");
 
 	// Register PRAGMA function with PragmaCall to accept parameters
-	auto rest_endpoint = PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
+	auto rest_endpoint =
+	    PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
 	loader.RegisterFunction(rest_endpoint);
 	BOILSTREAM_LOG("LoadInternal: PRAGMA function registered");
 
@@ -312,10 +313,8 @@ DUCKDB_CPP_EXTENSION_ENTRY(boilstream, loader) {
 // WASM-specific entry point (used when loading by URL)
 // Must be explicitly exported for WASM side modules
 #ifdef __EMSCRIPTEN__
-__attribute__((used, visibility("default")))
-void boilstream_init(duckdb::ExtensionLoader &loader) {
+__attribute__((used, visibility("default"))) void boilstream_init(duckdb::ExtensionLoader &loader) {
 	duckdb::LoadInternal(loader);
 }
 #endif
-
 }

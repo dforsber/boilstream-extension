@@ -80,36 +80,37 @@
 #include <emscripten.h>
 
 // JavaScript interop for localStorage
-EM_JS(void, js_localStorage_setItem, (const char* key, const char* value), {
+EM_JS(void, js_localStorage_setItem, (const char *key, const char *value), {
 	const keyStr = UTF8ToString(key);
 	const valueStr = UTF8ToString(value);
 	try {
 		localStorage.setItem(keyStr, valueStr);
-	} catch(e) {
+	} catch (e) {
 		console.error('localStorage.setItem failed:', e);
 	}
 });
 
-EM_JS(char*, js_localStorage_getItem, (const char* key), {
+EM_JS(char *, js_localStorage_getItem, (const char *key), {
 	const keyStr = UTF8ToString(key);
 	try {
 		const value = localStorage.getItem(keyStr);
-		if (value === null) return null;
+		if (value == = null)
+			return null;
 		const len = lengthBytesUTF8(value) + 1;
 		const ptr = _malloc(len);
 		stringToUTF8(value, ptr, len);
 		return ptr;
-	} catch(e) {
+	} catch (e) {
 		console.error('localStorage.getItem failed:', e);
 		return null;
 	}
 });
 
-EM_JS(void, js_localStorage_removeItem, (const char* key), {
+EM_JS(void, js_localStorage_removeItem, (const char *key), {
 	const keyStr = UTF8ToString(key);
 	try {
 		localStorage.removeItem(keyStr);
-	} catch(e) {
+	} catch (e) {
 		console.error('localStorage.removeItem failed:', e);
 	}
 });
@@ -402,9 +403,8 @@ bool RestApiSecretStorage::LoadRefreshToken() {
 
 	// Debug: compute and log what user_id SHOULD be from this token
 	uint8_t debug_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t*>(refresh_token_bytes_str.c_str()),
-	                     refresh_token_bytes_str.size(),
-	                     debug_hash);
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(refresh_token_bytes_str.c_str()),
+	                     refresh_token_bytes_str.size(), debug_hash);
 	string debug_user_id;
 	debug_user_id.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
@@ -510,7 +510,7 @@ void RestApiSecretStorage::PerformOpaqueRegistration(const string &password) {
 	// Compute user_id: SHA-256 hash of password (bootstrap_token)
 	// Following spec: user_id = lowercase_hex(SHA256(password))
 	uint8_t password_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t*>(password.c_str()), password.size(), password_hash);
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(password.c_str()), password.size(), password_hash);
 
 	// Convert hash to lowercase hex string (64 characters)
 	string user_id;
@@ -627,7 +627,7 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool
 	// Compute user_id: SHA-256 hash of password (bootstrap_token or refresh_token)
 	// Following spec: user_id = lowercase_hex(SHA256(password))
 	uint8_t password_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t*>(password.c_str()), password.size(), password_hash);
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(password.c_str()), password.size(), password_hash);
 
 	// Convert hash to lowercase hex string (64 characters)
 	string user_id;
@@ -1026,12 +1026,15 @@ string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction>
 vector<uint8_t> RestApiSecretStorage::DeriveSigningKey(const vector<uint8_t> &session_key_param) {
 	// HKDF-SHA256 key derivation for request signing (base key) - 32 bytes
 	// Using Rust crypto implementation (works on all platforms including WASM)
+	// NOTE: Rust function is named "integrity_key" but uses info="request-integrity-v1" (correct for base_signing_key)
 
 	if (session_key_param.empty()) {
 		throw IOException("Cannot derive signing key: session_key not initialized");
 	}
 
 	uint8_t derived[32];
+	// Despite the name, opaque_client_derive_integrity_key uses info="request-integrity-v1"
+	// which is correct for base_signing_key per SECURITY_SPECIFICATION.md
 	int result = opaque_client_derive_integrity_key(session_key_param.data(), session_key_param.size(), derived);
 
 	if (result != 0) {
@@ -1062,12 +1065,15 @@ vector<uint8_t> RestApiSecretStorage::DeriveEncryptionKey(const vector<uint8_t> 
 vector<uint8_t> RestApiSecretStorage::DeriveIntegrityKey(const vector<uint8_t> &session_key_param) {
 	// HKDF-SHA256 key derivation for response integrity verification - 32 bytes
 	// Using Rust crypto implementation (works on all platforms including WASM)
+	// NOTE: Rust function is named "signing_key" but uses info="response-integrity-v1" (correct for integrity_key)
 
 	if (session_key_param.empty()) {
 		throw IOException("Cannot derive integrity key: session_key not initialized");
 	}
 
 	uint8_t derived[32];
+	// Despite the name, opaque_client_derive_signing_key uses info="response-integrity-v1"
+	// which is correct for integrity_key per SECURITY_SPECIFICATION.md
 	int result = opaque_client_derive_signing_key(session_key_param.data(), session_key_param.size(), derived);
 
 	if (result != 0) {
@@ -1136,7 +1142,7 @@ HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method
 	headers.Insert("X-Boilstream-Sequence", std::to_string(snapshot.sequence));
 	headers.Insert("X-Boilstream-Signature", signing_result.signature);
 	headers.Insert("X-Boilstream-Credential", signing_result.credential_scope);
-	headers.Insert("X-Boilstream-Ciphers", "0x0001, 0x0002");
+	headers.Insert("X-Boilstream-Ciphers", "0x0001,0x0002");
 	headers.Insert("X-Boilstream-Cipher-Version", "1");
 
 	return headers;
@@ -1180,7 +1186,7 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 
 	// Hash response body (SHA-256, lowercase hex)
 	uint8_t body_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t*>(response_body.c_str()), response_body.size(), body_hash);
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(response_body.c_str()), response_body.size(), body_hash);
 
 	// Convert to lowercase hex string
 	string hashed_payload;
@@ -1242,8 +1248,8 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	// Using Rust crypto implementation (works on all platforms including WASM)
 	uint8_t expected_signature[32];
 	opaque_client_hmac_sha256(integrity_key.data(), integrity_key.size(),
-	                          reinterpret_cast<const uint8_t *>(canonical_response.c_str()),
-	                          canonical_response.size(), expected_signature);
+	                          reinterpret_cast<const uint8_t *>(canonical_response.c_str()), canonical_response.size(),
+	                          expected_signature);
 
 	// Encode expected signature as base64
 	string expected_signature_str(reinterpret_cast<const char *>(expected_signature), 32);
@@ -1431,8 +1437,7 @@ string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_bo
 
 	// Using Rust crypto implementation (works on all platforms including WASM)
 	uint8_t expected_hmac[32];
-	opaque_client_hmac_sha256(integrity_key.data(), integrity_key.size(),
-	                          hmac_input.data(), hmac_input.size(),
+	opaque_client_hmac_sha256(integrity_key.data(), integrity_key.size(), hmac_input.data(), hmac_input.size(),
 	                          expected_hmac);
 
 	// Constant-time comparison (CRITICAL for security)
@@ -1473,11 +1478,8 @@ string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_bo
 
 		// Decrypt and verify using Rust (includes AEAD tag verification)
 		long decrypted_len = opaque_client_aes_gcm_decrypt(
-		    ciphertext_with_tag.data(), ciphertext_with_tag.size(),
-		    nonce_bytes.data(), nonce_bytes.size(),
-		    encryption_key.data(), encryption_key.size(),
-		    plaintext_bytes.data(), plaintext_bytes.size()
-		);
+		    ciphertext_with_tag.data(), ciphertext_with_tag.size(), nonce_bytes.data(), nonce_bytes.size(),
+		    encryption_key.data(), encryption_key.size(), plaintext_bytes.data(), plaintext_bytes.size());
 
 		if (decrypted_len < 0) {
 			throw IOException("DecryptResponse: AES-GCM decryption or authentication failed");
@@ -1599,7 +1601,7 @@ RestApiSecretStorage::SignRequest(const string &method, const string &url, const
 	// Include ALL x-boilstream-* headers (except x-boilstream-signature)
 	// Following spec: All headers starting with x-boilstream- must be signed
 	string canonical_headers = "x-boilstream-cipher-version:1\n"
-	                           "x-boilstream-ciphers:0x0001, 0x0002\n"
+	                           "x-boilstream-ciphers:0x0001,0x0002\n"
 	                           "x-boilstream-credential:" +
 	                           credential_scope +
 	                           "\n"
@@ -1972,13 +1974,13 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 			continue;
 		}
 
+		// Get HTTP status code first
+		auto status_code = static_cast<uint16_t>(response->status);
+
 		if (!response->Success()) {
-			BOILSTREAM_LOG("HttpGet: Request failed (not successful)");
+			BOILSTREAM_LOG("HttpGet: Request failed (not successful), status=" << status_code);
 			return "";
 		}
-
-		// Get HTTP status code
-		auto status_code = static_cast<uint16_t>(response->status);
 
 		// Verify response signature and decrypt BEFORE checking status code
 		// This ensures error responses are also decrypted before being thrown
@@ -1993,10 +1995,22 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 
 			// Check if response is encrypted and decrypt if needed
 			auto header_map = ExtractBoilstreamHeaders(response_headers_captured);
-			if (IsResponseEncrypted(header_map)) {
-				BOILSTREAM_LOG("HttpGet: Response is encrypted, decrypting...");
+			bool is_encrypted_via_header = IsResponseEncrypted(header_map);
+
+			// Also check JSON body for "encrypted":true (fallback if server doesn't send header)
+			bool is_encrypted_via_body = (response_body.find("\"encrypted\"") != string::npos &&
+			                              response_body.find("\"ciphertext\"") != string::npos);
+
+			if (is_encrypted_via_header || is_encrypted_via_body) {
+				if (is_encrypted_via_body && !is_encrypted_via_header) {
+					BOILSTREAM_LOG("HttpGet: Response is encrypted (detected from JSON body, header missing)");
+				} else {
+					BOILSTREAM_LOG("HttpGet: Response is encrypted (via header)");
+				}
+
 				try {
-					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					// Try to get cipher suite from header, default to 0x0001 if not present
+					uint16_t cipher_suite = header_map.empty() ? 0x0001 : ParseCipherSuite(header_map);
 					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
 					BOILSTREAM_LOG("HttpGet: Response decrypted successfully, plaintext_len=" << response_body.size());
 				} catch (const std::exception &e) {
@@ -2156,10 +2170,39 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 
 			// Check if response is encrypted and decrypt if needed
 			auto header_map = ExtractBoilstreamHeaders(response->headers);
-			if (IsResponseEncrypted(header_map)) {
+
+			// Debug: Log all received headers
+			BOILSTREAM_LOG("HttpPost: Received headers count=" << header_map.size());
+			for (const auto &hdr : header_map) {
+				BOILSTREAM_LOG("  Header: " << hdr.first << " = " << hdr.second);
+			}
+
+			// Check for encryption via header OR body (WASM doesn't always expose headers)
+			bool is_encrypted = IsResponseEncrypted(header_map);
+
+			// Fallback: Check if response body has {"encrypted":true,...} format
+			if (!is_encrypted && !request.buffer_out.empty() && request.buffer_out[0] == '{') {
+				// Try to parse as JSON to check for encrypted field
+				yyjson_doc *doc = yyjson_read(request.buffer_out.c_str(), request.buffer_out.size(), 0);
+				if (doc) {
+					yyjson_val *root = yyjson_doc_get_root(doc);
+					if (root && yyjson_is_obj(root)) {
+						yyjson_val *encrypted_val = yyjson_obj_get(root, "encrypted");
+						if (encrypted_val && yyjson_is_bool(encrypted_val) && yyjson_get_bool(encrypted_val)) {
+							is_encrypted = true;
+							BOILSTREAM_LOG(
+							    "HttpPost: Detected encryption from response body (headers unavailable in WASM)");
+						}
+					}
+					yyjson_doc_free(doc);
+				}
+			}
+
+			if (is_encrypted) {
 				BOILSTREAM_LOG("HttpPost: Response is encrypted, decrypting...");
 				try {
-					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					// For body-based encryption detection, cipher suite is in the body
+					uint16_t cipher_suite = header_map.empty() ? 0x0001 : ParseCipherSuite(header_map);
 					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
 					BOILSTREAM_LOG(
 					    "HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
@@ -2707,24 +2750,40 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 	}
 
 	// Parse JSON array using yyjson
+	// NOTE: HttpGet() should have already decrypted the response if it was encrypted
+	BOILSTREAM_LOG("AllSecrets: Parsing " << response.size() << " bytes of JSON response");
+
+	// Check if response is still encrypted (HttpGet failed to decrypt it)
+	if (response.find("\"encrypted\"") != string::npos && response.find("\"ciphertext\"") != string::npos) {
+		BOILSTREAM_LOG("AllSecrets: ERROR - Response is still encrypted! HttpGet() should have decrypted it.");
+		BOILSTREAM_LOG("AllSecrets: This means the server didn't send X-Boilstream-Encrypted header");
+		BOILSTREAM_LOG("AllSecrets: Response body: " << response.substr(0, 200));
+		return CatalogSetSecretStorage::AllSecrets(transaction);
+	}
 	auto doc = yyjson_read(response.c_str(), response.size(), 0);
 	if (!doc) {
+		BOILSTREAM_LOG("AllSecrets: ERROR - Failed to parse JSON");
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
 
 	auto root = yyjson_doc_get_root(doc);
 	if (!root || !yyjson_is_arr(root)) {
+		BOILSTREAM_LOG("AllSecrets: ERROR - Root is not an array");
 		yyjson_doc_free(doc);
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
+
+	BOILSTREAM_LOG("AllSecrets: JSON array parsed successfully");
 
 	auto &manager = SecretManager::Get(db);
 
 	// Iterate through array elements and add/update in catalog
 	size_t idx, max;
 	yyjson_val *val;
+	size_t secrets_added = 0;
 	yyjson_arr_foreach(root, idx, max, val) {
 		if (!yyjson_is_obj(val)) {
+			BOILSTREAM_LOG("AllSecrets: Skipping non-object element at index " << idx);
 			continue;
 		}
 
@@ -2738,11 +2797,13 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 		// Convert object to JSON string for DeserializeSecret
 		auto obj_str = yyjson_val_write(val, 0, nullptr);
 		if (obj_str) {
+			BOILSTREAM_LOG("AllSecrets: Processing secret JSON: " << string(obj_str).substr(0, 100) << "...");
 			auto secret = DeserializeSecret(string(obj_str), manager);
 			free(obj_str);
 
 			if (secret) {
 				auto secret_name = secret->GetName();
+				BOILSTREAM_LOG("AllSecrets: Adding secret '" << secret_name << "' to catalog");
 
 				// Store expiration if provided
 				if (!expires_at_str.empty()) {
@@ -2751,9 +2812,16 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 
 				// Add or update secret in local catalog
 				AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+				secrets_added++;
+			} else {
+				BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null");
 			}
+		} else {
+			BOILSTREAM_LOG("AllSecrets: WARNING - Failed to serialize object to JSON string");
 		}
 	}
+
+	BOILSTREAM_LOG("AllSecrets: Added " << secrets_added << " secrets to catalog");
 
 	yyjson_doc_free(doc);
 
