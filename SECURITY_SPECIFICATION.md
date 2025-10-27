@@ -557,7 +557,7 @@ Cipher suites follow the naming convention: `BOILSTREAM-<KDF>-<AEAD>-<MAC>`
 **Client Request Headers**:
 
 ```
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -570,13 +570,13 @@ X-Boilstream-Cipher-Version: 1
 
 ### Negotiation Rules
 
-1. **Client sends supported suites**: Client lists all supported cipher suite IDs (order irrelevant)
+1. **Client sends supported suites**: Client lists all supported cipher suite IDs (order irrelevant). **Format**: Comma-separated hex values **with NO spaces** (e.g., `0x0001,0x0002`). Spaces cause signature verification failures in WASM/browser environments due to URL encoding.
 2. **Server selects most secure**: Server MUST select highest priority (lowest priority number) from mutually-supported suites
 3. **Fallback**: If client omits `X-Boilstream-Ciphers` header, server MUST use `0x0001` (mandatory suite)
 4. **Version mismatch**: If `X-Boilstream-Cipher-Version` incompatible, server returns `426 Upgrade Required`
 5. **No common suite**: Server returns `400 Bad Request` with `{"error": "No supported cipher suite"}`
 
-**Example**: Client sends `0x0001, 0x0002`. Server supports both. Server selects `0x0001` (priority 1 < priority 2).
+**Example**: Client sends `0x0001,0x0002`. Server supports both. Server selects `0x0001` (priority 1 < priority 2).
 
 ### Version Compatibility
 
@@ -705,7 +705,7 @@ POST
 /secrets
 
 x-boilstream-cipher-version:1
-x-boilstream-ciphers:0x0001, 0x0002
+x-boilstream-ciphers:0x0001,0x0002
 x-boilstream-credential:a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
 x-boilstream-date:20251009T120000Z
 x-boilstream-sequence:42
@@ -782,7 +782,7 @@ X-Boilstream-Date: <ISO8601 timestamp>
 X-Boilstream-Sequence: <sequence_number>
 X-Boilstream-Signature: <base64_signature>
 X-Boilstream-Credential: <credential_scope>
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -928,8 +928,10 @@ When server encrypts responses, use the following JSON structure:
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "<base64-encoded nonce>",
-  "ciphertext": "<base64-encoded ciphertext+tag>"
+  "ciphertext": "<base64-encoded ciphertext+tag>",
+  "hmac": "<hex-encoded hmac>"
 }
 ```
 
@@ -1541,7 +1543,7 @@ X-Boilstream-Date: 20251009T120000Z
 X-Boilstream-Sequence: 42
 X-Boilstream-Signature: <base64-HMAC>
 X-Boilstream-Credential: a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 X-Boilstream-Cipher-Version: 1
 ```
 
@@ -1564,6 +1566,53 @@ X-Boilstream-Encrypted: true
 ```
 
 **Note**: Response is signed using `integrity_key` and encrypted using `encryption_key`, both derived from `session_key`.
+
+### POST /secrets (Write Secret)
+
+**Request Headers**:
+
+```
+Authorization: Bearer <session_token>
+X-Boilstream-Date: 20251009T120000Z
+X-Boilstream-Sequence: 43
+X-Boilstream-Signature: <base64-HMAC>
+X-Boilstream-Credential: a7f3c8e2/20251009/us-east-1/secrets/boilstream_request
+Idempotency-Key: <optional-uuid>
+```
+
+**Request Body**:
+
+```json
+{
+  "secret": {
+    "name": "my_s3_secret",
+    "secret_type": "S3",
+    "key_id": "AKIAIOSFODNN7EXAMPLE",
+    "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "region": "us-east-1",
+    "session_token": null,
+    "endpoint": null,
+    "scope": "duckdb"
+  },
+  "on_conflict": "fail"
+}
+```
+
+**Response (204 No Content)**:
+
+```
+HTTP/1.1 204 No Content
+```
+
+**Note**: Write operations (POST /secrets, DELETE /secrets/{name}) return **HTTP 204 No Content** with no response body. Since there is no body to encrypt, these responses are NOT encrypted and do NOT include encryption headers (`X-Boilstream-Cipher`, `X-Boilstream-Encrypted`). This follows REST API best practices for successful write/delete operations that don't return data.
+
+**When to Encrypt Responses**:
+
+- ✅ **DO encrypt**: Responses that return sensitive data (GET /secrets, POST /secrets/get, POST /secrets/match)
+- ❌ **DO NOT encrypt**: Empty responses (204 No Content) for write/delete operations
+- ❌ **DO NOT encrypt**: Error responses with no sensitive information (optional - implementation choice)
+
+**Important**: Never return HTTP 200 OK with an empty body for write operations, as this creates a 0-byte plaintext that encrypts to just a 16-byte AEAD tag, causing client-side decryption confusion.
 
 ---
 
@@ -2007,7 +2056,7 @@ Before testing Boilstream-specific requests, implementations SHOULD validate can
 - Query: `` (empty)
 - Headers:
   - `X-Boilstream-Cipher-Version: 1`
-  - `X-Boilstream-Ciphers: 0x0001, 0x0002`
+  - `X-Boilstream-Ciphers: 0x0001,0x0002`
   - `X-Boilstream-Credential: c3e5d7b9/20251009/us-east-1/secrets/boilstream_request`
   - `X-Boilstream-Date: 20251009T120000Z`
   - `X-Boilstream-Sequence: 42`
@@ -2026,7 +2075,7 @@ POST
 /secrets
 
 x-boilstream-cipher-version:1
-x-boilstream-ciphers:0x0001, 0x0002
+x-boilstream-ciphers:0x0001,0x0002
 x-boilstream-credential:c3e5d7b9/20251009/us-east-1/secrets/boilstream_request
 x-boilstream-date:20251009T120000Z
 x-boilstream-sequence:42
@@ -2244,7 +2293,7 @@ TBjZBAXiayRe/JfkrPtM4aRJAH6fnIeVeUs1d4GvDas=
 **Client Request Headers**:
 
 ```
-X-Boilstream-Ciphers: 0x0001, 0x0002
+X-Boilstream-Ciphers: 0x0001,0x0002
 ```
 
 **Server Response Body** (plaintext JSON, before encryption):
@@ -2261,16 +2310,16 @@ X-Boilstream-Ciphers: 0x0001, 0x0002
 
 #### Test Vector A.10.1: Cipher Suite Negotiation
 
-**Input**: Client cipher preference: `"0x0001, 0x0002"`
+**Input**: Client cipher preference: `"0x0001,0x0002"`
 
 **Server Selection Process**:
 
-1. Parse client cipher list: `[0x0001, 0x0002]`
+1. Parse client cipher list: `[0x0001,0x0002]`
 2. Select highest priority (lowest number): `0x0001`
 
 **Selected Cipher Suite**: `0x0001` (AES-256-GCM-HMACSHA256)
 
-**Validation**: Server MUST select `0x0001` when client sends `"0x0001, 0x0002"`.
+**Validation**: Server MUST select `0x0001` when client sends `"0x0001,0x0002"`.
 
 #### Test Vector A.10.2: AES-256-GCM Encryption
 
@@ -2346,6 +2395,7 @@ e49ca878f21cf72a5eb27c8aab528064
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "[Base64(nonce_12_bytes)]",
   "ciphertext": "[Base64(ciphertext_with_tag_64_bytes)]",
   "hmac": "[hex(hmac_32_bytes)]"
@@ -2357,6 +2407,7 @@ e49ca878f21cf72a5eb27c8aab528064
 ```json
 {
   "encrypted": true,
+  "cipher": "0x0001",
   "nonce": "AAECAwQFBgcICQoL",
   "ciphertext": "euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==",
   "hmac": "8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"
@@ -2366,7 +2417,7 @@ e49ca878f21cf72a5eb27c8aab528064
 **Expected EncryptedResponse JSON** (compact, actual HTTP response body):
 
 ```
-{"encrypted":true,"nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"}
+{"encrypted":true,"cipher":"0x0001","nonce":"AAECAwQFBgcICQoL","ciphertext":"euAIcD4KxPxXmWfAa7O03hhCXRN8hMLhq592kWMupr2U/qH5Wt+tYpK9qKpr6zNb5JyoePIc9ypesnyKq1KAZA==","hmac":"8f352814ea019021bf7c0f6640bb7959414c6463948bd5fec45e27c9c9245b20"}
 ```
 
 **Validation**:

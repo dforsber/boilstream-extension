@@ -9,6 +9,7 @@
 #include "boilstream_secret_storage.hpp"
 #include "opaque_wrapper.hpp"
 #include "opaque_client.h"
+#include "opaque_client_ffi.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -19,7 +20,6 @@
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/random_engine.hpp"
-#include "mbedtls_wrapper.hpp"
 #include "yyjson.hpp"
 #include <sstream>
 #include <thread>
@@ -73,6 +73,47 @@
 		while (n--)                                                                                                    \
 			*p++ = 0;                                                                                                  \
 	} while (0)
+#endif
+
+// WASM-specific localStorage access
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+// JavaScript interop for localStorage
+EM_JS(void, js_localStorage_setItem, (const char *key, const char *value), {
+	const keyStr = UTF8ToString(key);
+	const valueStr = UTF8ToString(value);
+	try {
+		localStorage.setItem(keyStr, valueStr);
+	} catch (e) {
+		console.error('localStorage.setItem failed:', e);
+	}
+});
+
+EM_JS(char *, js_localStorage_getItem, (const char *key), {
+	const keyStr = UTF8ToString(key);
+	try {
+		const value = localStorage.getItem(keyStr);
+		if (value === null)
+			return null;
+		const len = lengthBytesUTF8(value) + 1;
+		const ptr = _malloc(len);
+		stringToUTF8(value, ptr, len);
+		return ptr;
+	} catch (e) {
+		console.error('localStorage.getItem failed:', e);
+		return null;
+	}
+});
+
+EM_JS(void, js_localStorage_removeItem, (const char *key), {
+	const keyStr = UTF8ToString(key);
+	try {
+		localStorage.removeItem(keyStr);
+	} catch (e) {
+		console.error('localStorage.removeItem failed:', e);
+	}
+});
 #endif
 
 // Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
@@ -202,8 +243,6 @@ void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
 		return;
 	}
 
-	BOILSTREAM_LOG("SaveRefreshToken: Saving refresh token to disk");
-
 	// Get current session data
 	RefreshTokenData data;
 	{
@@ -220,7 +259,7 @@ void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
 		data.expires_at = token_expires_at;
 	}
 
-	// Serialize data to JSON (unencrypted, protected by file permissions)
+	// Serialize data to JSON (unencrypted, protected by file permissions on native / localStorage sandboxing on WASM)
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
@@ -250,7 +289,14 @@ void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
 	free(json_str);
 	yyjson_mut_doc_free(doc);
 
-	// Write to file (overwrite if exists for token rotation)
+#ifdef __EMSCRIPTEN__
+	// WASM: Use browser localStorage
+	BOILSTREAM_LOG("SaveRefreshToken: Saving refresh token to localStorage");
+	js_localStorage_setItem("duckdb_boilstream_refresh_token", json_output.c_str());
+	BOILSTREAM_LOG("SaveRefreshToken: Successfully saved to localStorage");
+#else
+	// Native: Write to file (overwrite if exists for token rotation)
+	BOILSTREAM_LOG("SaveRefreshToken: Saving refresh token to disk");
 	string file_path = GetRefreshTokenPath();
 	auto &fs = FileSystem::GetFileSystem(db);
 
@@ -270,9 +316,24 @@ void RestApiSecretStorage::SaveRefreshToken(bool resumption_enabled) {
 #endif
 
 	BOILSTREAM_LOG("SaveRefreshToken: Successfully saved to " << file_path);
+#endif
 }
 
 bool RestApiSecretStorage::LoadRefreshToken() {
+	string file_contents;
+
+#ifdef __EMSCRIPTEN__
+	// WASM: Load from browser localStorage
+	BOILSTREAM_LOG("LoadRefreshToken: Attempting to load refresh token from localStorage");
+	char *json_c_str = js_localStorage_getItem("duckdb_boilstream_refresh_token");
+	if (!json_c_str) {
+		BOILSTREAM_LOG("LoadRefreshToken: No token found in localStorage");
+		return false;
+	}
+	file_contents = string(json_c_str);
+	free(json_c_str);
+#else
+	// Native: Load from file
 	BOILSTREAM_LOG("LoadRefreshToken: Attempting to load refresh token from disk");
 
 	string file_path = GetRefreshTokenPath();
@@ -286,9 +347,10 @@ bool RestApiSecretStorage::LoadRefreshToken() {
 	// Read file
 	auto handle = fs.OpenFile(file_path, FileFlags::FILE_FLAGS_READ);
 	auto file_size = fs.GetFileSize(*handle);
-	string file_contents(file_size, '\0');
+	file_contents.resize(file_size);
 	fs.Read(*handle, const_cast<char *>(file_contents.data()), file_size);
 	handle->Close();
+#endif
 
 	// Parse JSON
 	auto doc = yyjson_read(file_contents.c_str(), file_contents.size(), 0);
@@ -340,13 +402,13 @@ bool RestApiSecretStorage::LoadRefreshToken() {
 	BOILSTREAM_LOG("LoadRefreshToken: Loaded refresh token, size=" << refresh_token_bytes_str.size() << " bytes");
 
 	// Debug: compute and log what user_id SHOULD be from this token
-	char debug_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(refresh_token_bytes_str.c_str(), refresh_token_bytes_str.size(),
-	                                                  debug_hash);
+	uint8_t debug_hash[32];
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(refresh_token_bytes_str.c_str()),
+	                     refresh_token_bytes_str.size(), debug_hash);
 	string debug_user_id;
 	debug_user_id.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+	for (size_t i = 0; i < 32; i++) {
 		unsigned char byte = static_cast<unsigned char>(debug_hash[i]);
 		debug_user_id += hex_chars[(byte >> 4) & 0xF];
 		debug_user_id += hex_chars[byte & 0xF];
@@ -387,6 +449,13 @@ bool RestApiSecretStorage::LoadRefreshToken() {
 }
 
 void RestApiSecretStorage::DeleteRefreshToken() {
+#ifdef __EMSCRIPTEN__
+	// WASM: Delete from localStorage
+	BOILSTREAM_LOG("DeleteRefreshToken: Deleting refresh token from localStorage");
+	js_localStorage_removeItem("duckdb_boilstream_refresh_token");
+	BOILSTREAM_LOG("DeleteRefreshToken: Token deleted from localStorage");
+#else
+	// Native: Delete file
 	BOILSTREAM_LOG("DeleteRefreshToken: Deleting refresh token file");
 
 	string file_path = GetRefreshTokenPath();
@@ -396,6 +465,7 @@ void RestApiSecretStorage::DeleteRefreshToken() {
 		fs.RemoveFile(file_path);
 		BOILSTREAM_LOG("DeleteRefreshToken: File deleted");
 	}
+#endif
 }
 
 void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string &context) {
@@ -439,14 +509,14 @@ void RestApiSecretStorage::PerformOpaqueRegistration(const string &password) {
 
 	// Compute user_id: SHA-256 hash of password (bootstrap_token)
 	// Following spec: user_id = lowercase_hex(SHA256(password))
-	char password_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(password.c_str(), password.size(), password_hash);
+	uint8_t password_hash[32];
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(password.c_str()), password.size(), password_hash);
 
 	// Convert hash to lowercase hex string (64 characters)
 	string user_id;
 	user_id.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+	for (size_t i = 0; i < 32; i++) {
 		unsigned char byte = static_cast<unsigned char>(password_hash[i]);
 		user_id += hex_chars[(byte >> 4) & 0xF];
 		user_id += hex_chars[byte & 0xF];
@@ -556,14 +626,14 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool
 
 	// Compute user_id: SHA-256 hash of password (bootstrap_token or refresh_token)
 	// Following spec: user_id = lowercase_hex(SHA256(password))
-	char password_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(password.c_str(), password.size(), password_hash);
+	uint8_t password_hash[32];
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(password.c_str()), password.size(), password_hash);
 
 	// Convert hash to lowercase hex string (64 characters)
 	string user_id;
 	user_id.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+	for (size_t i = 0; i < 32; i++) {
 		unsigned char byte = static_cast<unsigned char>(password_hash[i]);
 		user_id += hex_chars[(byte >> 4) & 0xF];
 		user_id += hex_chars[byte & 0xF];
@@ -787,13 +857,12 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool
 		session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
 
 		// Derive refresh_token from session_key using HKDF-Expand per SECURITY_SPECIFICATION.md:158
-		// refresh_token = HKDF-Expand(session_key, "session-resumption-v1", 32 bytes)
-		// We use session_key directly as PRK (no Extract step needed since session_key is already derived)
-		const string info = "session-resumption-v1";
-		string info_with_counter = info + string(1, 0x01); // info || 0x01
-		char derived_key[32];
-		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(session_key.data()), session_key.size(),
-		                                        info_with_counter.c_str(), info_with_counter.size(), derived_key);
+		// Using Rust crypto implementation (works on all platforms including WASM)
+		uint8_t derived_key[32];
+		int result = opaque_client_derive_refresh_token(session_key.data(), session_key.size(), derived_key);
+		if (result != 0) {
+			throw IOException("Failed to derive refresh token");
+		}
 		refresh_token.assign(derived_key, derived_key + 32);
 
 		// Reset sequence counter (starts at 0 for new session)
@@ -956,113 +1025,62 @@ string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction>
 
 vector<uint8_t> RestApiSecretStorage::DeriveSigningKey(const vector<uint8_t> &session_key_param) {
 	// HKDF-SHA256 key derivation for request signing (base key) - 32 bytes
-	// Following RFC 5869 and SECURITY_SPECIFICATION.md
-	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
-	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
-	// Output: derived_key = T(1)[0:32]
+	// Using Rust crypto implementation (works on all platforms including WASM)
+	// NOTE: Rust function is named "integrity_key" but uses info="request-integrity-v1" (correct for base_signing_key)
 
 	if (session_key_param.empty()) {
 		throw IOException("Cannot derive signing key: session_key not initialized");
 	}
 
-	// Step 1: HKDF-Extract
-	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
-	string salt = "boilstream-session-v1";
-	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
-	                                        reinterpret_cast<const char *>(session_key_param.data()),
-	                                        session_key_param.size(), prk);
+	uint8_t derived[32];
+	// Despite the name, opaque_client_derive_integrity_key uses info="request-integrity-v1"
+	// which is correct for base_signing_key per SECURITY_SPECIFICATION.md
+	int result = opaque_client_derive_integrity_key(session_key_param.data(), session_key_param.size(), derived);
 
-	// Step 2: HKDF-Expand
-	// T(1) = HMAC-SHA256(PRK, info || 0x01)
-	string info = "request-integrity-v1";
-	string info_with_counter = info + string(1, (char)0x01);
-	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
-	                                        derived);
+	if (result != 0) {
+		throw IOException("Failed to derive signing key");
+	}
 
-	// Return 32-byte key (T(1))
-	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
-
-	// Securely zero intermediate key material
-	SECURE_ZERO_MEMORY(prk, sizeof(prk));
-	SECURE_ZERO_MEMORY(derived, sizeof(derived));
-
-	return result;
+	return vector<uint8_t>(derived, derived + 32);
 }
 
 vector<uint8_t> RestApiSecretStorage::DeriveEncryptionKey(const vector<uint8_t> &session_key_param) {
 	// HKDF-SHA256 key derivation for response decryption - 32 bytes
-	// Following RFC 5869 and SECURITY_SPECIFICATION.md
-	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
-	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
-	// Output: derived_key = T(1)[0:32]
+	// Using Rust crypto implementation (works on all platforms including WASM)
 
 	if (session_key_param.empty()) {
 		throw IOException("Cannot derive encryption key: session_key not initialized");
 	}
 
-	// Step 1: HKDF-Extract
-	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
-	string salt = "boilstream-session-v1";
-	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
-	                                        reinterpret_cast<const char *>(session_key_param.data()),
-	                                        session_key_param.size(), prk);
+	uint8_t derived[32];
+	int result = opaque_client_derive_encryption_key(session_key_param.data(), session_key_param.size(), derived);
 
-	// Step 2: HKDF-Expand
-	// T(1) = HMAC-SHA256(PRK, info || 0x01)
-	string info = "response-encryption-v1";
-	string info_with_counter = info + string(1, (char)0x01);
-	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
-	                                        derived);
+	if (result != 0) {
+		throw IOException("Failed to derive encryption key");
+	}
 
-	// Return 32-byte key (T(1))
-	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
-
-	// Securely zero intermediate key material
-	SECURE_ZERO_MEMORY(prk, sizeof(prk));
-	SECURE_ZERO_MEMORY(derived, sizeof(derived));
-
-	return result;
+	return vector<uint8_t>(derived, derived + 32);
 }
 
 vector<uint8_t> RestApiSecretStorage::DeriveIntegrityKey(const vector<uint8_t> &session_key_param) {
 	// HKDF-SHA256 key derivation for response integrity verification - 32 bytes
-	// Following RFC 5869 and SECURITY_SPECIFICATION.md
-	// Step 1: Extract - PRK = HMAC-SHA256(salt, IKM)
-	// Step 2: Expand - T(1) = HMAC-SHA256(PRK, info || 0x01)
-	// Output: derived_key = T(1)[0:32]
+	// Using Rust crypto implementation (works on all platforms including WASM)
+	// NOTE: Rust function is named "signing_key" but uses info="response-integrity-v1" (correct for integrity_key)
 
 	if (session_key_param.empty()) {
 		throw IOException("Cannot derive integrity key: session_key not initialized");
 	}
 
-	// Step 1: HKDF-Extract
-	// PRK = HMAC-SHA256(salt="boilstream-session-v1", IKM=session_key)
-	string salt = "boilstream-session-v1";
-	char prk[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(salt.c_str(), salt.size(),
-	                                        reinterpret_cast<const char *>(session_key_param.data()),
-	                                        session_key_param.size(), prk);
+	uint8_t derived[32];
+	// Despite the name, opaque_client_derive_signing_key uses info="response-integrity-v1"
+	// which is correct for integrity_key per SECURITY_SPECIFICATION.md
+	int result = opaque_client_derive_signing_key(session_key_param.data(), session_key_param.size(), derived);
 
-	// Step 2: HKDF-Expand
-	// T(1) = HMAC-SHA256(PRK, info || 0x01)
-	string info = "response-integrity-v1";
-	string info_with_counter = info + string(1, (char)0x01);
-	char derived[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(prk, sizeof(prk), info_with_counter.c_str(), info_with_counter.size(),
-	                                        derived);
+	if (result != 0) {
+		throw IOException("Failed to derive integrity key");
+	}
 
-	// Return 32-byte key (T(1))
-	vector<uint8_t> result(derived, derived + duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
-
-	// Securely zero intermediate key material
-	SECURE_ZERO_MEMORY(prk, sizeof(prk));
-	SECURE_ZERO_MEMORY(derived, sizeof(derived));
-
-	return result;
+	return vector<uint8_t>(derived, derived + 32);
 }
 
 RestApiSecretStorage::SessionSnapshot RestApiSecretStorage::GetSessionSnapshot() {
@@ -1124,7 +1142,7 @@ HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method
 	headers.Insert("X-Boilstream-Sequence", std::to_string(snapshot.sequence));
 	headers.Insert("X-Boilstream-Signature", signing_result.signature);
 	headers.Insert("X-Boilstream-Credential", signing_result.credential_scope);
-	headers.Insert("X-Boilstream-Ciphers", "0x0001, 0x0002");
+	headers.Insert("X-Boilstream-Ciphers", "0x0001,0x0002");
 	headers.Insert("X-Boilstream-Cipher-Version", "1");
 
 	return headers;
@@ -1167,14 +1185,14 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	auto integrity_key = DeriveIntegrityKey(session_key_param);
 
 	// Hash response body (SHA-256, lowercase hex)
-	char body_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(response_body.c_str(), response_body.size(), body_hash);
+	uint8_t body_hash[32];
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(response_body.c_str()), response_body.size(), body_hash);
 
 	// Convert to lowercase hex string
 	string hashed_payload;
 	hashed_payload.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
+	for (size_t i = 0; i < 32; i++) {
 		unsigned char byte = static_cast<unsigned char>(body_hash[i]);
 		hashed_payload += hex_chars[(byte >> 4) & 0xF];
 		hashed_payload += hex_chars[byte & 0xF];
@@ -1227,12 +1245,14 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	BOILSTREAM_LOG("VerifyResponseSignature: Received signature (b64): " << received_signature_b64);
 
 	// Compute expected signature: HMAC-SHA256(integrity_key, canonical_response)
-	char expected_signature[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
-	                                        canonical_response.c_str(), canonical_response.size(), expected_signature);
+	// Using Rust crypto implementation (works on all platforms including WASM)
+	uint8_t expected_signature[32];
+	opaque_client_hmac_sha256(integrity_key.data(), integrity_key.size(),
+	                          reinterpret_cast<const uint8_t *>(canonical_response.c_str()), canonical_response.size(),
+	                          expected_signature);
 
 	// Encode expected signature as base64
-	string expected_signature_str(expected_signature, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
+	string expected_signature_str(reinterpret_cast<const char *>(expected_signature), 32);
 	string expected_signature_b64 = Blob::ToBase64(string_t(expected_signature_str));
 
 	BOILSTREAM_LOG("VerifyResponseSignature: Expected signature (b64): " << expected_signature_b64);
@@ -1415,15 +1435,15 @@ string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_bo
 	hmac_input.insert(hmac_input.end(), nonce_bytes.begin(), nonce_bytes.end());
 	hmac_input.insert(hmac_input.end(), ciphertext_with_tag.begin(), ciphertext_with_tag.end());
 
-	char expected_hmac[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
-	                                        reinterpret_cast<const char *>(hmac_input.data()), hmac_input.size(),
-	                                        expected_hmac);
+	// Using Rust crypto implementation (works on all platforms including WASM)
+	uint8_t expected_hmac[32];
+	opaque_client_hmac_sha256(integrity_key.data(), integrity_key.size(), hmac_input.data(), hmac_input.size(),
+	                          expected_hmac);
 
 	// Constant-time comparison (CRITICAL for security)
 	volatile uint8_t diff = 0;
 	for (size_t i = 0; i < 32; i++) {
-		diff |= (hmac_bytes[i] ^ static_cast<uint8_t>(expected_hmac[i]));
+		diff |= (hmac_bytes[i] ^ expected_hmac[i]);
 	}
 
 	// Securely zero expected HMAC
@@ -1441,53 +1461,48 @@ string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_bo
 	// Per SECURITY_SPECIFICATION.md: AES-256-GCM produces ciphertext with 16-byte tag appended
 
 	if (cipher_suite == 0x0001) {
-		// AES-256-GCM AEAD decryption
+		// AES-256-GCM AEAD decryption using Rust crypto (works on all platforms including WASM)
 		BOILSTREAM_LOG("DecryptResponse: Using AES-256-GCM AEAD");
 
-		// Split ciphertext and tag (last 16 bytes is AEAD authentication tag)
+		// Validate ciphertext size (must include 16-byte authentication tag)
 		constexpr size_t AEAD_TAG_SIZE = 16;
 		if (ciphertext_with_tag.size() < AEAD_TAG_SIZE) {
 			throw IOException("DecryptResponse: Ciphertext too short for AEAD tag");
 		}
 
 		size_t ciphertext_len = ciphertext_with_tag.size() - AEAD_TAG_SIZE;
-		vector<uint8_t> ciphertext_only(ciphertext_with_tag.begin(), ciphertext_with_tag.begin() + ciphertext_len);
-		vector<uint8_t> aead_tag(ciphertext_with_tag.begin() + ciphertext_len, ciphertext_with_tag.end());
-
-		BOILSTREAM_LOG("DecryptResponse: ciphertext=" << ciphertext_len << "B, tag=" << aead_tag.size() << "B");
-
-		// Create AES-256-GCM decryption state
-		duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_state(EncryptionTypes::CipherType::GCM,
-		                                                          32 // 256-bit key (32 bytes)
-		);
-
-		// Initialize decryption with nonce, key, and empty AAD (no additional authenticated data)
-		aes_state.InitializeDecryption(nonce_bytes.data(), nonce_bytes.size(),       // iv (nonce): 12 bytes
-		                               encryption_key.data(), encryption_key.size(), // key: 32 bytes
-		                               nullptr, 0 // aad: empty (no additional authenticated data)
-		);
+		BOILSTREAM_LOG("DecryptResponse: ciphertext=" << ciphertext_len << "B, tag=" << AEAD_TAG_SIZE << "B");
 
 		// Allocate output buffer for plaintext
 		vector<uint8_t> plaintext_bytes(ciphertext_len);
 
-		// Process ciphertext (decrypt without verifying tag yet)
-		size_t processed = aes_state.Process(ciphertext_only.data(), ciphertext_only.size(), plaintext_bytes.data(),
-		                                     plaintext_bytes.size());
+		// Decrypt and verify using Rust (includes AEAD tag verification)
+		BOILSTREAM_LOG("DecryptResponse: Calling opaque_client_aes_gcm_decrypt");
+		BOILSTREAM_LOG("DecryptResponse: ciphertext_with_tag.size=" << ciphertext_with_tag.size());
+		BOILSTREAM_LOG("DecryptResponse: nonce.size=" << nonce_bytes.size());
+		BOILSTREAM_LOG("DecryptResponse: key.size=" << encryption_key.size());
+		BOILSTREAM_LOG("DecryptResponse: output_buffer.size=" << plaintext_bytes.size());
 
-		if (processed != ciphertext_len) {
-			throw IOException("DecryptResponse: AES-GCM Process size mismatch");
+		long decrypted_len = opaque_client_aes_gcm_decrypt(
+		    ciphertext_with_tag.data(), ciphertext_with_tag.size(), nonce_bytes.data(), nonce_bytes.size(),
+		    encryption_key.data(), encryption_key.size(), plaintext_bytes.data(), plaintext_bytes.size());
+
+		BOILSTREAM_LOG("DecryptResponse: opaque_client_aes_gcm_decrypt returned " << decrypted_len);
+
+		if (decrypted_len < 0) {
+			std::ostringstream err;
+			err << "DecryptResponse: AES-GCM decryption failed (error code: " << decrypted_len << "). ";
+			err << "ciphertext=" << ciphertext_with_tag.size() << "B, ";
+			err << "nonce=" << nonce_bytes.size() << "B, ";
+			err << "key=" << encryption_key.size() << "B. ";
+			err << "Possible causes: wrong key, corrupted ciphertext, or AEAD tag mismatch";
+			throw IOException(err.str());
 		}
-
-		// Finalize and verify AEAD authentication tag (CRITICAL: verifies authenticity)
-		// This throws if tag verification fails (tampering/corruption detected)
-		aes_state.Finalize(plaintext_bytes.data(), 0,       // output buffer (already written by Process)
-		                   aead_tag.data(), aead_tag.size() // expected tag from ciphertext
-		);
 
 		BOILSTREAM_LOG("DecryptResponse: AEAD tag verified successfully");
 
 		// Convert to string
-		string plaintext(reinterpret_cast<char *>(plaintext_bytes.data()), plaintext_bytes.size());
+		string plaintext(reinterpret_cast<char *>(plaintext_bytes.data()), static_cast<size_t>(decrypted_len));
 
 		// Securely zero keys and sensitive data
 		SECURE_ZERO_MEMORY(encryption_key.data(), encryption_key.size());
@@ -1600,7 +1615,7 @@ RestApiSecretStorage::SignRequest(const string &method, const string &url, const
 	// Include ALL x-boilstream-* headers (except x-boilstream-signature)
 	// Following spec: All headers starting with x-boilstream- must be signed
 	string canonical_headers = "x-boilstream-cipher-version:1\n"
-	                           "x-boilstream-ciphers:0x0001, 0x0002\n"
+	                           "x-boilstream-ciphers:0x0001,0x0002\n"
 	                           "x-boilstream-credential:" +
 	                           credential_scope +
 	                           "\n"
@@ -1973,13 +1988,13 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 			continue;
 		}
 
+		// Get HTTP status code first
+		auto status_code = static_cast<uint16_t>(response->status);
+
 		if (!response->Success()) {
-			BOILSTREAM_LOG("HttpGet: Request failed (not successful)");
+			BOILSTREAM_LOG("HttpGet: Request failed (not successful), status=" << status_code);
 			return "";
 		}
-
-		// Get HTTP status code
-		auto status_code = static_cast<uint16_t>(response->status);
 
 		// Verify response signature and decrypt BEFORE checking status code
 		// This ensures error responses are also decrypted before being thrown
@@ -1994,10 +2009,34 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 
 			// Check if response is encrypted and decrypt if needed
 			auto header_map = ExtractBoilstreamHeaders(response_headers_captured);
-			if (IsResponseEncrypted(header_map)) {
-				BOILSTREAM_LOG("HttpGet: Response is encrypted, decrypting...");
+			BOILSTREAM_LOG("HttpGet: Extracted " << header_map.size() << " boilstream headers");
+			for (const auto &hdr : header_map) {
+				BOILSTREAM_LOG("HttpGet: Header: " << hdr.first << " = " << hdr.second);
+			}
+
+			bool is_encrypted_via_header = IsResponseEncrypted(header_map);
+
+			// Also check JSON body for "encrypted":true (fallback if server doesn't send header)
+			bool is_encrypted_via_body = (response_body.find("\"encrypted\"") != string::npos &&
+			                              response_body.find("\"ciphertext\"") != string::npos);
+
+			BOILSTREAM_LOG("HttpGet: is_encrypted_via_header=" << is_encrypted_via_header << ", is_encrypted_via_body=" << is_encrypted_via_body);
+
+			if (is_encrypted_via_header || is_encrypted_via_body) {
+				if (is_encrypted_via_body && !is_encrypted_via_header) {
+					BOILSTREAM_LOG("HttpGet: Response is encrypted (detected from JSON body, header missing)");
+				} else {
+					BOILSTREAM_LOG("HttpGet: Response is encrypted (via header)");
+				}
+
 				try {
-					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					// Try to get cipher suite from header
+					uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
+					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
+						cipher_suite = ParseCipherSuite(header_map);
+					} else {
+						BOILSTREAM_LOG("HttpGet: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+					}
 					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
 					BOILSTREAM_LOG("HttpGet: Response decrypted successfully, plaintext_len=" << response_body.size());
 				} catch (const std::exception &e) {
@@ -2157,10 +2196,44 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 
 			// Check if response is encrypted and decrypt if needed
 			auto header_map = ExtractBoilstreamHeaders(response->headers);
-			if (IsResponseEncrypted(header_map)) {
+
+			// Debug: Log all received headers
+			BOILSTREAM_LOG("HttpPost: Received headers count=" << header_map.size());
+			for (const auto &hdr : header_map) {
+				BOILSTREAM_LOG("  Header: " << hdr.first << " = " << hdr.second);
+			}
+
+			// Check for encryption via header OR body (WASM doesn't always expose headers)
+			bool is_encrypted = IsResponseEncrypted(header_map);
+
+			// Fallback: Check if response body has {"encrypted":true,...} format
+			if (!is_encrypted && !request.buffer_out.empty() && request.buffer_out[0] == '{') {
+				// Try to parse as JSON to check for encrypted field
+				yyjson_doc *doc = yyjson_read(request.buffer_out.c_str(), request.buffer_out.size(), 0);
+				if (doc) {
+					yyjson_val *root = yyjson_doc_get_root(doc);
+					if (root && yyjson_is_obj(root)) {
+						yyjson_val *encrypted_val = yyjson_obj_get(root, "encrypted");
+						if (encrypted_val && yyjson_is_bool(encrypted_val) && yyjson_get_bool(encrypted_val)) {
+							is_encrypted = true;
+							BOILSTREAM_LOG(
+							    "HttpPost: Detected encryption from response body (headers unavailable in WASM)");
+						}
+					}
+					yyjson_doc_free(doc);
+				}
+			}
+
+			if (is_encrypted) {
 				BOILSTREAM_LOG("HttpPost: Response is encrypted, decrypting...");
 				try {
-					uint16_t cipher_suite = ParseCipherSuite(header_map);
+					// Try to get cipher suite from header
+					uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
+					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
+						cipher_suite = ParseCipherSuite(header_map);
+					} else {
+						BOILSTREAM_LOG("HttpPost: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+					}
 					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
 					BOILSTREAM_LOG(
 					    "HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
@@ -2686,6 +2759,13 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 		try {
 			PerformOpaqueResume();
 			BOILSTREAM_LOG("AllSecrets: Resume successful");
+
+			// Re-capture endpoint URL after resume (it may have been updated from refresh token)
+			{
+				lock_guard<mutex> lock(endpoint_lock);
+				url = endpoint_url;
+			}
+			BOILSTREAM_LOG("AllSecrets: endpoint_url after resume=" << url);
 		} catch (const std::exception &e) {
 			BOILSTREAM_LOG("AllSecrets: Resume failed: " << e.what());
 			// Continue - will try unauthenticated or fail appropriately
@@ -2708,24 +2788,32 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 	}
 
 	// Parse JSON array using yyjson
+	// NOTE: HttpGet() should have already decrypted the response if it was encrypted
+	BOILSTREAM_LOG("AllSecrets: Parsing " << response.size() << " bytes of JSON response");
 	auto doc = yyjson_read(response.c_str(), response.size(), 0);
 	if (!doc) {
+		BOILSTREAM_LOG("AllSecrets: ERROR - Failed to parse JSON");
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
 
 	auto root = yyjson_doc_get_root(doc);
 	if (!root || !yyjson_is_arr(root)) {
+		BOILSTREAM_LOG("AllSecrets: ERROR - Root is not an array");
 		yyjson_doc_free(doc);
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
+
+	BOILSTREAM_LOG("AllSecrets: JSON array parsed successfully");
 
 	auto &manager = SecretManager::Get(db);
 
 	// Iterate through array elements and add/update in catalog
 	size_t idx, max;
 	yyjson_val *val;
+	size_t secrets_added = 0;
 	yyjson_arr_foreach(root, idx, max, val) {
 		if (!yyjson_is_obj(val)) {
+			BOILSTREAM_LOG("AllSecrets: Skipping non-object element at index " << idx);
 			continue;
 		}
 
@@ -2739,11 +2827,13 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 		// Convert object to JSON string for DeserializeSecret
 		auto obj_str = yyjson_val_write(val, 0, nullptr);
 		if (obj_str) {
+			BOILSTREAM_LOG("AllSecrets: Processing secret JSON: " << string(obj_str).substr(0, 100) << "...");
 			auto secret = DeserializeSecret(string(obj_str), manager);
 			free(obj_str);
 
 			if (secret) {
 				auto secret_name = secret->GetName();
+				BOILSTREAM_LOG("AllSecrets: Adding secret '" << secret_name << "' to catalog");
 
 				// Store expiration if provided
 				if (!expires_at_str.empty()) {
@@ -2752,9 +2842,16 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 
 				// Add or update secret in local catalog
 				AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+				secrets_added++;
+			} else {
+				BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null");
 			}
+		} else {
+			BOILSTREAM_LOG("AllSecrets: WARNING - Failed to serialize object to JSON string");
 		}
 	}
+
+	BOILSTREAM_LOG("AllSecrets: Added " << secrets_added << " secrets to catalog");
 
 	yyjson_doc_free(doc);
 

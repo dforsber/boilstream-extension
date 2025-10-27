@@ -713,3 +713,291 @@ mod wasm {
         })
     }
 }
+
+/// Compute SHA256 hash (C FFI)
+///
+/// # Arguments
+/// * `input` - pointer to input data
+/// * `input_len` - length of input data
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Safety
+/// Caller must ensure:
+/// - `input` points to valid memory of at least `input_len` bytes
+/// - `output` points to valid writable memory of at least 32 bytes
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_sha256(
+    input: *const u8,
+    input_len: usize,
+    output: *mut u8,
+) {
+    if input.is_null() || output.is_null() {
+        return;
+    }
+
+    let input_slice = slice::from_raw_parts(input, input_len);
+    let mut hasher = Sha256::new();
+    hasher.update(input_slice);
+    let result = hasher.finalize();
+
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+    output_slice.copy_from_slice(&result);
+}
+
+/// Compute HMAC-SHA256 (C FFI)
+///
+/// # Arguments
+/// * `key` - pointer to HMAC key
+/// * `key_len` - length of key in bytes
+/// * `data` - pointer to data to authenticate
+/// * `data_len` - length of data in bytes
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Safety
+/// Caller must ensure:
+/// - `key` points to valid memory of at least `key_len` bytes
+/// - `data` points to valid memory of at least `data_len` bytes
+/// - `output` points to valid writable memory of at least 32 bytes
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_hmac_sha256(
+    key: *const u8,
+    key_len: usize,
+    data: *const u8,
+    data_len: usize,
+    output: *mut u8,
+) {
+    use hmac::{Hmac, Mac};
+
+    if key.is_null() || data.is_null() || output.is_null() {
+        return;
+    }
+
+    let key_slice = slice::from_raw_parts(key, key_len);
+    let data_slice = slice::from_raw_parts(data, data_len);
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(key_slice)
+        .expect("HMAC can take key of any length");
+    mac.update(data_slice);
+    let result = mac.finalize();
+    let code_bytes = result.into_bytes();
+
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+    output_slice.copy_from_slice(&code_bytes);
+}
+
+/// Derive integrity key using HKDF-SHA256 (C FFI)
+/// salt="boilstream-session-v1", info="request-integrity-v1"
+///
+/// # Arguments
+/// * `session_key` - pointer to session key (IKM)
+/// * `session_key_len` - length of session key
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_derive_integrity_key(
+    session_key: *const u8,
+    session_key_len: usize,
+    output: *mut u8,
+) -> i32 {
+    use hkdf::Hkdf;
+
+    if session_key.is_null() || output.is_null() || session_key_len == 0 {
+        return -1;
+    }
+
+    let session_key_slice = slice::from_raw_parts(session_key, session_key_len);
+    let salt = b"boilstream-session-v1";
+    let info = b"request-integrity-v1";
+
+    let hk = Hkdf::<Sha256>::new(Some(salt), session_key_slice);
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+
+    match hk.expand(info, output_slice) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Derive encryption key using HKDF-SHA256 (C FFI)
+/// salt="boilstream-session-v1", info="response-encryption-v1"
+///
+/// # Arguments
+/// * `session_key` - pointer to session key (IKM)
+/// * `session_key_len` - length of session key
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_derive_encryption_key(
+    session_key: *const u8,
+    session_key_len: usize,
+    output: *mut u8,
+) -> i32 {
+    use hkdf::Hkdf;
+
+    if session_key.is_null() || output.is_null() || session_key_len == 0 {
+        return -1;
+    }
+
+    let session_key_slice = slice::from_raw_parts(session_key, session_key_len);
+    let salt = b"boilstream-session-v1";
+    let info = b"response-encryption-v1";
+
+    let hk = Hkdf::<Sha256>::new(Some(salt), session_key_slice);
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+
+    match hk.expand(info, output_slice) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Derive signing key using HKDF-SHA256 (C FFI)
+/// salt="boilstream-session-v1", info="response-integrity-v1"
+///
+/// # Arguments
+/// * `session_key` - pointer to session key (IKM)
+/// * `session_key_len` - length of session key
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_derive_signing_key(
+    session_key: *const u8,
+    session_key_len: usize,
+    output: *mut u8,
+) -> i32 {
+    use hkdf::Hkdf;
+
+    if session_key.is_null() || output.is_null() || session_key_len == 0 {
+        return -1;
+    }
+
+    let session_key_slice = slice::from_raw_parts(session_key, session_key_len);
+    let salt = b"boilstream-session-v1";
+    let info = b"response-integrity-v1";
+
+    let hk = Hkdf::<Sha256>::new(Some(salt), session_key_slice);
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+
+    match hk.expand(info, output_slice) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Derive refresh token using HKDF-Expand (C FFI)
+/// Uses session_key directly as PRK, info="session-resumption-v1"
+///
+/// # Arguments
+/// * `session_key` - pointer to session key (used as PRK)
+/// * `session_key_len` - length of session key
+/// * `output` - pointer to output buffer (must be 32 bytes)
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_derive_refresh_token(
+    session_key: *const u8,
+    session_key_len: usize,
+    output: *mut u8,
+) -> i32 {
+    use hmac::{Hmac, Mac};
+
+    if session_key.is_null() || output.is_null() || session_key_len == 0 {
+        return -1;
+    }
+
+    let session_key_slice = slice::from_raw_parts(session_key, session_key_len);
+    let info = b"session-resumption-v1\x01"; // info || 0x01
+
+    // HKDF-Expand: HMAC-SHA256(PRK=session_key, info || 0x01)
+    let mut mac = match Hmac::<Sha256>::new_from_slice(session_key_slice) {
+        Ok(m) => m,
+        Err(_) => return -1,
+    };
+    mac.update(info);
+    let result = mac.finalize();
+    let code_bytes = result.into_bytes();
+
+    let output_slice = slice::from_raw_parts_mut(output, 32);
+    output_slice.copy_from_slice(&code_bytes);
+
+    0
+}
+
+/// Decrypt and verify AES-256-GCM encrypted response (C FFI)
+///
+/// # Arguments
+/// * `ciphertext_with_tag` - pointer to ciphertext + 16-byte authentication tag
+/// * `ciphertext_with_tag_len` - total length (ciphertext + 16)
+/// * `nonce` - pointer to 12-byte nonce
+/// * `nonce_len` - length of nonce (must be 12)
+/// * `encryption_key` - pointer to 32-byte encryption key
+/// * `encryption_key_len` - length of key (must be 32)
+/// * `plaintext_out` - pointer to output buffer (must be at least ciphertext_len bytes)
+/// * `plaintext_out_len` - size of output buffer
+///
+/// # Returns
+/// Length of plaintext on success, -1 on error (including auth tag verification failure)
+#[no_mangle]
+pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
+    ciphertext_with_tag: *const u8,
+    ciphertext_with_tag_len: usize,
+    nonce: *const u8,
+    nonce_len: usize,
+    encryption_key: *const u8,
+    encryption_key_len: usize,
+    plaintext_out: *mut u8,
+    plaintext_out_len: usize,
+) -> isize {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm,
+    };
+    use aes_gcm::aead::generic_array::GenericArray;
+
+    // Validate inputs
+    if ciphertext_with_tag.is_null() || nonce.is_null() || encryption_key.is_null() || plaintext_out.is_null() {
+        return -1;
+    }
+
+    if nonce_len != 12 || encryption_key_len != 32 || ciphertext_with_tag_len < 16 {
+        return -1;
+    }
+
+    let ciphertext_len = ciphertext_with_tag_len - 16;
+    if plaintext_out_len < ciphertext_len {
+        return -1;
+    }
+
+    let ciphertext_with_tag_slice = slice::from_raw_parts(ciphertext_with_tag, ciphertext_with_tag_len);
+    let nonce_slice = slice::from_raw_parts(nonce, nonce_len);
+    let key_slice = slice::from_raw_parts(encryption_key, encryption_key_len);
+
+    // Create cipher
+    let cipher = match Aes256Gcm::new_from_slice(key_slice) {
+        Ok(c) => c,
+        Err(_) => return -1,
+    };
+
+    // Create nonce from slice (12 bytes for GCM)
+    let nonce_array = GenericArray::from_slice(nonce_slice);
+
+    // Decrypt and verify (this includes tag verification)
+    match cipher.decrypt(nonce_array, ciphertext_with_tag_slice) {
+        Ok(plaintext) => {
+            if plaintext.len() != ciphertext_len {
+                return -1;
+            }
+            let output_slice = slice::from_raw_parts_mut(plaintext_out, ciphertext_len);
+            output_slice.copy_from_slice(&plaintext);
+            ciphertext_len as isize
+        }
+        Err(_) => -1, // Decryption or authentication failed
+    }
+}

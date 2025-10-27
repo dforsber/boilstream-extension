@@ -11,15 +11,27 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/function/pragma_function.hpp"
-#include "mbedtls_wrapper.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
+#include "opaque_client_ffi.hpp"
 #include <ctime>
 #include <chrono>
 
-// Debug logging macro - only enabled when BOILSTREAM_DEBUG is defined
-// To enable: add -DBOILSTREAM_DEBUG to compiler flags
-#ifdef BOILSTREAM_DEBUG
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
+// Debug logging macro - always enabled for WASM debugging
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <sstream>
+#define BOILSTREAM_LOG(msg)                                                                                            \
+	do {                                                                                                               \
+		std::ostringstream oss;                                                                                        \
+		oss << "[BOILSTREAM] " << msg;                                                                                 \
+		emscripten_log(EM_LOG_CONSOLE, "%s", oss.str().c_str());                                                       \
+	} while (0)
+#elif defined(BOILSTREAM_DEBUG)
 #include <iostream>
 #define BOILSTREAM_LOG(msg) std::cerr << "[BOILSTREAM] " << msg << std::endl
 #else
@@ -49,34 +61,43 @@ static void SetUserContext(ClientContext &context, const string &user_id) {
 
 //! PRAGMA function to set the REST API endpoint URL
 static string SetRestApiEndpoint(ClientContext &context, const FunctionParameters &params) {
+	BOILSTREAM_LOG("Step 1: Function called");
+
 	if (params.values.empty()) {
 		throw InvalidInputException("rest_set_endpoint requires a URL parameter");
 	}
 
+	BOILSTREAM_LOG("Step 2: Getting parameter");
 	string input = params.values[0].ToString();
+	BOILSTREAM_LOG("Step 3: Parameter = " << input.substr(0, 50) << "...");
 
 	// Validate input format
 	if (input.empty()) {
 		throw InvalidInputException("rest_set_endpoint: URL cannot be empty");
 	}
+	BOILSTREAM_LOG("Step 4: Validation - not empty");
 
 	// Check if URL has a valid protocol
+	BOILSTREAM_LOG("Step 5: Checking protocol");
 	if (input.find("http://") != 0 && input.find("https://") != 0) {
 		throw InvalidInputException("rest_set_endpoint: URL must start with http:// or https://");
 	}
 
 	// Find where the protocol ends (after ://)
+	BOILSTREAM_LOG("Step 6: Finding protocol end");
 	auto protocol_end = input.find("://");
 	if (protocol_end == string::npos) {
 		throw InvalidInputException("rest_set_endpoint: Invalid URL format");
 	}
 
 	// Find the start of the path (first '/' after protocol)
+	BOILSTREAM_LOG("Step 7: Finding path start");
 	auto path_start = input.find('/', protocol_end + 3);
 	if (path_start == string::npos) {
 		throw InvalidInputException(
 		    "rest_set_endpoint: URL must contain a path (e.g., https://host:port/secrets/:TOKEN)");
 	}
+	BOILSTREAM_LOG("Step 8: Path found");
 
 	// Find the token delimiter ':' after the path starts
 	// This avoids matching the port number (e.g., :4332)
@@ -121,21 +142,37 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
 	}
 
+	BOILSTREAM_LOG("Step 9: Checking HTTPS requirement");
 	if (!is_localhost && endpoint_url.find("https://") != 0) {
 		throw InvalidInputException("rest_set_endpoint: URL must use HTTPS (or localhost for testing)");
 	}
 
 	// Update the REST API storage with endpoint first
+	BOILSTREAM_LOG("Step 10: Getting global storage");
 	auto storage = GetGlobalStorage();
 	if (!storage) {
 		BOILSTREAM_LOG("SetEndpoint: WARNING - storage is NULL!");
 		throw InvalidInputException("rest_set_endpoint: Storage not initialized");
 	}
+	BOILSTREAM_LOG("Step 11: Storage obtained");
 
 	// Hash the bootstrap token to check for reuse
-	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state_check;
-	sha_state_check.AddString(bootstrap_token);
-	string incoming_token_hash = sha_state_check.Finalize();
+	// Use Rust SHA256 from opaque_client library (works on all platforms including WASM)
+	BOILSTREAM_LOG("Step 12: Computing SHA256 hash using Rust");
+
+	uint8_t hash_bytes[32];
+	opaque_client_sha256(reinterpret_cast<const uint8_t *>(bootstrap_token.c_str()), bootstrap_token.size(),
+	                     hash_bytes);
+
+	// Convert to hex string (lowercase)
+	string incoming_token_hash;
+	incoming_token_hash.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < 32; i++) {
+		incoming_token_hash += hex_chars[(hash_bytes[i] >> 4) & 0xF];
+		incoming_token_hash += hex_chars[hash_bytes[i] & 0xF];
+	}
+	BOILSTREAM_LOG("Step 13: Hash complete");
 
 	// Check if this is the same bootstrap token from an existing valid session
 	if (storage->GetBootstrapTokenHash() == incoming_token_hash && !incoming_token_hash.empty() &&
@@ -162,6 +199,9 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	storage->ClearSession();
 
 	// Perform OPAQUE login BEFORE setting endpoint (for consistent state on failure)
+	// All crypto now handled by Rust - works on all platforms including WASM
+	BOILSTREAM_LOG("Step 12: Starting OPAQUE login");
+
 	try {
 		// Temporarily set endpoint for exchange (will be cleared on failure)
 		storage->SetEndpoint(endpoint_url);
@@ -196,9 +236,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Set context for this connection (use hash of bootstrap token, not the token itself)
 	// This prevents leaking token material in connection map
-	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha_state;
-	sha_state.AddString(bootstrap_token);
-	string user_id = sha_state.Finalize().substr(0, 16); // First 16 hex chars of hash
+	// Reuse the hash we just computed (first 16 hex chars)
+	string user_id = incoming_token_hash.substr(0, 16);
 	SetUserContext(context, user_id);
 
 	// Get expiration timestamp and format it
@@ -220,47 +259,30 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 //! Load the extension
 static void LoadInternal(ExtensionLoader &loader) {
+	BOILSTREAM_LOG("LoadInternal: Extension loading started");
+
+	// Register global storage
 	auto &db = loader.GetDatabaseInstance();
-	auto &secret_manager = SecretManager::Get(db);
+	BOILSTREAM_LOG("LoadInternal: Successfully got database instance");
 
-	// Get REST API URL from environment variable (empty by default, requires PRAGMA to set)
-	const char *api_url_env = std::getenv("DUCKDB_REST_API_URL");
-	string api_url = api_url_env ? string(api_url_env) : "";
+	auto storage = make_uniq<RestApiSecretStorage>(db, "rest_api");
 
-	// Register the REST API secret storage
-	auto storage = make_uniq<RestApiSecretStorage>(db, api_url);
-	// Keep a raw pointer for PRAGMA access - lifetime managed by SecretManager
-	// NOTE: This is safe because SecretManager keeps the storage alive for the database lifetime
-	auto storage_ptr = storage.get();
-	secret_manager.LoadSecretStorage(std::move(storage));
-
-	// Store the pointer globally (protected by mutex)
 	{
 		lock_guard<mutex> lock(global_storage_lock);
-		global_rest_storage = storage_ptr;
+		global_rest_storage = storage.get();
 	}
 
-	// Attempt to resume session from stored refresh token
-	// This allows transparent reconnection without re-authentication
-	try {
-		storage_ptr->PerformOpaqueResume();
-		BOILSTREAM_LOG("LoadInternal: Session resumed automatically from stored refresh token");
-	} catch (const std::exception &e) {
-		// Resume failed - either no token, expired, or server rejected
-		// This is normal for first-time use or expired sessions
-		// User will need to use PRAGMA to establish new session
-		BOILSTREAM_LOG("LoadInternal: Session resumption not available: " << e.what());
-	}
+	auto &secret_manager = db.GetSecretManager();
+	secret_manager.LoadSecretStorage(std::move(storage));
+	BOILSTREAM_LOG("LoadInternal: Secret storage registered");
 
-	// Set boilstream as the default persistent storage
-	secret_manager.SetDefaultStorage("boilstream");
-
-	// Register PRAGMA duckdb_secrets_boilstream_endpoint to set the REST API endpoint URL
-	auto set_endpoint_pragma =
+	// Register PRAGMA function with PragmaCall to accept parameters
+	auto rest_endpoint =
 	    PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
-	loader.RegisterFunction(set_endpoint_pragma);
+	loader.RegisterFunction(rest_endpoint);
+	BOILSTREAM_LOG("LoadInternal: PRAGMA function registered");
 
-	loader.SetDescription("REST API-based secret storage for multi-tenant DuckDB deployments");
+	BOILSTREAM_LOG("LoadInternal: Extension loaded successfully");
 }
 
 void BoilstreamExtension::Load(ExtensionLoader &loader) {
@@ -283,7 +305,16 @@ std::string BoilstreamExtension::Version() const {
 
 extern "C" {
 
+// DuckDB C++ extension entry point (used when loading by name)
 DUCKDB_CPP_EXTENSION_ENTRY(boilstream, loader) {
 	duckdb::LoadInternal(loader);
 }
+
+// WASM-specific entry point (used when loading by URL)
+// Must be explicitly exported for WASM side modules
+#ifdef __EMSCRIPTEN__
+__attribute__((used, visibility("default"))) void boilstream_init(duckdb::ExtensionLoader &loader) {
+	duckdb::LoadInternal(loader);
+}
+#endif
 }
