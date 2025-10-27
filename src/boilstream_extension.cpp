@@ -297,7 +297,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.3.2";
+	return "0.3.3";
 #endif
 }
 

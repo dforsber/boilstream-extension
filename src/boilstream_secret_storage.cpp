@@ -94,15 +94,16 @@ EM_JS(char *, js_localStorage_getItem, (const char *key), {
 	const keyStr = UTF8ToString(key);
 	try {
 		const value = localStorage.getItem(keyStr);
-		if (value == = null)
-			return null;
+		// Use Object.is() for explicit null check (idiomatic JS)
+		if (Object.is(value, null))
+			return 0;
 		const len = lengthBytesUTF8(value) + 1;
 		const ptr = _malloc(len);
 		stringToUTF8(value, ptr, len);
 		return ptr;
 	} catch (e) {
 		console.error('localStorage.getItem failed:', e);
-		return null;
+		return 0;
 	}
 });
 
