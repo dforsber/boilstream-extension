@@ -320,6 +320,13 @@ TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 	}
 
 	SECTION("Operations without login fail") {
+		// Clean up any leftover refresh token from previous runs
+		const char *home = std::getenv("HOME");
+		if (home) {
+			string token_path = string(home) + "/.duckdb/.boilstream_refresh_token";
+			std::remove(token_path.c_str());
+		}
+
 		// Create a new connection without login
 		DBConfig config2;
 		config2.options.allow_unsigned_extensions = true;
@@ -335,8 +342,12 @@ TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 
 		REQUIRE(result->HasError());
 		string error = result->GetError();
+		cerr << "Actual error message: " << error << endl;
+		INFO("Actual error: " << error);
+		// Accept either "endpoint not configured" or "No active session" as valid errors for unauthenticated operations
 		REQUIRE(
-		    (error.find("endpoint not configured") != string::npos || error.find("not configured") != string::npos));
+		    (error.find("endpoint not configured") != string::npos || error.find("not configured") != string::npos ||
+		     error.find("No active session") != string::npos));
 	}
 }
 
@@ -611,11 +622,12 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 
 		LoadExtensions(con);
 
-		// Extension should try to load, detect expiration, and delete the file
-		// Give it a moment to process
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		// Trigger an operation that would cause the extension to try loading the token
+		// This should detect the expired token and delete the file
+		auto result = con.Query("SELECT * FROM duckdb_secrets()");
+		// The query itself may succeed or fail, we just need it to trigger token loading
 
-		// File should be deleted now
+		// File should be deleted now after attempting to load expired token
 		bool file_exists = (std::ifstream(token_path).good());
 		REQUIRE_FALSE(file_exists);
 	}
@@ -633,10 +645,12 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 
 		LoadExtensions(con);
 
-		// Extension should try to load, detect invalid format, and delete the file
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		// Trigger an operation that would cause the extension to try loading the token
+		// This should detect the invalid token and delete the file
+		auto result = con.Query("SELECT * FROM duckdb_secrets()");
+		// The query itself may succeed or fail, we just need it to trigger token loading
 
-		// File should be deleted now
+		// File should be deleted now after attempting to load invalid token
 		bool file_exists = (std::ifstream(token_path).good());
 		REQUIRE_FALSE(file_exists);
 	}

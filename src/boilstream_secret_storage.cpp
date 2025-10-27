@@ -94,7 +94,7 @@ EM_JS(char *, js_localStorage_getItem, (const char *key), {
 	const keyStr = UTF8ToString(key);
 	try {
 		const value = localStorage.getItem(keyStr);
-		if (value == = null)
+		if (value === null)
 			return null;
 		const len = lengthBytesUTF8(value) + 1;
 		const ptr = _malloc(len);
@@ -1477,12 +1477,26 @@ string RestApiSecretStorage::DecryptResponse(const string &encrypted_response_bo
 		vector<uint8_t> plaintext_bytes(ciphertext_len);
 
 		// Decrypt and verify using Rust (includes AEAD tag verification)
+		BOILSTREAM_LOG("DecryptResponse: Calling opaque_client_aes_gcm_decrypt");
+		BOILSTREAM_LOG("DecryptResponse: ciphertext_with_tag.size=" << ciphertext_with_tag.size());
+		BOILSTREAM_LOG("DecryptResponse: nonce.size=" << nonce_bytes.size());
+		BOILSTREAM_LOG("DecryptResponse: key.size=" << encryption_key.size());
+		BOILSTREAM_LOG("DecryptResponse: output_buffer.size=" << plaintext_bytes.size());
+
 		long decrypted_len = opaque_client_aes_gcm_decrypt(
 		    ciphertext_with_tag.data(), ciphertext_with_tag.size(), nonce_bytes.data(), nonce_bytes.size(),
 		    encryption_key.data(), encryption_key.size(), plaintext_bytes.data(), plaintext_bytes.size());
 
+		BOILSTREAM_LOG("DecryptResponse: opaque_client_aes_gcm_decrypt returned " << decrypted_len);
+
 		if (decrypted_len < 0) {
-			throw IOException("DecryptResponse: AES-GCM decryption or authentication failed");
+			std::ostringstream err;
+			err << "DecryptResponse: AES-GCM decryption failed (error code: " << decrypted_len << "). ";
+			err << "ciphertext=" << ciphertext_with_tag.size() << "B, ";
+			err << "nonce=" << nonce_bytes.size() << "B, ";
+			err << "key=" << encryption_key.size() << "B. ";
+			err << "Possible causes: wrong key, corrupted ciphertext, or AEAD tag mismatch";
+			throw IOException(err.str());
 		}
 
 		BOILSTREAM_LOG("DecryptResponse: AEAD tag verified successfully");
@@ -1995,11 +2009,18 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 
 			// Check if response is encrypted and decrypt if needed
 			auto header_map = ExtractBoilstreamHeaders(response_headers_captured);
+			BOILSTREAM_LOG("HttpGet: Extracted " << header_map.size() << " boilstream headers");
+			for (const auto &hdr : header_map) {
+				BOILSTREAM_LOG("HttpGet: Header: " << hdr.first << " = " << hdr.second);
+			}
+
 			bool is_encrypted_via_header = IsResponseEncrypted(header_map);
 
 			// Also check JSON body for "encrypted":true (fallback if server doesn't send header)
 			bool is_encrypted_via_body = (response_body.find("\"encrypted\"") != string::npos &&
 			                              response_body.find("\"ciphertext\"") != string::npos);
+
+			BOILSTREAM_LOG("HttpGet: is_encrypted_via_header=" << is_encrypted_via_header << ", is_encrypted_via_body=" << is_encrypted_via_body);
 
 			if (is_encrypted_via_header || is_encrypted_via_body) {
 				if (is_encrypted_via_body && !is_encrypted_via_header) {
@@ -2009,8 +2030,13 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 				}
 
 				try {
-					// Try to get cipher suite from header, default to 0x0001 if not present
-					uint16_t cipher_suite = header_map.empty() ? 0x0001 : ParseCipherSuite(header_map);
+					// Try to get cipher suite from header
+					uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
+					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
+						cipher_suite = ParseCipherSuite(header_map);
+					} else {
+						BOILSTREAM_LOG("HttpGet: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+					}
 					response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
 					BOILSTREAM_LOG("HttpGet: Response decrypted successfully, plaintext_len=" << response_body.size());
 				} catch (const std::exception &e) {
@@ -2201,8 +2227,13 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 			if (is_encrypted) {
 				BOILSTREAM_LOG("HttpPost: Response is encrypted, decrypting...");
 				try {
-					// For body-based encryption detection, cipher suite is in the body
-					uint16_t cipher_suite = header_map.empty() ? 0x0001 : ParseCipherSuite(header_map);
+					// Try to get cipher suite from header
+					uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
+					if (header_map.find("x-boilstream-cipher") != header_map.end()) {
+						cipher_suite = ParseCipherSuite(header_map);
+					} else {
+						BOILSTREAM_LOG("HttpPost: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
+					}
 					request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
 					BOILSTREAM_LOG(
 					    "HttpPost: Response decrypted successfully, plaintext_len=" << request.buffer_out.size());
@@ -2728,6 +2759,13 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 		try {
 			PerformOpaqueResume();
 			BOILSTREAM_LOG("AllSecrets: Resume successful");
+
+			// Re-capture endpoint URL after resume (it may have been updated from refresh token)
+			{
+				lock_guard<mutex> lock(endpoint_lock);
+				url = endpoint_url;
+			}
+			BOILSTREAM_LOG("AllSecrets: endpoint_url after resume=" << url);
 		} catch (const std::exception &e) {
 			BOILSTREAM_LOG("AllSecrets: Resume failed: " << e.what());
 			// Continue - will try unauthenticated or fail appropriately
@@ -2752,14 +2790,6 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 	// Parse JSON array using yyjson
 	// NOTE: HttpGet() should have already decrypted the response if it was encrypted
 	BOILSTREAM_LOG("AllSecrets: Parsing " << response.size() << " bytes of JSON response");
-
-	// Check if response is still encrypted (HttpGet failed to decrypt it)
-	if (response.find("\"encrypted\"") != string::npos && response.find("\"ciphertext\"") != string::npos) {
-		BOILSTREAM_LOG("AllSecrets: ERROR - Response is still encrypted! HttpGet() should have decrypted it.");
-		BOILSTREAM_LOG("AllSecrets: This means the server didn't send X-Boilstream-Encrypted header");
-		BOILSTREAM_LOG("AllSecrets: Response body: " << response.substr(0, 200));
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
 	auto doc = yyjson_read(response.c_str(), response.size(), 0);
 	if (!doc) {
 		BOILSTREAM_LOG("AllSecrets: ERROR - Failed to parse JSON");
