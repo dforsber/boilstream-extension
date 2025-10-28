@@ -7,6 +7,7 @@ use std::ptr;
 use std::slice;
 use sha2::{Sha256, Digest};
 use hmac::{Hmac, Mac};
+use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
 // Platform-specific imports
@@ -105,15 +106,17 @@ impl OpaqueResult {
 }
 
 // Registration state (opaque pointer for C)
+// Password field uses Zeroizing<Vec<u8>> which automatically zeros memory on drop
 pub struct RegistrationState {
     client_registration: ClientRegistration<DefaultCipherSuite>,
-    password: Vec<u8>,
+    password: Zeroizing<Vec<u8>>,
 }
 
 // Login state (opaque pointer for C)
+// Password field uses Zeroizing<Vec<u8>> which automatically zeros memory on drop
 pub struct LoginState {
     client_login: ClientLogin<DefaultCipherSuite>,
-    password: Vec<u8>,
+    password: Zeroizing<Vec<u8>>,
 }
 
 /// Initialize OPAQUE client registration (step 1)
@@ -139,10 +142,10 @@ pub extern "C" fn opaque_client_registration_start(
             // Serialize registration request
             let serialized = result.message.serialize();
 
-            // Create state
+            // Create state with zeroizing password
             let state = Box::new(RegistrationState {
                 client_registration: result.state,
-                password: password_bytes.to_vec(),
+                password: Zeroizing::new(password_bytes.to_vec()),
             });
 
             unsafe {
@@ -232,10 +235,10 @@ pub extern "C" fn opaque_client_login_start(
             // Serialize credential request
             let serialized = result.message.serialize();
 
-            // Create state
+            // Create state with zeroizing password
             let state = Box::new(LoginState {
                 client_login: result.state,
-                password: password_bytes.to_vec(),
+                password: Zeroizing::new(password_bytes.to_vec()),
             });
 
             unsafe {
@@ -308,7 +311,9 @@ pub extern "C" fn opaque_client_login_finish(
 pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
     if !buffer.data.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(buffer.data, buffer.len, buffer.len);
+            let mut vec = Vec::from_raw_parts(buffer.data, buffer.len, buffer.len);
+            // Zero the memory before dropping
+            vec.zeroize();
             // Rust will free the memory when the Vec goes out of scope
         }
     }
@@ -457,20 +462,21 @@ pub extern "C" fn aws_derive_signing_key(
 
     let mut mac = HmacSha256::new_from_slice(key_bytes).unwrap();
     mac.update(date_str.as_bytes());
-    let k_date = mac.finalize().into_bytes();
+    let k_date = Zeroizing::new(mac.finalize().into_bytes().to_vec());
 
     let mut mac = HmacSha256::new_from_slice(&k_date).unwrap();
     mac.update(region_str.as_bytes());
-    let k_region = mac.finalize().into_bytes();
+    let k_region = Zeroizing::new(mac.finalize().into_bytes().to_vec());
 
     let mut mac = HmacSha256::new_from_slice(&k_region).unwrap();
     mac.update(service_str.as_bytes());
-    let k_service = mac.finalize().into_bytes();
+    let k_service = Zeroizing::new(mac.finalize().into_bytes().to_vec());
 
     let mut mac = HmacSha256::new_from_slice(&k_service).unwrap();
     mac.update(b"boilstream_request");
     let signing_key = mac.finalize().into_bytes();
 
+    // k_date, k_region, k_service are automatically zeroed when dropped
     OpaqueResult::success(signing_key.to_vec())
 }
 
@@ -627,7 +633,7 @@ mod wasm {
             state: Some(WasmRegistrationState {
                 inner: RegistrationState {
                     client_registration: result.state,
-                    password: password_bytes.to_vec(),
+                    password: Zeroizing::new(password_bytes.to_vec()),
                 },
             }),
         })
@@ -678,7 +684,7 @@ mod wasm {
             state: Some(WasmLoginState {
                 inner: LoginState {
                     client_login: result.state,
-                    password: password_bytes.to_vec(),
+                    password: Zeroizing::new(password_bytes.to_vec()),
                 },
             }),
         })

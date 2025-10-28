@@ -17,6 +17,7 @@ hmac = "0.12.1"
 hex = "0.4.3"
 aes-gcm = "0.10"
 hkdf = "0.12"
+zeroize = { version = "1.8", features = ["derive"] }
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

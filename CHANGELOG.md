@@ -5,6 +5,20 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2025-10-27
+
+### Security
+
+- **CRITICAL**: Added explicit memory zeroing for all sensitive cryptographic material in Rust OPAQUE client using `zeroize` crate. Passwords stored in `RegistrationState`/`LoginState` now use `Zeroizing<Vec<u8>>` wrapper for automatic zeroing on drop. Session keys, export keys, and refresh tokens zeroed in `opaque_free_buffer()` before memory is freed. Intermediate HMAC keys (k_date, k_region, k_service) in AWS-style key derivation now wrapped in `Zeroizing` for automatic cleanup. Prevents sensitive data leakage from freed memory. (opaque-client/Cargo.toml, opaque-client/src/lib.rs:10,111,119,324-326,465-473)
+
+## [0.3.3] - 2025-10-27
+
+### Fixed
+
+- **CRITICAL**: WASM builds failing with `Unknown option '--enable-bulk-memory-opt'` and `--enable-call-indirect-overlong'` errors in newer Emscripten (3.1.50+). CMakeLists.txt now automatically installs wasm-opt wrapper script during configuration that filters deprecated flags. Wrapper is idempotent and works in both local dev and GitHub Actions CI without modifying `.github` workflows. (CMakeLists.txt:27-63, scripts/wasm-opt-wrapper-template.sh)
+- **CRITICAL**: Native builds failing with `multiple definition of 'duckdb::FileFlags::FILE_FLAGS_READ'` linker errors. Fixed C++17 ODR violation by using `FileOpenFlags::` constants directly instead of `FileFlags::` wrapper class, avoiding symbol generation in multiple translation units. (src/boilstream_secret_storage.cpp:309,349)
+- **MEDIUM**: JavaScript null check in WASM EM_JS changed from `value === null` to idiomatic `Object.is(value, null)` for explicit null checking. Return value changed from `null` to `0` for C pointer type semantics. (src/boilstream_secret_storage.cpp:98)
+
 ## [0.3.2] - 2025-10-17
 
 ### Fixed

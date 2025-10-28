@@ -352,6 +352,7 @@ dependencies = [
  "rand",
  "sha2",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
