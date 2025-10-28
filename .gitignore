@@ -7,3 +7,7 @@ testext
 test/python/__pycache__/
 .Rhistory
 target/
+
+# Rust OPAQUE client test artifacts
+opaque-client/test-wasm/*.wasm
+opaque-client/test-wasm/*.js

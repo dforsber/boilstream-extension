@@ -186,18 +186,39 @@ if(IS_WASM_BUILD)
 
     # Add POST_BUILD to re-export with both entry points
     # DuckDB's POST_BUILD only exports _duckdb_cpp_init, but WASM needs _init
+    # Note: In WASM builds, $<TARGET_FILE> already includes .wasm extension
+    # emcc will overwrite the input file when input and output are the same
     add_custom_command(TARGET ${LOADABLE_EXTENSION_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Re-exporting WASM module with boilstream_init..."
         COMMAND emcc
             $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>
-            -o $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>.wasm
-            -O3 -sSIDE_MODULE=2
+            -o $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>
+            -O0 -sSIDE_MODULE=2
             -sEXPORTED_FUNCTIONS=_boilstream_init,_boilstream_duckdb_cpp_init,___wasm_call_ctors
             -fwasm-exceptions
-        COMMENT "Adding boilstream_init export for DuckDB WASM compatibility"
+        COMMENT "Adding boilstream_init export for DuckDB WASM compatibility (no optimization to preserve Rust symbols)"
     )
 
-    message(STATUS "WASM: Added POST_BUILD to export both entry points")
+    # Add POST_BUILD to append metadata
+    # This is required for DuckDB to recognize the extension ABI version
+    # Note: In WASM builds, $<TARGET_FILE> already includes .wasm extension
+    # So we append to the .wasm file directly, not .wasm.wasm
+    add_custom_command(TARGET ${LOADABLE_EXTENSION_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "Appending extension metadata..."
+        COMMAND ${CMAKE_COMMAND} -E echo "Extension file: $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>"
+        COMMAND ${CMAKE_COMMAND}
+            -DMETA1=4
+            -DABI_TYPE=CPP
+            -DEXTENSION=$<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>
+            -DPLATFORM_FILE=${CMAKE_BINARY_DIR}/duckdb_platform_out
+            -DVERSION_FIELD=v1.4.1
+            -DEXTENSION_VERSION=unknown
+            -DNULL_FILE=${CMAKE_CURRENT_SOURCE_DIR}/duckdb/scripts/null.txt
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/scripts/append_metadata.cmake
+        COMMENT "Appending extension metadata for DuckDB compatibility"
+    )
+
+    message(STATUS "WASM: Added POST_BUILD to export both entry points and append metadata")
 elseif(APPLE)
     # macOS frameworks for Rust
     target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework Foundation" "-framework CoreFoundation" resolv)
