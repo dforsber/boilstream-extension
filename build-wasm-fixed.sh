@@ -81,7 +81,7 @@ cmake -DMETA1="4" \
   -DABI_TYPE="CPP" \
   -DEXTENSION="$PROJ_DIR/build/wasm_eh/extension/boilstream/boilstream.duckdb_extension.wasm" \
   -DPLATFORM_FILE="$PROJ_DIR/build/wasm_eh/duckdb_platform_out" \
-  -DVERSION_FIELD="v1.4.0" \
+  -DVERSION_FIELD="v1.4.1" \
   -DEXTENSION_VERSION="ecfbd24" \
   -DNULL_FILE="$PROJ_DIR/duckdb/scripts/null.txt" \
   -P "$PROJ_DIR/duckdb/scripts/append_metadata.cmake"
@@ -92,16 +92,16 @@ echo ""
 echo "→ Copying extension to repository location..."
 
 # Ensure repository directory exists
-mkdir -p build/wasm_eh/repository/v1.4.0/wasm_eh
+mkdir -p build/wasm_eh/repository/v1.4.1/wasm_eh
 
 # Copy extension
 cp build/wasm_eh/extension/boilstream/boilstream.duckdb_extension.wasm \
-   build/wasm_eh/repository/v1.4.0/wasm_eh/
+   build/wasm_eh/repository/v1.4.1/wasm_eh/
 
 # Show file info
 echo ""
 echo "✓ Extension built successfully:"
-ls -lh build/wasm_eh/repository/v1.4.0/wasm_eh/boilstream.duckdb_extension.wasm
+ls -lh build/wasm_eh/repository/v1.4.1/wasm_eh/boilstream.duckdb_extension.wasm
 echo ""
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║  Build Complete                                            ║"
