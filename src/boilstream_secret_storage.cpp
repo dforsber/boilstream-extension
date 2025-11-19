@@ -1744,8 +1744,8 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 
 	// Check if this is a temporary credential by looking for SESSION_TOKEN in the serialized data
 	// This is a heuristic - we check the encoded data for the presence of session token markers
-	bool is_temporary = (encoded.find("SESSION_TOKEN") != string::npos ||
-	                     encoded.find("session_token") != string::npos);
+	bool is_temporary =
+	    (encoded.find("SESSION_TOKEN") != string::npos || encoded.find("session_token") != string::npos);
 
 	std::chrono::system_clock::time_point expires_at_time;
 	if (is_temporary) {
