@@ -5,6 +5,79 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2025-11-19
+
+### Added
+
+- **Auto-attach ducklakes**: PRAGMA now returns multi-statement SQL for automatic ducklake mounting
+  - Returns `ATTACH 'ducklake:name' AS name;` statements followed by status SELECT
+  - Executes after PRAGMA lock release, preventing deadlock/hanging
+  - Shows `ducklakes_attached` count in result (e.g., "2 ducklakes attached")
+  - Solves ClientContext lock reentrancy issue via DuckDB's Parser.ParseQuery() multi-statement support
+- **Table function**: `boilstream_ducklakes()` - lists all available ducklakes from server
+  - Columns: catalog_id, catalog_name, description, access_mode, ownership, granted_by, granted_at, created_at
+  - Makes GET /secrets/ducklakes API call
+  - Handles both empty array `[]` and object `{"catalogs": [...]}` response formats
+- **Table function**: `boilstream_secrets()` - lists all cached secrets with expiration
+  - Columns: name, type, provider, scope (as LIST), expires_at
+  - Shows expiration timestamps from server metadata
+  - Displays all secrets from boilstream storage (postgres, s3, ducklake types)
+- **PRAGMA function**: `boilstream_create_ducklake(catalog_name, description)` - creates new ducklakes
+  - Makes POST /secrets/ducklakes API call
+  - Second parameter (description) is optional via varargs
+  - Fetches all secrets after creation (includes postgres, s3, ducklake secrets)
+  - Returns success message with catalog_name
+- **Extension auto-loading**: Automatically loads required extensions on startup
+  - `httpfs` - HTTPS support for REST API calls
+  - `postgres_scanner` - Enables postgres secret type caching
+  - `ducklake` - Required for ATTACH ducklake commands
+  - Uses `ExtensionHelper::TryAutoLoadExtension()` for seamless integration
+- **SSO support**: Bootstrap token exchange for WASM/web environments
+  - Proxy server (`test/wasm/server.js`) forwards `/auth/*` to boilstream server (bypasses CORS)
+  - Auto-fetch bootstrap token from `/auth/api/bootstrap-token` in test page
+  - Supports both SSO-authenticated and manual token workflows
+  - Enables seamless DuckDB authentication in browser environments
+
+### Changed
+
+- PRAGMA result now includes `ducklakes_attached` column showing auto-attach count
+- Empty endpoint initialization (constructor uses `""` instead of `"rest_api"`)
+- Secret expires_at now distinguishes temporary vs permanent credentials
+  - Temporary (SESSION_TOKEN): 1 hour from now
+  - Permanent: 1 year from now (not hardcoded 2099)
+- WASM test page auto-fetches bootstrap token, falls back to manual input
+
+### Fixed
+
+- **CRITICAL**: ClientContext lock reentrancy deadlock when auto-attaching ducklakes
+  - Root cause: `context.Query("ATTACH...")` called from within PRAGMA (tries to re-acquire context_lock)
+  - Solution: Return multi-statement SQL string, DuckDB parses/executes after lock release
+  - Impact: PRAGMA no longer hangs when postgres/MinIO backends are running
+- Postgres secrets now cache correctly (postgres_scanner auto-loaded before AllSecrets)
+- Ducklake ATTACH commands work without manual `LOAD ducklake` (auto-loaded on startup)
+
+### Security
+
+- Bootstrap token never stored persistently in WASM (fetched on-demand from SSO session)
+- Proxy server uses HTTPS for upstream requests (rejectUnauthorized: false for localhost testing only)
+
+### Technical Details
+
+- **Multi-statement SQL**: PRAGMA returns semicolon-separated statements
+  - DuckDB's `PragmaHandler` parses via `Parser.ParseQuery()` (duckdb/src/planner/pragma_handler.cpp:40-46)
+  - All statements execute sequentially after lock release
+  - Example: `"ATTACH 'ducklake:cat1' AS cat1;\nATTACH 'ducklake:cat2' AS cat2;\nSELECT 'token' as status..."`
+- **Auto-load timing**: Extensions loaded during `LoadInternal()` before storage registration
+- **WASM proxy**: Node.js HTTP server with HTTPS proxy using native `https.request()`
+  - Proxies `/auth/*` → `https://localhost/auth/*`
+  - Copies all headers and request body
+  - Returns 502 Bad Gateway on upstream errors
+- **Table functions**: Use GlobalTableFunctionState pattern with Init/Function/Bind
+- **PRAGMA varargs**: `LogicalType::VARCHAR` as fourth parameter makes description optional
+- **JSON parsing**: Uses `duckdb_yyjson::` namespace for all yyjson calls
+- **Timestamp handling**: `Timestamp::FromString(str, true)` with use_offset parameter
+- **Expires_at detection**: Checks for "SESSION_TOKEN" or "session_token" in secret string
+
 ## [0.3.4] - 2025-10-27
 
 ### Security
@@ -427,6 +500,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
+[0.3.5]: https://github.com/yourusername/boilstream-extension/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/yourusername/boilstream-extension/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/yourusername/boilstream-extension/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yourusername/boilstream-extension/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yourusername/boilstream-extension/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yourusername/boilstream-extension/compare/v0.2.0...v0.3.0

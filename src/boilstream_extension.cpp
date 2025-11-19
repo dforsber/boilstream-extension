@@ -468,8 +468,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	// Get endpoint URL
 	string endpoint_url = storage->GetEndpointUrl();
 	if (endpoint_url.empty()) {
-		throw InvalidInputException(
-		    "boilstream_create_ducklake: No endpoint configured. Call PRAGMA duckdb_secrets_boilstream_endpoint first.");
+		throw InvalidInputException("boilstream_create_ducklake: No endpoint configured. Call PRAGMA "
+		                            "duckdb_secrets_boilstream_endpoint first.");
 	}
 
 	// Construct the ducklakes creation URL
@@ -742,15 +742,15 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Add ATTACH statements for each ducklake
 	for (const auto &ducklake_name : ducklake_names) {
-		string attach_stmt = "ATTACH 'ducklake:" + ducklake_name + "' AS " +
-		                     KeywordHelper::WriteOptionallyQuoted(ducklake_name) + ";\n";
+		string attach_stmt =
+		    "ATTACH 'ducklake:" + ducklake_name + "' AS " + KeywordHelper::WriteOptionallyQuoted(ducklake_name) + ";\n";
 		result_sql += attach_stmt;
 		BOILSTREAM_LOG("SetEndpoint: Adding ATTACH statement for: " << ducklake_name);
 	}
 
 	// Add final SELECT statement showing status
-	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) +
-	              "' as expires_at, " + std::to_string(ducklake_names.size()) + " as ducklakes_attached;";
+	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at, " +
+	              std::to_string(ducklake_names.size()) + " as ducklakes_attached;";
 
 	BOILSTREAM_LOG("SetEndpoint: Returning multi-statement SQL with " << ducklake_names.size() << " ATTACH command(s)");
 
@@ -780,7 +780,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (ExtensionHelper::TryAutoLoadExtension(db, "postgres_scanner")) {
 		BOILSTREAM_LOG("LoadInternal: postgres_scanner extension loaded successfully");
 	} else {
-		BOILSTREAM_LOG("LoadInternal: WARNING - Failed to auto-load postgres_scanner extension. Postgres secrets may not work.");
+		BOILSTREAM_LOG(
+		    "LoadInternal: WARNING - Failed to auto-load postgres_scanner extension. Postgres secrets may not work.");
 	}
 
 	// Auto-load ducklake extension for ducklake ATTACH support
@@ -788,7 +789,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (ExtensionHelper::TryAutoLoadExtension(db, "ducklake")) {
 		BOILSTREAM_LOG("LoadInternal: ducklake extension loaded successfully");
 	} else {
-		BOILSTREAM_LOG("LoadInternal: WARNING - Failed to auto-load ducklake extension. ATTACH ducklake commands may not work.");
+		BOILSTREAM_LOG(
+		    "LoadInternal: WARNING - Failed to auto-load ducklake extension. ATTACH ducklake commands may not work.");
 	}
 
 	// Initialize storage with empty endpoint URL (will be set via PRAGMA call)
@@ -815,8 +817,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register PRAGMA function to create ducklakes (with optional description)
 	// Note: We use varargs to make the description parameter optional
-	auto create_ducklake =
-	    PragmaFunction::PragmaCall("boilstream_create_ducklake", CreateDucklake, {LogicalType::VARCHAR}, LogicalType::VARCHAR);
+	auto create_ducklake = PragmaFunction::PragmaCall("boilstream_create_ducklake", CreateDucklake,
+	                                                  {LogicalType::VARCHAR}, LogicalType::VARCHAR);
 	loader.RegisterFunction(create_ducklake);
 	BOILSTREAM_LOG("LoadInternal: boilstream_create_ducklake PRAGMA registered");
 
@@ -847,7 +849,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.3.4";
+	return "0.3.5";
 #endif
 }
 
