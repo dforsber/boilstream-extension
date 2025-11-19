@@ -266,12 +266,42 @@
             log('', 'info');
             log('ℹ Step 8: Testing PRAGMA function registration...', 'info');
 
-            // Get bootstrap token from input field
-            const tokenInput = document.getElementById('bootstrapToken');
-            const bootstrapToken = tokenInput.value.trim();
+            // Try to auto-fetch bootstrap token from auth server
+            let bootstrapToken = null;
+
+            log('ℹ Step 8.1: Attempting to auto-fetch bootstrap token from SSO...', 'info');
+            try {
+              const tokenResponse = await fetch('/auth/api/bootstrap-token', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+              });
+
+              if (tokenResponse.ok) {
+                const tokenData = await tokenResponse.json();
+                bootstrapToken = tokenData.bootstrap_token;
+                log('✅ Bootstrap token auto-fetched from SSO!', 'success');
+                log(`  Token: ${bootstrapToken.substring(0, 20)}...`, 'info');
+              } else {
+                log(`⚠️  SSO token fetch failed (HTTP ${tokenResponse.status})`, 'warning');
+              }
+            } catch (err) {
+              log('⚠️  Could not auto-fetch token: ' + err.message, 'warning');
+            }
+
+            // Fallback to manual input if auto-fetch failed
+            if (!bootstrapToken) {
+              const tokenInput = document.getElementById('bootstrapToken');
+              bootstrapToken = tokenInput.value.trim();
+
+              if (bootstrapToken) {
+                log('ℹ Using manually entered bootstrap token', 'info');
+              }
+            }
 
             if (!bootstrapToken) {
-              log('⚠️  No bootstrap token provided - skipping authentication test', 'warning');
+              log('⚠️  No bootstrap token available (SSO not logged in and no manual token)', 'warning');
               log('✅ Extension loaded successfully (provide token to test authentication)', 'success');
               setStatus('✅ Extension loaded (no token)', 'success');
             } else {
@@ -307,6 +337,27 @@
                   }
                 } catch (secretsErr) {
                   log('⚠️  Could not retrieve secrets: ' + secretsErr.message, 'warning');
+                }
+
+                // Step 10: List ducklakes after successful authentication
+                log('', 'info');
+                log('ℹ Step 10: Listing ducklakes from boilstream server...', 'info');
+                try {
+                  const ducklakesResult = await conn.query("SELECT * FROM boilstream_ducklakes()");
+                  const ducklakesRows = ducklakesResult.toArray();
+                  log('✓ Ducklakes retrieved', 'success');
+                  log(`Found ${ducklakesRows.length} ducklake(s):`, 'success');
+
+                  if (ducklakesRows.length > 0) {
+                    ducklakesRows.forEach((ducklake, index) => {
+                      log(`\nDucklake #${index + 1}:`, 'info');
+                      log(ducklake, 'data');
+                    });
+                  } else {
+                    log('  No ducklakes found - use PRAGMA boilstream_create_ducklake(...) to create one', 'warning');
+                  }
+                } catch (ducklakesErr) {
+                  log('⚠️  Could not retrieve ducklakes: ' + ducklakesErr.message, 'warning');
                 }
 
                 setStatus('✅ Authentication successful!', 'success');

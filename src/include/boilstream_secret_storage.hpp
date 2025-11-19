@@ -95,6 +95,18 @@ public:
 	void DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
 	                      optional_ptr<CatalogTransaction> transaction) override;
 
+	//! Make HTTP GET request to REST API (public for table functions)
+	string HttpGet(const string &url);
+
+	//! Make HTTP POST request to REST API (public for table functions)
+	string HttpPost(const string &url, const string &body, HTTPHeaders *out_headers = nullptr);
+
+	//! Get expiration timestamp for a secret (for table functions)
+	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name);
+
+	//! Get the endpoint URL (for constructing API URLs in table functions)
+	string GetEndpointUrl();
+
 protected:
 	//! Override WriteSecret to persist to REST API
 	void WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) override;
@@ -199,12 +211,6 @@ private:
 
 	//! Add or update secret in local catalog
 	void AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret, optional_ptr<CatalogTransaction> transaction);
-
-	//! Make HTTP GET request to REST API
-	string HttpGet(const string &url);
-
-	//! Make HTTP POST request to REST API (returns response body)
-	string HttpPost(const string &url, const string &body, HTTPHeaders *out_headers = nullptr);
 
 	//! Make HTTP DELETE request to REST API
 	void HttpDelete(const string &url);

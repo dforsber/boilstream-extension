@@ -1737,9 +1737,27 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 
 	yyjson_mut_obj_add_strcpy(doc, obj, "data", encoded.c_str());
 
-	// Add expires_at with 1 hour TTL (ISO 8601 UTC format)
+	// Determine expires_at based on secret type
+	// Temporary credentials (with SESSION_TOKEN) get 1 hour expiration (placeholder)
+	// Permanent credentials get current time + 1 year
 	auto now = std::chrono::system_clock::now();
-	auto expires_at_time = now + std::chrono::hours(1);
+
+	// Check if this is a temporary credential by looking for SESSION_TOKEN in the serialized data
+	// This is a heuristic - we check the encoded data for the presence of session token markers
+	bool is_temporary = (encoded.find("SESSION_TOKEN") != string::npos ||
+	                     encoded.find("session_token") != string::npos);
+
+	std::chrono::system_clock::time_point expires_at_time;
+	if (is_temporary) {
+		// Temporary credential - set short expiration (will be updated by server with actual STS expiration)
+		// Use 1 hour as placeholder since we don't have access to the actual STS expiration here
+		expires_at_time = now + std::chrono::hours(1);
+	} else {
+		// Permanent credential - set expiration to 1 year from now
+		expires_at_time = now + std::chrono::hours(24 * 365); // 1 year
+	}
+
+	// Format the expiration time as ISO 8601
 	auto expires_at_time_t = std::chrono::system_clock::to_time_t(expires_at_time);
 	std::tm expires_at_tm;
 #ifdef _WIN32
@@ -1749,6 +1767,7 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 #endif
 	char expires_at_buf[64];
 	std::strftime(expires_at_buf, sizeof(expires_at_buf), "%Y-%m-%dT%H:%M:%SZ", &expires_at_tm);
+
 	yyjson_mut_obj_add_strcpy(doc, obj, "expires_at", expires_at_buf);
 
 	// Convert to string
@@ -1894,6 +1913,23 @@ void RestApiSecretStorage::StoreExpiration(const string &secret_name, const stri
 void RestApiSecretStorage::ClearExpiration(const string &secret_name) {
 	lock_guard<mutex> lock(expiration_lock);
 	secret_expiration.erase(secret_name);
+}
+
+std::chrono::system_clock::time_point RestApiSecretStorage::GetSecretExpiration(const string &secret_name) {
+	lock_guard<mutex> lock(expiration_lock);
+
+	auto it = secret_expiration.find(secret_name);
+	if (it == secret_expiration.end()) {
+		// No expiration data available
+		return std::chrono::system_clock::time_point();
+	}
+
+	return it->second;
+}
+
+string RestApiSecretStorage::GetEndpointUrl() {
+	lock_guard<mutex> lock(endpoint_lock);
+	return endpoint_url;
 }
 
 void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret,
@@ -2478,13 +2514,31 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	// Persist to REST API
 	WriteSecret(*secret, on_conflict);
 
-	// Add to local catalog
+	// Serialize the secret so we can deserialize it for memory storage
+	string secret_json = SerializeSecret(*secret);
+
+	// Add to local catalog first
 	auto secret_entry = make_uniq<SecretCatalogEntry>(std::move(secret), Catalog::GetSystemCatalog(db));
 	secret_entry->temporary = false;
 	secret_entry->secret->storage_mode = GetName();
 	secret_entry->secret->persist_type = SecretPersistType::PERSISTENT;
 	LogicalDependencyList l;
 	secrets->CreateEntry(trans, secret_name, std::move(secret_entry), l);
+
+	// Also cache in memory storage so DuckLake can find it
+	try {
+		BOILSTREAM_LOG("StoreSecret: Also caching in memory storage for DuckLake compatibility");
+		auto &secret_manager = SecretManager::Get(db);
+		auto secret_copy = DeserializeSecret(secret_json, secret_manager);
+		if (secret_copy) {
+			secret_manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
+			                              SecretPersistType::TEMPORARY, "memory");
+			BOILSTREAM_LOG("StoreSecret: Successfully cached in memory storage");
+		}
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("StoreSecret: Failed to cache in memory storage: " << e.what());
+		// Continue - not critical, secret is already in boilstream storage
+	}
 
 	// Return the stored entry
 	auto secret_catalog_entry = &secrets->GetEntry(trans, secret_name)->Cast<SecretCatalogEntry>();
@@ -2844,8 +2898,25 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 					StoreExpiration(secret_name, expires_at_str);
 				}
 
+				// Serialize for memory cache
+				string secret_json_for_cache = string(obj_str);
+
 				// Add or update secret in local catalog
 				AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+
+				// Also cache in memory storage for DuckLake
+				try {
+					auto trans = GetTransactionOrDefault(transaction);
+					auto secret_copy = DeserializeSecret(secret_json_for_cache, manager);
+					if (secret_copy) {
+						manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
+						                       SecretPersistType::TEMPORARY, "memory");
+						BOILSTREAM_LOG("AllSecrets: Cached '" << secret_name << "' in memory storage");
+					}
+				} catch (const std::exception &e) {
+					BOILSTREAM_LOG("AllSecrets: Failed to cache '" << secret_name << "' in memory: " << e.what());
+				}
+
 				secrets_added++;
 			} else {
 				BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null");
