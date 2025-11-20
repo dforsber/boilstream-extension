@@ -83,28 +83,28 @@ static unique_ptr<FunctionData> BoilstreamDucklakesBind(ClientContext &context, 
                                                         vector<LogicalType> &return_types, vector<string> &names) {
 	// Define output columns
 	names.emplace_back("catalog_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("catalog_name");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("description");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("access_mode");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("ownership");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("granted_by");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("granted_at");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
 
 	names.emplace_back("created_at");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
 
 	return make_uniq<BoilstreamDucklakesBindData>();
 }
@@ -321,19 +321,19 @@ static unique_ptr<FunctionData> BoilstreamSecretsBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	// Define output columns
 	names.emplace_back("name");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("type");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("provider");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
 	names.emplace_back("scope");
-	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+	return_types.emplace_back(LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
 
 	names.emplace_back("expires_at");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
 
 	return make_uniq<BoilstreamSecretsBindData>();
 }
@@ -394,7 +394,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		for (const auto &scope_item : scope) {
 			scope_values.emplace_back(Value(scope_item));
 		}
-		row.emplace_back(Value::LIST(LogicalType::VARCHAR, scope_values));
+		row.emplace_back(Value::LIST(LogicalType(LogicalTypeId::VARCHAR), scope_values));
 
 		// expires_at (get from storage)
 		auto expiration = storage->GetSecretExpiration(secret.GetName());
@@ -810,15 +810,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	BOILSTREAM_LOG("LoadInternal: Set boilstream as default persistent storage");
 
 	// Register PRAGMA function with PragmaCall to accept parameters
+	// Use temporary LogicalType objects to avoid ODR violations with static const members
+	vector<LogicalType> endpoint_params;
+	endpoint_params.push_back(LogicalType(LogicalTypeId::VARCHAR));
 	auto rest_endpoint =
-	    PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, {LogicalType::VARCHAR});
+	    PragmaFunction::PragmaCall("duckdb_secrets_boilstream_endpoint", SetRestApiEndpoint, endpoint_params);
 	loader.RegisterFunction(rest_endpoint);
 	BOILSTREAM_LOG("LoadInternal: duckdb_secrets_boilstream_endpoint PRAGMA registered");
 
 	// Register PRAGMA function to create ducklakes (with optional description)
 	// Note: We use varargs to make the description parameter optional
-	auto create_ducklake = PragmaFunction::PragmaCall("boilstream_create_ducklake", CreateDucklake,
-	                                                  {LogicalType::VARCHAR}, LogicalType::VARCHAR);
+	vector<LogicalType> ducklake_params;
+	ducklake_params.push_back(LogicalType(LogicalTypeId::VARCHAR));
+	auto create_ducklake = PragmaFunction::PragmaCall("boilstream_create_ducklake", CreateDucklake, ducklake_params,
+	                                                  LogicalType(LogicalTypeId::VARCHAR));
 	loader.RegisterFunction(create_ducklake);
 	BOILSTREAM_LOG("LoadInternal: boilstream_create_ducklake PRAGMA registered");
 
