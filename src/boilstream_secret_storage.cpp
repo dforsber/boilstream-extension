@@ -1932,6 +1932,42 @@ string RestApiSecretStorage::GetEndpointUrl() {
 	return endpoint_url;
 }
 
+void RestApiSecretStorage::SetSessionCookie(const string &session_id) {
+	lock_guard<mutex> lock(cookie_lock);
+	session_cookie = "session_id=" + session_id;
+	BOILSTREAM_LOG("SetSessionCookie: Session cookie set");
+}
+
+void RestApiSecretStorage::ClearSessionCookie() {
+	lock_guard<mutex> lock(cookie_lock);
+	session_cookie.clear();
+	BOILSTREAM_LOG("ClearSessionCookie: Session cookie cleared");
+}
+
+void RestApiSecretStorage::StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri) {
+	lock_guard<mutex> lock(registration_lock);
+	registration_base_url = base_url;
+	registration_session_token = session_token;
+	registration_totp_uri = totp_uri;
+	BOILSTREAM_LOG("StoreRegistrationState: Registration state stored (totp_uri length=" << totp_uri.length() << ")");
+}
+
+std::tuple<string, string, string> RestApiSecretStorage::GetRegistrationState() {
+	lock_guard<mutex> lock(registration_lock);
+	if (registration_base_url.empty() || registration_session_token.empty()) {
+		throw IOException("No registration state found. Please run PRAGMA boilstream_register_user() first.");
+	}
+	return std::make_tuple(registration_base_url, registration_session_token, registration_totp_uri);
+}
+
+void RestApiSecretStorage::ClearRegistrationState() {
+	lock_guard<mutex> lock(registration_lock);
+	registration_base_url.clear();
+	registration_session_token.clear();
+	registration_totp_uri.clear();
+	BOILSTREAM_LOG("ClearRegistrationState: Registration state cleared");
+}
+
 void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret,
                                                       optional_ptr<CatalogTransaction> transaction) {
 	auto trans = GetTransactionOrDefault(transaction);
@@ -1987,6 +2023,15 @@ string RestApiSecretStorage::HttpGet(const string &url) {
 	} catch (const IOException &e) {
 		// No active session - proceed without authentication
 		BOILSTREAM_LOG("HttpGet: No active session, proceeding unauthenticated");
+	}
+
+	// Add session cookie if set (for email/password authentication flow)
+	{
+		lock_guard<mutex> lock(cookie_lock);
+		if (!session_cookie.empty()) {
+			headers.Insert("Cookie", session_cookie);
+			BOILSTREAM_LOG("HttpGet: Adding session cookie header");
+		}
 	}
 
 	// Retry configuration: 3 retries with short exponential backoff
@@ -2186,6 +2231,15 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 	if (!is_exchanging_now) {
 		// Normal API request - add authenticated headers
 		headers = BuildAuthenticatedHeaders("POST", url, body);
+	}
+
+	// Add session cookie if set (for email/password authentication flow)
+	{
+		lock_guard<mutex> lock(cookie_lock);
+		if (!session_cookie.empty()) {
+			headers.Insert("Cookie", session_cookie);
+			BOILSTREAM_LOG("HttpPost: Adding session cookie header");
+		}
 	}
 
 	// Generate idempotency key for safe retries (prevents duplicate secret creation)
@@ -2560,7 +2614,7 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 	if (url.empty()) {
 		BOILSTREAM_LOG("WriteSecret: ERROR - endpoint is empty!");
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
-		                            "duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
+		                            "boilstream_bootstrap_session('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Serialize secret
@@ -2968,7 +3022,7 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 
 	if (url.empty()) {
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
-		                            "duckdb_secrets_boilstream_endpoint('https://host/path/:TOKEN') to set it.");
+		                            "boilstream_bootstrap_session('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Delete from REST API first (source of truth)

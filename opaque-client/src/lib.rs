@@ -10,6 +10,9 @@ use hmac::{Hmac, Mac};
 use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
+// Import registration module
+mod registration;
+
 // Platform-specific imports
 use std::os::raw::c_char;
 
@@ -1006,4 +1009,123 @@ pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
         }
         Err(_) => -1, // Decryption or authentication failed
     }
+}
+
+//===----------------------------------------------------------------------===//
+// Email/Password Registration FFI
+//===----------------------------------------------------------------------===//
+
+/// Validate email format (C FFI)
+///
+/// # Arguments
+/// * `email` - pointer to null-terminated email string
+///
+/// # Returns
+/// 0 on success, -1 if email is invalid
+#[no_mangle]
+pub unsafe extern "C" fn registration_validate_email(email: *const c_char) -> i32 {
+    if email.is_null() {
+        return -1;
+    }
+
+    let email_cstr = std::ffi::CStr::from_ptr(email);
+    let email_str = match email_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match registration::validate_email(email_str) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Validate password strength (C FFI)
+///
+/// # Arguments
+/// * `password` - pointer to password bytes
+/// * `password_len` - length of password in bytes
+///
+/// # Returns
+/// 0 on success, -1 if password is too weak (< 12 characters)
+#[no_mangle]
+pub unsafe extern "C" fn registration_validate_password(
+    password: *const u8,
+    password_len: usize,
+) -> i32 {
+    if password.is_null() {
+        return -1;
+    }
+
+    let password_slice = slice::from_raw_parts(password, password_len);
+    let password_str = match std::str::from_utf8(password_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match registration::validate_password(password_str) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Build TOTP URI for QR code generation (C FFI)
+///
+/// # Arguments
+/// * `email` - pointer to null-terminated email string
+/// * `secret` - pointer to null-terminated TOTP secret string
+/// * `issuer` - pointer to null-terminated issuer string (NULL for default "BoilStream")
+/// * `uri_buffer` - pointer to output buffer for URI
+/// * `uri_buffer_len` - size of output buffer
+///
+/// # Returns
+/// Length of URI written to buffer on success, -1 on error (buffer too small or invalid input)
+#[no_mangle]
+pub unsafe extern "C" fn registration_build_totp_uri(
+    email: *const c_char,
+    secret: *const c_char,
+    issuer: *const c_char,
+    uri_buffer: *mut c_char,
+    uri_buffer_len: usize,
+) -> isize {
+    if email.is_null() || secret.is_null() || uri_buffer.is_null() {
+        return -1;
+    }
+
+    let email_cstr = std::ffi::CStr::from_ptr(email);
+    let email_str = match email_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let secret_cstr = std::ffi::CStr::from_ptr(secret);
+    let secret_str = match secret_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let issuer_opt = if issuer.is_null() {
+        None
+    } else {
+        let issuer_cstr = std::ffi::CStr::from_ptr(issuer);
+        match issuer_cstr.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return -1,
+        }
+    };
+
+    let uri = registration::build_totp_uri(email_str, secret_str, issuer_opt);
+
+    if uri.len() + 1 > uri_buffer_len {
+        return -1; // Buffer too small
+    }
+
+    let uri_bytes = uri.as_bytes();
+    let buffer_slice = slice::from_raw_parts_mut(uri_buffer as *mut u8, uri_bytes.len());
+    buffer_slice.copy_from_slice(uri_bytes);
+
+    // Null-terminate
+    *(uri_buffer.add(uri_bytes.len()) as *mut u8) = 0;
+
+    uri_bytes.len() as isize
 }

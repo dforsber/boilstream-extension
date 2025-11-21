@@ -101,11 +101,27 @@ public:
 	//! Make HTTP POST request to REST API (public for table functions)
 	string HttpPost(const string &url, const string &body, HTTPHeaders *out_headers = nullptr);
 
+	//! Set session cookie for authenticated requests (used for email/password registration flow)
+	void SetSessionCookie(const string &session_id);
+
+	//! Clear session cookie
+	void ClearSessionCookie();
+
 	//! Get expiration timestamp for a secret (for table functions)
 	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name);
 
 	//! Get the endpoint URL (for constructing API URLs in table functions)
 	string GetEndpointUrl();
+
+	//! Store registration state (base_url, session_token, and totp_uri) for MFA verification
+	void StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri);
+
+	//! Get registration state (returns base_url, session_token, and totp_uri)
+	//! Throws IOException if no registration state is stored
+	std::tuple<string, string, string> GetRegistrationState();
+
+	//! Clear registration state after successful MFA verification
+	void ClearRegistrationState();
 
 protected:
 	//! Override WriteSecret to persist to REST API
@@ -272,6 +288,20 @@ private:
 
 	//! Lock for expiration map
 	mutex expiration_lock;
+
+	//! Session cookie for email/password authentication flow
+	string session_cookie;
+
+	//! Lock for session cookie
+	mutex cookie_lock;
+
+	//! Registration state (stored during email/password registration for MFA verification)
+	string registration_base_url;
+	string registration_session_token;
+	string registration_totp_uri;
+
+	//! Lock for registration state
+	mutex registration_lock;
 };
 
 } // namespace duckdb

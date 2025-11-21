@@ -178,6 +178,16 @@ target_include_directories(
 target_link_libraries(aws_signing_test PRIVATE Catch2::Catch2)
 link_rust_dependencies(aws_signing_test)
 
+# Registration FFI test executable (email/password validation, TOTP URI building)
+add_executable(registration_ffi_test test_boilstream_registration.cpp)
+
+target_include_directories(
+  registration_ffi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include)
+
+# Link with Rust OPAQUE client library for registration FFI functions
+target_link_libraries(registration_ffi_test PRIVATE Catch2::Catch2)
+link_rust_dependencies(registration_ffi_test)
+
 # Crypto test executable (integrity, HMAC, key derivation)
 add_executable(
   boilstream_crypto_test
@@ -259,3 +269,4 @@ add_test(NAME BoilstreamConformanceTests COMMAND boilstream_conformance_test)
 add_test(NAME BoilstreamEncryptionTests COMMAND boilstream_encryption_test)
 add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
+add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
