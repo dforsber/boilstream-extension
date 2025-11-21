@@ -806,6 +806,29 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		throw InvalidInputException("boilstream_register_user: URL must start with http:// or https://");
 	}
 
+	// Require HTTPS for security (unless localhost for testing)
+	bool is_localhost = false;
+	auto proto_end = base_url.find("://");
+	if (proto_end != string::npos) {
+		auto host_start = proto_end + 3;
+		auto host_end = base_url.find('/', host_start);
+		auto port_pos = base_url.find(':', host_start);
+
+		// Port comes before path
+		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
+			host_end = port_pos;
+		}
+
+		string hostname = base_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
+
+		// Check for localhost variants (including IPv6)
+		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
+	}
+
+	if (!is_localhost && base_url.find("https://") != 0) {
+		throw InvalidInputException("boilstream_register_user: URL must use HTTPS (or localhost for testing)");
+	}
+
 	BOILSTREAM_LOG("RegisterUser: base_url=" << base_url << ", email=" << email);
 
 	// Validate email format using Rust FFI
@@ -847,14 +870,17 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 			// Format secret in groups of 4 characters for readability
 			string formatted_secret;
 			for (size_t i = 0; i < secret_key.length(); i += 4) {
-				if (i > 0) formatted_secret += " ";
+				if (i > 0)
+					formatted_secret += " ";
 				formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
 			}
 
 			// Return cached QR code response
 			string result_sql = "INSTALL textplot FROM community;\n";
 			result_sql += "LOAD textplot;\n";
-			result_sql += "SELECT unnest(['" + formatted_secret + "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + cached_totp_uri + "'), chr(10))) as qr_code;";
+			result_sql += "SELECT unnest(['" + formatted_secret +
+			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + cached_totp_uri +
+			              "'), chr(10))) as qr_code;";
 
 			return result_sql;
 		}
@@ -901,7 +927,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Helper: Make unauthenticated HTTP POST request (for public registration APIs)
 	// Note: Returns response body for ALL status codes (2xx, 4xx, 5xx) - caller must parse JSON to check success
 	// Optional out_headers parameter to capture response headers (e.g., Set-Cookie)
-	auto http_post = [&](const string &url, const string &body, const string &cookie = "", HTTPHeaders *out_headers = nullptr) -> string {
+	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
+	                     HTTPHeaders *out_headers = nullptr) -> string {
 		auto &db = DatabaseInstance::GetDatabase(context);
 		auto &http_util = HTTPUtil::Get(db);
 		auto params = http_util.InitializeParameters(db, url);
@@ -986,7 +1013,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Check if response is empty
 	if (signup_response.empty()) {
-		throw IOException("Signup response is empty - server may not be responding or HTTPS certificate validation failed");
+		throw IOException(
+		    "Signup response is empty - server may not be responding or HTTPS certificate validation failed");
 	}
 
 	BOILSTREAM_LOG("RegisterUser: signup response size=" << signup_response.size());
@@ -1138,7 +1166,9 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	BOILSTREAM_LOG("RegisterUser: TOTP URI built successfully");
 
 	// Store registration state for MFA verification step
-	BOILSTREAM_LOG("RegisterUser: Storing session token (first 8 chars): " << session_token.substr(0, std::min<size_t>(8, session_token.length())) << "... (total length=" << session_token.length() << ")");
+	BOILSTREAM_LOG("RegisterUser: Storing session token (first 8 chars): "
+	               << session_token.substr(0, std::min<size_t>(8, session_token.length()))
+	               << "... (total length=" << session_token.length() << ")");
 	storage->StoreRegistrationState(base_url, session_token, totp_uri);
 	BOILSTREAM_LOG("RegisterUser: Registration state stored successfully");
 
@@ -1158,7 +1188,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Format secret in groups of 4 characters for readability
 	string formatted_secret;
 	for (size_t i = 0; i < secret_key.length(); i += 4) {
-		if (i > 0) formatted_secret += " ";
+		if (i > 0)
+			formatted_secret += " ";
 		formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
 	}
 
@@ -1169,7 +1200,9 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Remaining rows: QR code
 	string result_sql = "INSTALL textplot FROM community;\n";
 	result_sql += "LOAD textplot;\n";
-	result_sql += "SELECT unnest(['" + formatted_secret + "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + totp_uri + "'), chr(10))) as qr_code;";
+	result_sql += "SELECT unnest(['" + formatted_secret +
+	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + totp_uri +
+	              "'), chr(10))) as qr_code;";
 
 	return result_sql;
 }
@@ -1208,7 +1241,8 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// Helper: Make unauthenticated HTTP POST request with cookie
 	// Note: Returns response body for ALL status codes - caller must parse JSON to check success
 	// Optional out_headers parameter to capture response headers
-	auto http_post = [&](const string &url, const string &body, const string &cookie, HTTPHeaders *out_headers = nullptr) -> string {
+	auto http_post = [&](const string &url, const string &body, const string &cookie,
+	                     HTTPHeaders *out_headers = nullptr) -> string {
 		auto &db = DatabaseInstance::GetDatabase(context);
 		auto &http_util = HTTPUtil::Get(db);
 		auto params = http_util.InitializeParameters(db, url);
@@ -1219,7 +1253,8 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		headers.Insert("Content-Type", "application/json");
 		if (!cookie.empty()) {
 			headers.Insert("Cookie", cookie);
-			BOILSTREAM_LOG("HTTP POST: Added Cookie header: " << cookie.substr(0, std::min<size_t>(30, cookie.length())) << "...");
+			BOILSTREAM_LOG("HTTP POST: Added Cookie header: " << cookie.substr(0, std::min<size_t>(30, cookie.length()))
+			                                                  << "...");
 		} else {
 			BOILSTREAM_LOG("HTTP POST: No cookie provided");
 		}
@@ -1268,8 +1303,11 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	string session_cookie = "session=" + session_token;
 
 	BOILSTREAM_LOG("VerifyMfa: Sending request body: " << verify_body);
-	BOILSTREAM_LOG("VerifyMfa: Session token (first 8 chars): " << session_token.substr(0, std::min<size_t>(8, session_token.length())) << "... (total length=" << session_token.length() << ")");
-	BOILSTREAM_LOG("VerifyMfa: Cookie header: " << session_cookie.substr(0, std::min<size_t>(20, session_cookie.length())) << "...");
+	BOILSTREAM_LOG("VerifyMfa: Session token (first 8 chars): "
+	               << session_token.substr(0, std::min<size_t>(8, session_token.length()))
+	               << "... (total length=" << session_token.length() << ")");
+	BOILSTREAM_LOG("VerifyMfa: Cookie header: "
+	               << session_cookie.substr(0, std::min<size_t>(20, session_cookie.length())) << "...");
 
 	HTTPHeaders response_headers(DatabaseInstance::GetDatabase(context));
 	string verify_response;
@@ -1279,11 +1317,13 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		throw IOException("MFA verification failed: %s", e.what());
 	}
 
-	BOILSTREAM_LOG("VerifyMfa: Response body: " << verify_response.substr(0, std::min<size_t>(200, verify_response.size())));
+	BOILSTREAM_LOG(
+	    "VerifyMfa: Response body: " << verify_response.substr(0, std::min<size_t>(200, verify_response.size())));
 
 	// Handle empty response
 	if (verify_response.empty()) {
-		throw IOException("MFA verification failed: Server returned empty response (likely invalid session or expired token)");
+		throw IOException(
+		    "MFA verification failed: Server returned empty response (likely invalid session or expired token)");
 	}
 
 	// Parse verification response
@@ -1363,6 +1403,34 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	string base_url = url_with_email.substr(0, last_slash);
 	string email = url_with_email.substr(last_slash + 1);
 
+	// Validate URL has protocol
+	if (base_url.find("http://") != 0 && base_url.find("https://") != 0) {
+		throw InvalidInputException("boilstream_login: URL must start with http:// or https://");
+	}
+
+	// Require HTTPS for security (unless localhost for testing)
+	bool is_localhost = false;
+	auto proto_end = base_url.find("://");
+	if (proto_end != string::npos) {
+		auto host_start = proto_end + 3;
+		auto host_end = base_url.find('/', host_start);
+		auto port_pos = base_url.find(':', host_start);
+
+		// Port comes before path
+		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
+			host_end = port_pos;
+		}
+
+		string hostname = base_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
+
+		// Check for localhost variants (including IPv6)
+		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
+	}
+
+	if (!is_localhost && base_url.find("https://") != 0) {
+		throw InvalidInputException("boilstream_login: URL must use HTTPS (or localhost for testing)");
+	}
+
 	if (email.empty()) {
 		throw InvalidInputException("boilstream_login: Email cannot be empty");
 	}
@@ -1419,7 +1487,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	};
 
 	// Helper: Make HTTP POST request
-	auto http_post = [&](const string &url, const string &body, const string &cookie = "", HTTPHeaders *out_headers = nullptr) -> string {
+	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
+	                     HTTPHeaders *out_headers = nullptr) -> string {
 		auto &db = DatabaseInstance::GetDatabase(context);
 		auto &http_util = HTTPUtil::Get(db);
 		auto params = http_util.InitializeParameters(db, url);
@@ -1504,7 +1573,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Check if login was successful by looking for Set-Cookie header
 	// If the server returned 405, we need to check the response
 	if (login_response.empty()) {
-		throw IOException("Login failed: Server returned 405 (Method Not Allowed). The endpoint /auth/api/login might not support this login method.");
+		throw IOException("Login failed: Server returned 405 (Method Not Allowed). The endpoint /auth/api/login might "
+		                  "not support this login method.");
 	}
 
 	// Extract session token from Set-Cookie header
@@ -1513,7 +1583,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
 	} catch (...) {
 		// No Set-Cookie header - login probably failed
-		throw IOException("Login failed: No session cookie returned. Response: %s", login_response.substr(0, 100).c_str());
+		throw IOException("Login failed: No session cookie returned. Response: %s",
+		                  login_response.substr(0, 100).c_str());
 	}
 	if (set_cookie_header.empty()) {
 		throw IOException("Login response missing Set-Cookie header");
@@ -1743,10 +1814,16 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 //! Returns table with PRAGMA names, parameters, and descriptions
 static string Help(ClientContext &context, const FunctionParameters &params) {
 	string result_sql = "SELECT unnest([\n";
+	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
+	result_sql += "  'SECURITY WARNING: Passwords in CLI commands are saved to shell history!',\n";
+	result_sql += "  'For production: Use Web Auth GUI or clear history: rm ~/.duckdb_history',\n";
+	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
+	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_register_user(url_with_email, password)',\n";
 	result_sql += "  '  - Register new user with email/password. Returns TOTP secret and QR code.',\n";
 	result_sql += "  '  - TIP: Use .maxrows 50 or .mode csv to see the full QR code.',\n";
 	result_sql += "  '  - NOTE: Does not work if server uses SAML SSO (centralized user management).',\n";
+	result_sql += "  '  - SECURE ALTERNATIVE: Use Web Auth GUI for registration instead.',\n";
 	result_sql += "  '  .maxrows 50',\n";
 	result_sql += "  '  PRAGMA boilstream_register_user(''https://localhost/email@example.com'', ''password123'');',\n";
 	result_sql += "  '',\n";
@@ -1757,7 +1834,9 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  'PRAGMA boilstream_login(url_with_email, password, mfa_code)',\n";
 	result_sql += "  '  - Login with email/password/MFA. Establishes OPAQUE session.',\n";
 	result_sql += "  '  - NOTE: Automatically calls boilstream_bootstrap_session()',\n";
-	result_sql += "  '  PRAGMA boilstream_login(''https://localhost/email@example.com'', ''password123'', ''123456'');',\n";
+	result_sql += "  '  - SECURE ALTERNATIVE: Use Web Auth GUI for login instead.',\n";
+	result_sql +=
+	    "  '  PRAGMA boilstream_login(''https://localhost/email@example.com'', ''password123'', ''123456'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_bootstrap_session(url_with_token)',\n";
 	result_sql += "  '  - Login with bootstrap token. Establishes OPAQUE session.',\n";
@@ -1902,7 +1981,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.3.5";
+	return "0.4.0";
 #endif
 }
 

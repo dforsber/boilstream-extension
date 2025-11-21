@@ -1944,7 +1944,8 @@ void RestApiSecretStorage::ClearSessionCookie() {
 	BOILSTREAM_LOG("ClearSessionCookie: Session cookie cleared");
 }
 
-void RestApiSecretStorage::StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri) {
+void RestApiSecretStorage::StoreRegistrationState(const string &base_url, const string &session_token,
+                                                  const string &totp_uri) {
 	lock_guard<mutex> lock(registration_lock);
 	registration_base_url = base_url;
 	registration_session_token = session_token;

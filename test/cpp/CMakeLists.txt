@@ -178,7 +178,8 @@ target_include_directories(
 target_link_libraries(aws_signing_test PRIVATE Catch2::Catch2)
 link_rust_dependencies(aws_signing_test)
 
-# Registration FFI test executable (email/password validation, TOTP URI building)
+# Registration FFI test executable (email/password validation, TOTP URI
+# building)
 add_executable(registration_ffi_test test_boilstream_registration.cpp)
 
 target_include_directories(

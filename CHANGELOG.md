@@ -5,6 +5,45 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-11-21
+
+### Added
+
+- **Email/Password Registration**: `PRAGMA boilstream_register_user(url_with_email, password)`
+  - Complete registration flow with TOTP enrollment (displays QR code)
+  - Auto-installs textplot extension for QR code rendering
+  - Caches registration state for QR code re-display (if truncated)
+  - Returns formatted TOTP secret and verification command
+- **Email/Password/MFA Login**: `PRAGMA boilstream_login(url_with_email, password, mfa_code)`
+  - 4-step authentication: CSRF token → login → MFA verification → bootstrap token
+  - Performs OPAQUE session establishment inline (no delegation)
+  - Auto-fetches secrets and attaches ducklakes
+  - Returns session status with expiration timestamp
+- **MFA Verification**: `PRAGMA boilstream_verify_mfa(totp_code)`
+  - Completes registration after TOTP enrollment
+  - Returns backup codes for account recovery
+  - Clears registration state after successful verification
+- **Registration Caching**: Re-run `boilstream_register_user` to see cached QR code
+  - Allows users to correct display mode (`.maxrows 50` or `.mode csv`)
+  - No duplicate server registrations
+  - State persists until MFA verification completes
+
+### Changed
+
+- **Help text improvements**: Added security warnings and display tips
+  - Security banner warns about passwords in shell history
+  - Recommends Web Auth GUI for production use
+  - Manual cleanup instructions: `rm ~/.duckdb_history`
+  - Tip: Use `.maxrows 50` or `.mode csv` for full QR code display
+- **Registration state storage**: Extended to include TOTP URI for caching
+
+### Security
+
+- **Shell history warning**: PRAGMA commands with passwords are saved to `~/.duckdb_history`
+  - DuckDB query logs disabled by default (not a concern)
+  - Shell history redaction not possible from extension
+  - Users must clear manually or use Web Auth GUI
+
 ## [0.3.5] - 2025-11-19
 
 ### Added
@@ -500,6 +539,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
+[0.4.0]: https://github.com/yourusername/boilstream-extension/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/yourusername/boilstream-extension/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/yourusername/boilstream-extension/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/yourusername/boilstream-extension/compare/v0.3.2...v0.3.3
