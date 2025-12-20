@@ -448,6 +448,194 @@ static void BoilstreamSecretsFunction(ClientContext &context, TableFunctionInput
 }
 
 //===--------------------------------------------------------------------===//
+// Boilstream Buckets Table Function
+//===--------------------------------------------------------------------===//
+
+struct BoilstreamBucketsBindData : public TableFunctionData {
+	// No additional data needed, we get storage from global
+};
+
+struct BoilstreamBucketsGlobalState : public GlobalTableFunctionState {
+	BoilstreamBucketsGlobalState() : current_idx(0) {
+	}
+
+	vector<vector<Value>> buckets_data;
+	idx_t current_idx;
+};
+
+static unique_ptr<FunctionData> BoilstreamBucketsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
+	// Define output columns
+	names.emplace_back("bucket_id");
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+	names.emplace_back("bucket_name");
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+	names.emplace_back("region");
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+	names.emplace_back("cloud_provider");
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+	names.emplace_back("access_mode");
+	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+	names.emplace_back("can_create_ducklake");
+	return_types.emplace_back(LogicalType(LogicalTypeId::BOOLEAN));
+
+	return make_uniq<BoilstreamBucketsBindData>();
+}
+
+static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext &context,
+                                                                  TableFunctionInitInput &input) {
+	auto result = make_uniq<BoilstreamBucketsGlobalState>();
+
+	// Get global storage
+	auto storage = GetGlobalStorage();
+	if (!storage) {
+		throw InvalidInputException(
+		    "boilstream_buckets: No active session. Call PRAGMA boilstream_bootstrap_session first.");
+	}
+
+	BOILSTREAM_LOG("BoilstreamBucketsInit: Fetching buckets from API");
+
+	// Get the endpoint URL and validate it's configured
+	string endpoint_url = storage->GetEndpointUrl();
+	if (endpoint_url.empty()) {
+		throw InvalidInputException(
+		    "boilstream_buckets: No endpoint configured. Call PRAGMA boilstream_bootstrap_session first.");
+	}
+
+	// Construct the buckets API URL
+	string buckets_url = endpoint_url + "/buckets";
+
+	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
+
+	// Make HTTP GET request
+	string response;
+	try {
+		response = storage->HttpGet(buckets_url);
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("BoilstreamBucketsInit: Failed to fetch buckets: " << e.what());
+		throw IOException("Failed to fetch buckets from boilstream server: %s", e.what());
+	}
+
+	// Check if response is empty (indicates error like 401, 403, etc.)
+	if (response.empty()) {
+		BOILSTREAM_LOG("BoilstreamBucketsInit: Empty response from server (likely authentication error)");
+		throw IOException(
+		    "Failed to fetch buckets: Server returned an error (possibly authentication issue). "
+		    "Check your token permissions or try refreshing the session.");
+	}
+
+	// Parse JSON response
+	BOILSTREAM_LOG("BoilstreamBucketsInit: Parsing JSON response");
+	auto doc = duckdb_yyjson::yyjson_read(response.c_str(), response.size(), 0);
+	if (!doc) {
+		throw IOException("Failed to parse buckets JSON response");
+	}
+
+	auto root = duckdb_yyjson::yyjson_doc_get_root(doc);
+	if (!root) {
+		duckdb_yyjson::yyjson_doc_free(doc);
+		throw IOException("Invalid buckets response: empty JSON");
+	}
+
+	// Response should be an array of bucket objects
+	if (!duckdb_yyjson::yyjson_is_arr(root)) {
+		duckdb_yyjson::yyjson_doc_free(doc);
+		throw IOException("Invalid buckets response: expected array");
+	}
+
+	// Parse each bucket entry
+	size_t arr_size = duckdb_yyjson::yyjson_arr_size(root);
+	for (size_t idx = 0; idx < arr_size; idx++) {
+		auto val = duckdb_yyjson::yyjson_arr_get(root, idx);
+		if (!val || !duckdb_yyjson::yyjson_is_obj(val)) {
+			continue;
+		}
+
+		vector<Value> row;
+
+		// bucket_id
+		auto bucket_id_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_id");
+		if (bucket_id_val && duckdb_yyjson::yyjson_is_str(bucket_id_val)) {
+			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(bucket_id_val)));
+		} else {
+			row.emplace_back(Value());
+		}
+
+		// bucket_name
+		auto bucket_name_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_name");
+		if (bucket_name_val && duckdb_yyjson::yyjson_is_str(bucket_name_val)) {
+			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(bucket_name_val)));
+		} else {
+			row.emplace_back(Value());
+		}
+
+		// region
+		auto region_val = duckdb_yyjson::yyjson_obj_get(val, "region");
+		if (region_val && duckdb_yyjson::yyjson_is_str(region_val)) {
+			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(region_val)));
+		} else {
+			row.emplace_back(Value());
+		}
+
+		// cloud_provider
+		auto provider_val = duckdb_yyjson::yyjson_obj_get(val, "cloud_provider");
+		if (provider_val && duckdb_yyjson::yyjson_is_str(provider_val)) {
+			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(provider_val)));
+		} else {
+			row.emplace_back(Value());
+		}
+
+		// access_mode
+		auto access_mode_val = duckdb_yyjson::yyjson_obj_get(val, "access_mode");
+		if (access_mode_val && duckdb_yyjson::yyjson_is_str(access_mode_val)) {
+			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(access_mode_val)));
+		} else {
+			row.emplace_back(Value());
+		}
+
+		// can_create_ducklake
+		auto can_create_val = duckdb_yyjson::yyjson_obj_get(val, "can_create_ducklake");
+		if (can_create_val && duckdb_yyjson::yyjson_is_bool(can_create_val)) {
+			row.emplace_back(Value::BOOLEAN(duckdb_yyjson::yyjson_get_bool(can_create_val)));
+		} else {
+			row.emplace_back(Value::BOOLEAN(false));
+		}
+
+		result->buckets_data.push_back(std::move(row));
+	}
+
+	duckdb_yyjson::yyjson_doc_free(doc);
+
+	BOILSTREAM_LOG("BoilstreamBucketsInit: Loaded " << result->buckets_data.size() << " buckets");
+
+	return std::move(result);
+}
+
+static void BoilstreamBucketsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<BoilstreamBucketsGlobalState>();
+
+	idx_t count = 0;
+	while (state.current_idx < state.buckets_data.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = state.buckets_data[state.current_idx];
+
+		// Set each column value
+		for (idx_t col_idx = 0; col_idx < row.size(); col_idx++) {
+			output.SetValue(col_idx, count, row[col_idx]);
+		}
+
+		state.current_idx++;
+		count++;
+	}
+
+	output.SetCardinality(count);
+}
+
+//===--------------------------------------------------------------------===//
 // PRAGMA: Create Ducklake
 //===--------------------------------------------------------------------===//
 
@@ -460,12 +648,17 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	string catalog_name = params.values[0].ToString();
 	string description = "";
+	string s3_bucket_name = "";
 
 	if (params.values.size() > 1 && !params.values[1].IsNull()) {
 		description = params.values[1].ToString();
 	}
 
-	BOILSTREAM_LOG("CreateDucklake: catalog_name=" << catalog_name << ", description=" << description);
+	if (params.values.size() > 2 && !params.values[2].IsNull()) {
+		s3_bucket_name = params.values[2].ToString();
+	}
+
+	BOILSTREAM_LOG("CreateDucklake: catalog_name=" << catalog_name << ", description=" << description << ", s3_bucket_name=" << s3_bucket_name);
 
 	// Validate catalog_name
 	if (catalog_name.empty()) {
@@ -498,6 +691,9 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(doc, obj, "catalog_name", catalog_name.c_str());
 	if (!description.empty()) {
 		duckdb_yyjson::yyjson_mut_obj_add_strcpy(doc, obj, "description", description.c_str());
+	}
+	if (!s3_bucket_name.empty()) {
+		duckdb_yyjson::yyjson_mut_obj_add_strcpy(doc, obj, "s3_bucket_name", s3_bucket_name.c_str());
 	}
 
 	auto body_str = duckdb_yyjson::yyjson_mut_write(doc, 0, nullptr);
@@ -890,7 +1086,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Helper: Make unauthenticated HTTP GET request (for public registration APIs)
-	// Note: Returns response body for ALL status codes (2xx, 4xx, 5xx) - caller must parse JSON to check success
+	// Note: Fails fast on non-2xx status to prevent automatic retries
 	auto http_get = [&](const string &url) -> string {
 		auto &db = DatabaseInstance::GetDatabase(context);
 		auto &http_util = HTTPUtil::Get(db);
@@ -920,12 +1116,20 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		auto status_code = static_cast<int>(response->status);
 		BOILSTREAM_LOG("HTTP GET " << url << " -> status=" << status_code << " body_len=" << response_body.size());
 
-		// Return body for all responses - registration APIs use JSON to communicate errors
+		// Check status code and fail fast on errors to prevent retries
+		if (status_code < 200 || status_code >= 300) {
+			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
+			if (response_body.size() > 500) {
+				error_preview += "... (truncated)";
+			}
+			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
+		}
+
 		return response_body;
 	};
 
 	// Helper: Make unauthenticated HTTP POST request (for public registration APIs)
-	// Note: Returns response body for ALL status codes (2xx, 4xx, 5xx) - caller must parse JSON to check success
+	// Note: Fails fast on non-2xx status to prevent automatic retries
 	// Optional out_headers parameter to capture response headers (e.g., Set-Cookie)
 	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
 	                     HTTPHeaders *out_headers = nullptr) -> string {
@@ -957,8 +1161,23 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		auto status_code = static_cast<int>(response->status);
 		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
 
-		// Return body for all responses - registration APIs use JSON to communicate errors
-		// Don't check Success() - we need the body even for 4xx status codes
+		// Check status code and fail fast on errors to prevent retries
+		// Include response body in error for JSON error messages
+		if (status_code < 200 || status_code >= 300) {
+			// Special handling for rate limit / replay protection
+			if (status_code == 429) {
+				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
+				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+			}
+
+			// Include response body (may contain JSON error) in exception
+			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
+			if (response_body.size() > 500) {
+				error_preview += "... (truncated)";
+			}
+			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
+		}
+
 		return response_body;
 	};
 
@@ -1239,7 +1458,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	BOILSTREAM_LOG("VerifyMfa: Retrieved registration state, base_url=" << base_url);
 
 	// Helper: Make unauthenticated HTTP POST request with cookie
-	// Note: Returns response body for ALL status codes - caller must parse JSON to check success
+	// Note: Fails fast on non-2xx status to prevent automatic retries
 	// Optional out_headers parameter to capture response headers
 	auto http_post = [&](const string &url, const string &body, const string &cookie,
 	                     HTTPHeaders *out_headers = nullptr) -> string {
@@ -1277,8 +1496,22 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		auto status_code = static_cast<int>(response->status);
 		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
 
-		// Return body for all responses - registration APIs use JSON to communicate errors
-		// Don't check Success() - we need the body even for 4xx status codes
+		// Check status code and fail fast on errors to prevent retries
+		if (status_code < 200 || status_code >= 300) {
+			// Special handling for rate limit / replay protection
+			if (status_code == 429) {
+				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
+				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+			}
+
+			// Include response body (may contain JSON error) in exception
+			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
+			if (response_body.size() > 500) {
+				error_preview += "... (truncated)";
+			}
+			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
+		}
+
 		return response_body;
 	};
 
@@ -1512,6 +1745,22 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 		auto status_code = static_cast<int>(response->status);
 		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
+
+		// Check status code and fail fast on errors to prevent retries
+		if (status_code < 200 || status_code >= 300) {
+			// Special handling for rate limit / replay protection
+			if (status_code == 429) {
+				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
+				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+			}
+
+			// General error handling
+			string error_preview = response_body.substr(0, std::min<size_t>(200, response_body.size()));
+			if (response_body.size() > 200) {
+				error_preview += "... (truncated)";
+			}
+			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
+		}
 
 		return response_body;
 	};
@@ -1842,12 +2091,18 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '  - Login with bootstrap token. Establishes OPAQUE session.',\n";
 	result_sql += "  '  PRAGMA boilstream_bootstrap_session(''https://localhost/secrets/:token'');',\n";
 	result_sql += "  '',\n";
-	result_sql += "  'PRAGMA boilstream_create_ducklake(name, [description])',\n";
+	result_sql += "  'PRAGMA boilstream_create_ducklake(name, [description], [s3_bucket_name])',\n";
 	result_sql += "  '  - Create a new ducklake. Requires active session.',\n";
+	result_sql += "  '  - s3_bucket_name: Optional bucket from boilstream_buckets() for multi-bucket users.',\n";
 	result_sql += "  '  PRAGMA boilstream_create_ducklake(''my_lake'', ''Optional description'');',\n";
+	result_sql += "  '  PRAGMA boilstream_create_ducklake(''my_lake'', '''', ''my-bucket-name'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'SELECT * FROM boilstream_ducklakes()',\n";
 	result_sql += "  '  - List all ducklakes. Requires active session.',\n";
+	result_sql += "  '',\n";
+	result_sql += "  'SELECT * FROM boilstream_buckets()',\n";
+	result_sql += "  '  - List available S3 buckets with access permissions.',\n";
+	result_sql += "  '  - can_create_ducklake: true if you can create ducklakes in this bucket.',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'SELECT * FROM boilstream_secrets()',\n";
 	result_sql += "  '  - List all secrets. Requires active session.'\n";
@@ -1959,6 +2214,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 BoilstreamDucklakesInit);
 	loader.RegisterFunction(ducklakes_function);
 	BOILSTREAM_LOG("LoadInternal: boilstream_ducklakes table function registered");
+
+	// Register boilstream_buckets table function
+	TableFunction buckets_function("boilstream_buckets", {}, BoilstreamBucketsFunction, BoilstreamBucketsBind,
+	                               BoilstreamBucketsInit);
+	loader.RegisterFunction(buckets_function);
+	BOILSTREAM_LOG("LoadInternal: boilstream_buckets table function registered");
 
 	// Register boilstream_secrets table function
 	TableFunction secrets_function("boilstream_secrets", {}, BoilstreamSecretsFunction, BoilstreamSecretsBind,

@@ -2351,6 +2351,13 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body, HTT
 			BOILSTREAM_LOG("HttpPost: HTTP " << status_code << " (client error)");
 			BOILSTREAM_LOG("HttpPost: Response body length: " << request.buffer_out.size());
 			BOILSTREAM_LOG("HttpPost: Response body: " << error_body);
+
+			// Special handling for rate limit errors
+			if (status_code == 429) {
+				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
+				                  "The server is rate-limiting your requests. Please wait a few minutes before retrying.");
+			}
+
 			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) +
 			                  " - Client error: " + error_body);
 		}
