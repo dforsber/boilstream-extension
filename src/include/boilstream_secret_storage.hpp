@@ -18,6 +18,7 @@
 class BoilstreamCryptoTestAccess;
 class BoilstreamConformanceTestAccess;
 class BoilstreamEncryptionTestAccess;
+class BoilstreamCatalogVersionTestAccess;
 
 namespace duckdb {
 
@@ -31,8 +32,15 @@ class RestApiSecretStorage : public CatalogSetSecretStorage {
 	friend class ::BoilstreamCryptoTestAccess;
 	friend class ::BoilstreamConformanceTestAccess;
 	friend class ::BoilstreamEncryptionTestAccess;
+	friend class ::BoilstreamCatalogVersionTestAccess;
 
 public:
+	//! Catalog version info from server (public for test access)
+	struct CatalogVersionInfo {
+		uint64_t version;
+		string catalog_name;
+	};
+
 	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url);
 
 	//! Set the endpoint URL (without token)
@@ -244,6 +252,17 @@ private:
 	//! Delete refresh token file from disk
 	void DeleteRefreshToken();
 
+	//! Check catalog versions and refresh credentials for changed catalogs
+	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
+	void CheckCatalogVersions();
+
+	//! Fetch catalog versions from server
+	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
+	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions();
+
+	//! Force refresh credentials for a specific catalog by name
+	void RefreshCatalogCredentials(const string &catalog_name);
+
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
 
@@ -288,6 +307,18 @@ private:
 
 	//! Lock for expiration map
 	mutex expiration_lock;
+
+	//! Catalog version tracking (catalog_id UUID -> version info)
+	case_insensitive_map_t<CatalogVersionInfo> catalog_versions;
+
+	//! Lock for catalog versions map
+	mutex version_lock;
+
+	//! Last time catalog versions were checked
+	std::chrono::system_clock::time_point last_version_check;
+
+	//! Version check interval in seconds (default 60)
+	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
 
 	//! Session cookie for email/password authentication flow
 	string session_cookie;

@@ -2859,6 +2859,9 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransaction> transaction) {
 	BOILSTREAM_LOG("AllSecrets: called");
 
+	// Check catalog versions (rate-limited to 60 seconds)
+	CheckCatalogVersions();
+
 	// Build URL using the endpoint URL
 	string url;
 	bool has_endpoint = false;
@@ -3044,6 +3047,150 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 
 	// Clear expiration metadata
 	ClearExpiration(name);
+}
+
+case_insensitive_map_t<RestApiSecretStorage::CatalogVersionInfo> RestApiSecretStorage::FetchCatalogVersions() {
+	case_insensitive_map_t<CatalogVersionInfo> versions;
+
+	// Guard: Check if we have a valid session before making HTTP calls
+	// This prevents crashes when HTTP infrastructure isn't available
+	{
+		lock_guard<mutex> lock(session_lock);
+		if (access_token.empty()) {
+			BOILSTREAM_LOG("FetchCatalogVersions: No active session, skipping version check");
+			return versions;
+		}
+	}
+
+	string base_url;
+	{
+		lock_guard<mutex> lock(endpoint_lock);
+		base_url = endpoint_url;
+	}
+
+	if (base_url.empty()) {
+		return versions;
+	}
+
+	// Build URL: replace /secrets with /api/v1/catalog-versions
+	// endpoint_url is like "https://host/secrets"
+	// We need "https://host/api/v1/catalog-versions"
+	auto pos = base_url.rfind("/secrets");
+	if (pos == string::npos) {
+		return versions;
+	}
+	string url = base_url.substr(0, pos) + "/api/v1/catalog-versions";
+
+	string response;
+	try {
+		response = HttpGet(url);
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("FetchCatalogVersions: HTTP request failed: " << e.what());
+		return versions;
+	} catch (...) {
+		BOILSTREAM_LOG("FetchCatalogVersions: HTTP request failed with unknown error");
+		return versions;
+	}
+
+	// Parse nested structure: {"catalogs": {"uuid": {"version": 3, "catalog_name": "name"}, ...}}
+	auto doc = yyjson_read(response.c_str(), response.size(), 0);
+	if (!doc) {
+		return versions;
+	}
+
+	auto root = yyjson_doc_get_root(doc);
+	auto catalogs_obj = yyjson_obj_get(root, "catalogs");
+	if (!catalogs_obj || !yyjson_is_obj(catalogs_obj)) {
+		yyjson_doc_free(doc);
+		return versions;
+	}
+
+	yyjson_obj_iter iter;
+	yyjson_obj_iter_init(catalogs_obj, &iter);
+	yyjson_val *key, *val;
+	while ((key = yyjson_obj_iter_next(&iter))) {
+		val = yyjson_obj_iter_get_val(key);
+		if (!yyjson_is_obj(val)) {
+			continue;
+		}
+
+		auto version_val = yyjson_obj_get(val, "version");
+		auto name_val = yyjson_obj_get(val, "catalog_name");
+
+		if (version_val && yyjson_is_uint(version_val) && name_val && yyjson_is_str(name_val)) {
+			CatalogVersionInfo info;
+			info.version = yyjson_get_uint(version_val);
+			info.catalog_name = yyjson_get_str(name_val);
+			versions[yyjson_get_str(key)] = info;
+		}
+	}
+
+	yyjson_doc_free(doc);
+	BOILSTREAM_LOG("FetchCatalogVersions: Fetched " << versions.size() << " catalog versions");
+	return versions;
+}
+
+void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name) {
+	BOILSTREAM_LOG("RefreshCatalogCredentials: Refreshing credentials for catalog " << catalog_name);
+
+	// Force expiration by setting expires_at to past
+	// The secret name matches the catalog_name from the version response
+	{
+		lock_guard<mutex> lock(expiration_lock);
+		secret_expiration[catalog_name] = std::chrono::system_clock::time_point::min();
+	}
+
+	// The next LookupSecret or GetSecretByName call will see IsExpired()=true
+	// and fetch fresh credentials with expired=true flag, triggering server
+	// to return new credentials with updated master IP
+}
+
+void RestApiSecretStorage::CheckCatalogVersions() {
+	// Rate limit: only check every 60 seconds
+	auto now = std::chrono::system_clock::now();
+	{
+		lock_guard<mutex> lock(version_lock);
+		auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_version_check).count();
+		if (elapsed < VERSION_CHECK_INTERVAL_SECONDS) {
+			return; // Too soon, skip check
+		}
+		last_version_check = now;
+	}
+
+	BOILSTREAM_LOG("CheckCatalogVersions: Checking for version changes");
+
+	// Fetch current versions from server
+	auto new_versions = FetchCatalogVersions();
+	if (new_versions.empty()) {
+		return; // Request failed or no catalogs
+	}
+
+	// Collect catalogs that need refresh (to avoid holding lock while refreshing)
+	vector<string> catalogs_to_refresh;
+
+	// Compare with cached versions and identify changed catalogs
+	{
+		lock_guard<mutex> lock(version_lock);
+		for (const auto &entry : new_versions) {
+			const auto &catalog_id = entry.first;
+			const auto &new_info = entry.second;
+			auto it = catalog_versions.find(catalog_id);
+			if (it != catalog_versions.end()) {
+				if (new_info.version > it->second.version) {
+					BOILSTREAM_LOG("CheckCatalogVersions: Version changed for " << new_info.catalog_name << " ("
+					                                                            << it->second.version << " -> "
+					                                                            << new_info.version << ")");
+					catalogs_to_refresh.push_back(new_info.catalog_name);
+				}
+			}
+			catalog_versions[catalog_id] = new_info;
+		}
+	}
+
+	// Refresh credentials for changed catalogs (outside version_lock)
+	for (const auto &catalog_name : catalogs_to_refresh) {
+		RefreshCatalogCredentials(catalog_name);
+	}
 }
 
 } // namespace duckdb

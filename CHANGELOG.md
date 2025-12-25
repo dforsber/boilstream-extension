@@ -5,6 +5,40 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2025-12-25
+
+### Added
+
+- **Catalog Version Polling**: On-demand detection of catalog master node changes
+  - `CheckCatalogVersions()`: Rate-limited version check (60-second interval)
+  - `FetchCatalogVersions()`: Fetches `GET /api/v1/catalog-versions` endpoint
+  - `RefreshCatalogCredentials()`: Force-expires catalog secrets on version change
+  - Automatically triggers credential refresh when master node changes
+  - Enables seamless failover for hot tier data (in-memory on master)
+  - WASM compatible (no background threads required)
+- **Table function**: `boilstream_buckets()` - lists all available S3 buckets from server
+  - Columns: bucket_id, bucket_name, region, cloud_provider, access_mode, can_create_ducklake
+  - Makes GET /secrets/buckets API call
+- **Unit tests**: Comprehensive test suite for catalog version functionality
+  - Tests for rate limiting, version comparison, expiration logic
+  - Thread safety tests for concurrent access
+  - New test executable: `boilstream_catalog_version_test`
+
+### Fixed
+
+- **Session guard in FetchCatalogVersions**: Prevents HTTP calls when no active session exists
+  - Avoids crashes when HTTP infrastructure isn't available
+  - Gracefully returns empty result instead of attempting network call
+
+### Technical Details
+
+- **Version check flow**: Integrated into `AllSecrets()` for on-demand checking
+- **Rate limiting**: 60-second interval stored in `last_version_check` timestamp
+- **Version tracking**: `catalog_versions` map stores UUID → {version, catalog_name}
+- **Credential refresh**: Sets secret expiration to `time_point::min()`, triggering `expired=true` flag on next lookup
+- **Thread safety**: Uses `version_lock` mutex, releases before calling `RefreshCatalogCredentials()`
+- **API response format**: `{"catalogs": {"uuid": {"version": N, "catalog_name": "name"}, ...}}`
+
 ## [0.4.0] - 2025-11-21
 
 ### Added
@@ -539,6 +573,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
+[0.4.1]: https://github.com/yourusername/boilstream-extension/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yourusername/boilstream-extension/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/yourusername/boilstream-extension/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/yourusername/boilstream-extension/compare/v0.3.3...v0.3.4
