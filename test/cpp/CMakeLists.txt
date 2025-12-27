@@ -285,6 +285,26 @@ target_link_libraries(boilstream_catalog_version_test PRIVATE ${DUCKDB_LIBS}
 # Link Rust dependencies
 link_rust_dependencies(boilstream_catalog_version_test)
 
+# Connection state test executable (per-connection authentication state isolation)
+add_executable(
+  boilstream_connection_state_test
+  test_boilstream_connection_state.cpp)
+
+target_include_directories(
+  boilstream_connection_state_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include)
+
+# Enable debug logging
+target_compile_definitions(boilstream_connection_state_test PRIVATE BOILSTREAM_DEBUG)
+
+# Link extension's DuckDB libraries (connection state is header-only, just needs DuckDB)
+target_link_libraries(boilstream_connection_state_test PRIVATE ${DUCKDB_LIBS}
+                                                               Catch2::Catch2)
+
+# Link Rust dependencies (needed for DuckDB static lib)
+link_rust_dependencies(boilstream_connection_state_test)
+
 # Enable testing
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
@@ -292,6 +312,7 @@ add_test(NAME BoilstreamCryptoTests COMMAND boilstream_crypto_test)
 add_test(NAME BoilstreamConformanceTests COMMAND boilstream_conformance_test)
 add_test(NAME BoilstreamEncryptionTests COMMAND boilstream_encryption_test)
 add_test(NAME BoilstreamCatalogVersionTests COMMAND boilstream_catalog_version_test)
+add_test(NAME BoilstreamConnectionStateTests COMMAND boilstream_connection_state_test)
 add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)

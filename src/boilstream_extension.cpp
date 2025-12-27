@@ -148,6 +148,9 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	// We need "https://host:port/secrets/ducklakes"
 	string ducklakes_url = endpoint_url + "/ducklakes";
 
+	// Append multi-tenant parameter if in multi-tenant mode
+	ducklakes_url = RestApiSecretStorage::AppendMultiTenantParam(ducklakes_url, context);
+
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
 
 	// Make HTTP GET request
@@ -384,6 +387,9 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 
 	BOILSTREAM_LOG("BoilstreamSecretsInit: Processing " << secrets.size() << " secrets");
 
+	// Get transaction for expiration lookups
+	auto expiration_transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+
 	// Process each secret
 	for (auto &entry : secrets) {
 		if (!entry.secret) {
@@ -410,8 +416,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		}
 		row.emplace_back(Value::LIST(LogicalType(LogicalTypeId::VARCHAR), scope_values));
 
-		// expires_at (get from storage)
-		auto expiration = storage->GetSecretExpiration(secret.GetName());
+		// expires_at (get from storage using connection state)
+		auto expiration = storage->GetSecretExpiration(secret.GetName(), expiration_transaction);
 		if (expiration == std::chrono::system_clock::time_point()) {
 			// No expiration data
 			row.emplace_back(Value());
@@ -681,6 +687,10 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	// Construct the ducklakes creation URL
 	string create_url = endpoint_url + "/ducklakes";
+
+	// Append multi-tenant parameter if in multi-tenant mode
+	create_url = RestApiSecretStorage::AppendMultiTenantParam(create_url, context);
+
 	BOILSTREAM_LOG("CreateDucklake: create_url=" << create_url);
 
 	// Build request body using yyjson
@@ -849,12 +859,12 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 13: Hash complete");
 
 	// Check if this is the same bootstrap token from an existing valid session
-	if (storage->GetBootstrapTokenHash() == incoming_token_hash && !incoming_token_hash.empty() &&
-	    storage->IsSessionTokenValid()) {
+	if (storage->GetBootstrapTokenHash(context) == incoming_token_hash && !incoming_token_hash.empty() &&
+	    storage->IsSessionTokenValid(context)) {
 		BOILSTREAM_LOG("SetEndpoint: Bootstrap token matches existing session, skipping exchange");
 
 		// Get expiration timestamp and format it
-		auto expires_at = storage->GetTokenExpiresAt();
+		auto expires_at = storage->GetTokenExpiresAt(context);
 		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 		std::tm tm_utc;
 #ifdef _WIN32
@@ -870,7 +880,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Clear any existing session before attempting new token exchange
 	// This ensures clean state and prevents sending old access_token during bootstrap exchange
-	storage->ClearSession();
+	storage->ClearSession(context);
 
 	// Perform OPAQUE login BEFORE setting endpoint (for consistent state on failure)
 	// All crypto now handled by Rust - works on all platforms including WASM
@@ -881,16 +891,16 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
 
-		storage->PerformOpaqueLogin(bootstrap_token);
+		storage->PerformOpaqueLogin(context, bootstrap_token);
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login successful");
 
 		// Store bootstrap token hash for reuse detection
-		storage->SetBootstrapTokenHash(incoming_token_hash);
+		storage->SetBootstrapTokenHash(context, incoming_token_hash);
 		BOILSTREAM_LOG("SetEndpoint: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
 		// Rollback endpoint on failure - ensure consistent state
 		storage->SetEndpoint("");
-		storage->ClearSession();
+		storage->ClearSession(context);
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed, rolled back: " << e.what());
 
 		// Normalize network-related errors to "Token exchange failed" for consistent test behavior
@@ -935,7 +945,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	}
 
 	// Get expiration timestamp and format it
-	auto expires_at = storage->GetTokenExpiresAt();
+	auto expires_at = storage->GetTokenExpiresAt(context);
 	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 	std::tm tm_utc;
 #ifdef _WIN32
@@ -1961,12 +1971,12 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Check if this is the same bootstrap token from an existing valid session
-	if (storage->GetBootstrapTokenHash() == incoming_token_hash && !incoming_token_hash.empty() &&
-	    storage->IsSessionTokenValid()) {
+	if (storage->GetBootstrapTokenHash(context) == incoming_token_hash && !incoming_token_hash.empty() &&
+	    storage->IsSessionTokenValid(context)) {
 		BOILSTREAM_LOG("Login: Bootstrap token matches existing session, skipping exchange");
 
 		// Get expiration timestamp and format it
-		auto expires_at = storage->GetTokenExpiresAt();
+		auto expires_at = storage->GetTokenExpiresAt(context);
 		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 		std::tm tm_utc;
 #ifdef _WIN32
@@ -1981,23 +1991,23 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Clear any existing session before attempting new token exchange
-	storage->ClearSession();
+	storage->ClearSession(context);
 
 	// Perform OPAQUE login
 	try {
 		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("Login: endpoint_url=" << endpoint_url);
 
-		storage->PerformOpaqueLogin(bootstrap_token);
+		storage->PerformOpaqueLogin(context, bootstrap_token);
 		BOILSTREAM_LOG("Login: OPAQUE login successful");
 
 		// Store bootstrap token hash for reuse detection
-		storage->SetBootstrapTokenHash(incoming_token_hash);
+		storage->SetBootstrapTokenHash(context, incoming_token_hash);
 		BOILSTREAM_LOG("Login: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
 		// Rollback endpoint on failure - ensure consistent state
 		storage->SetEndpoint("");
-		storage->ClearSession();
+		storage->ClearSession(context);
 		BOILSTREAM_LOG("Login: OPAQUE login failed, rolled back: " << e.what());
 		throw IOException("OPAQUE login failed: %s", e.what());
 	}
@@ -2027,7 +2037,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Get expiration timestamp and format it
-	auto expires_at = storage->GetTokenExpiresAt();
+	auto expires_at = storage->GetTokenExpiresAt(context);
 	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 	std::tm tm_utc;
 #ifdef _WIN32
@@ -2242,7 +2252,7 @@ std::string BoilstreamExtension::Version() const {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.4.1";
+	return "0.5.0";
 #endif
 }
 

@@ -5,6 +5,44 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-12-27
+
+### Added
+
+- **Per-Connection Authentication State**: Multi-tenant support with isolated OPAQUE sessions
+  - New `BoilstreamConnectionState` class using DuckDB's `RegisteredStateManager` pattern
+  - Each DuckDB connection gets independent session credentials (access_token, session_key, etc.)
+  - Per-connection caches for secret expiration and catalog versions
+  - Thread-safe access with per-connection mutexes (no cross-connection contention)
+  - Secure memory wiping on connection destruction
+- **Multi-Tenant Query Parameter**: Automatic `?multitenant=true` for tenant-aware deployments
+  - Checks `boilstream.tenant_id` setting via `TryGetCurrentSetting()`
+  - Appends parameter to `/secrets` and `/ducklakes` endpoints when tenant_id is set
+  - Server prefixes returned names with `__BS_u{tenant_id}__` for transparent isolation
+- **Connection State Unit Tests**: Comprehensive test suite for multi-tenant isolation
+  - Tests for state creation, isolation, and cleanup
+  - Secret expiration and catalog version isolation tests
+  - Thread safety tests for concurrent snapshot access
+  - Multiple connections concurrent access validation
+  - New test executable: `boilstream_connection_state_test`
+
+### Changed
+
+- **DuckDB Compatibility**: Updated to DuckDB v1.4.3
+  - Updated `duckdb` submodule to v1.4.3
+  - Updated `extension-ci-tools` submodule to v1.4.3 branch
+- **Session State Architecture**: Moved from global singleton to per-connection state
+  - `RestApiSecretStorage` now delegates session state to `BoilstreamConnectionState`
+  - HTTP methods use connection state from `CatalogTransaction` context
+  - PRAGMAs use `EnsureConnectionState()` for explicit context access
+
+### Technical Details
+
+- **Connection state access pattern**: `context.registered_state->GetOrCreate<BoilstreamConnectionState>("boilstream_auth")`
+- **Multi-tenant URL construction**: `AppendMultiTenantParam(url, transaction)` helper methods
+- **State isolation**: Each connection has own `session_lock`, `expiration_lock`, `version_lock`
+- **Backward compatible**: Single-connection usage works unchanged
+
 ## [0.4.1] - 2025-12-25
 
 ### Added

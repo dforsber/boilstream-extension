@@ -11,6 +11,7 @@
 #include "duckdb/main/secret/secret_storage.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "boilstream_connection_state.hpp"
 #include <string>
 #include <chrono>
 
@@ -35,31 +36,35 @@ class RestApiSecretStorage : public CatalogSetSecretStorage {
 	friend class ::BoilstreamCatalogVersionTestAccess;
 
 public:
-	//! Catalog version info from server (public for test access)
-	struct CatalogVersionInfo {
-		uint64_t version;
-		string catalog_name;
-	};
+	//! Use CatalogVersionInfo from BoilstreamConnectionState
+	using CatalogVersionInfo = BoilstreamConnectionState::CatalogVersionInfo;
 
 	RestApiSecretStorage(DatabaseInstance &db, const string &api_base_url);
 
 	//! Set the endpoint URL (without token)
 	void SetEndpoint(const string &endpoint);
 
-	//! Perform OPAQUE registration with password
-	void PerformOpaqueRegistration(const string &password);
+	//! Get connection state from transaction (for secret operations)
+	//! Returns nullptr if no connection context available
+	BoilstreamConnectionState *GetConnectionState(optional_ptr<CatalogTransaction> transaction);
 
-	//! Perform OPAQUE login with password
-	void PerformOpaqueLogin(const string &password);
+	//! Get or create connection state from ClientContext (for PRAGMAs)
+	BoilstreamConnectionState &EnsureConnectionState(ClientContext &context);
 
-	//! Perform OPAQUE session resumption with stored refresh token
-	void PerformOpaqueResume();
+	//! Perform OPAQUE registration with password (uses connection state)
+	void PerformOpaqueRegistration(ClientContext &context, const string &password);
 
-	//! Clear session state (on error or logout)
-	void ClearSession();
+	//! Perform OPAQUE login with password (uses connection state)
+	void PerformOpaqueLogin(ClientContext &context, const string &password);
+
+	//! Perform OPAQUE session resumption with stored refresh token (uses connection state)
+	void PerformOpaqueResume(ClientContext &context);
+
+	//! Clear session state for connection (on error or logout)
+	void ClearSession(ClientContext &context);
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
-	void PerformOpaqueLoginCommon(const string &password, bool is_resume);
+	void PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -71,19 +76,19 @@ public:
 	void ClearConnectionMapping(idx_t connection_id);
 
 	//! Validate token format and length
-	void ValidateTokenFormat(const string &token, const string &context);
+	void ValidateTokenFormat(const string &token, const string &token_context);
 
-	//! Check if session token is valid (not expired, with 30min buffer)
-	bool IsSessionTokenValid();
+	//! Check if session token is valid for connection (not expired, with 30min buffer)
+	bool IsSessionTokenValid(ClientContext &context);
 
-	//! Get stored bootstrap token hash (for reuse detection)
-	string GetBootstrapTokenHash();
+	//! Get stored bootstrap token hash for connection (for reuse detection)
+	string GetBootstrapTokenHash(ClientContext &context);
 
-	//! Set bootstrap token hash (after successful exchange)
-	void SetBootstrapTokenHash(const string &hash);
+	//! Set bootstrap token hash for connection (after successful exchange)
+	void SetBootstrapTokenHash(ClientContext &context, const string &hash);
 
-	//! Get session token expiration timestamp
-	std::chrono::system_clock::time_point GetTokenExpiresAt();
+	//! Get session token expiration timestamp for connection
+	std::chrono::system_clock::time_point GetTokenExpiresAt(ClientContext &context);
 
 	//! Override to fetch all secrets from REST API
 	vector<SecretEntry> AllSecrets(optional_ptr<CatalogTransaction> transaction) override;
@@ -103,11 +108,19 @@ public:
 	void DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
 	                      optional_ptr<CatalogTransaction> transaction) override;
 
-	//! Make HTTP GET request to REST API (public for table functions)
-	string HttpGet(const string &url);
+	//! Make HTTP GET request to REST API (uses connection state from transaction)
+	string HttpGet(const string &url, optional_ptr<CatalogTransaction> transaction = nullptr);
 
-	//! Make HTTP POST request to REST API (public for table functions)
-	string HttpPost(const string &url, const string &body, HTTPHeaders *out_headers = nullptr);
+	//! Make HTTP POST request to REST API (uses connection state from transaction)
+	string HttpPost(const string &url, const string &body, optional_ptr<CatalogTransaction> transaction = nullptr,
+	                HTTPHeaders *out_headers = nullptr);
+
+	//! Make HTTP GET request using explicit connection state (for PRAGMAs)
+	string HttpGetWithState(const string &url, BoilstreamConnectionState &conn_state);
+
+	//! Make HTTP POST request using explicit connection state (for PRAGMAs)
+	string HttpPostWithState(const string &url, const string &body, BoilstreamConnectionState &conn_state,
+	                         HTTPHeaders *out_headers = nullptr);
 
 	//! Set session cookie for authenticated requests (used for email/password registration flow)
 	void SetSessionCookie(const string &session_id);
@@ -115,11 +128,22 @@ public:
 	//! Clear session cookie
 	void ClearSessionCookie();
 
-	//! Get expiration timestamp for a secret (for table functions)
-	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name);
+	//! Get expiration timestamp for a secret from connection state (for table functions)
+	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name,
+	                                                          optional_ptr<CatalogTransaction> transaction);
 
 	//! Get the endpoint URL (for constructing API URLs in table functions)
 	string GetEndpointUrl();
+
+	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
+	static bool IsMultiTenantMode(ClientContext &context);
+
+	//! Append ?multitenant=true to URL if in multi-tenant mode
+	//! Uses transaction to access ClientContext for checking the tenant_id setting
+	string AppendMultiTenantParam(const string &url, optional_ptr<CatalogTransaction> transaction);
+
+	//! Append ?multitenant=true to URL if in multi-tenant mode (using explicit context)
+	static string AppendMultiTenantParam(const string &url, ClientContext &context);
 
 	//! Store registration state (base_url, session_token, and totp_uri) for MFA verification
 	void StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri);
@@ -154,23 +178,15 @@ private:
 		std::chrono::system_clock::time_point expires_at;
 	};
 
-	//! Session state snapshot for thread-safe access
-	struct SessionSnapshot {
-		string access_token;
-		vector<uint8_t> session_key;
-		string region;
-		uint64_t sequence;
-		bool has_session_key;
-	};
-
-	//! Get thread-safe snapshot of current session state
-	SessionSnapshot GetSessionSnapshot();
+	//! Use SessionSnapshot from BoilstreamConnectionState
+	using SessionSnapshot = BoilstreamConnectionState::SessionSnapshot;
 
 	//! Extract all x-boilstream-* headers from HTTP response
 	case_insensitive_map_t<string> ExtractBoilstreamHeaders(const HTTPHeaders &headers);
 
-	//! Build authenticated request headers with signature
-	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body);
+	//! Build authenticated request headers with signature (uses connection state)
+	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
+	                                      BoilstreamConnectionState &conn_state);
 
 	//! Verify authenticated response signature and timestamp
 	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
@@ -224,44 +240,48 @@ private:
 	//! Parse ISO 8601 UTC timestamp to system_clock time_point
 	std::chrono::system_clock::time_point ParseExpiresAt(const string &expires_at_str);
 
-	//! Check if a secret has expired
-	bool IsExpired(const string &secret_name);
+	//! Check if a secret has expired (uses connection state)
+	bool IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state);
 
-	//! Store expiration timestamp for a secret
-	void StoreExpiration(const string &secret_name, const string &expires_at_str);
+	//! Store expiration timestamp for a secret (uses connection state)
+	void StoreExpiration(const string &secret_name, const string &expires_at_str, BoilstreamConnectionState &conn_state);
 
-	//! Clear expiration data for a secret
-	void ClearExpiration(const string &secret_name);
+	//! Clear expiration data for a secret (uses connection state)
+	void ClearExpiration(const string &secret_name, BoilstreamConnectionState &conn_state);
 
 	//! Add or update secret in local catalog
 	void AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret, optional_ptr<CatalogTransaction> transaction);
 
-	//! Make HTTP DELETE request to REST API
-	void HttpDelete(const string &url);
+	//! Make HTTP DELETE request to REST API (uses connection state)
+	void HttpDelete(const string &url, BoilstreamConnectionState &conn_state);
 
 	//! Get the file path for stored refresh token
 	string GetRefreshTokenPath();
 
-	//! Save refresh token to file on disk (protected by file permissions)
-	void SaveRefreshToken(bool resumption_enabled);
+	//! Save refresh token to file on disk (uses connection state)
+	void SaveRefreshToken(BoilstreamConnectionState &conn_state, bool resumption_enabled);
 
-	//! Load refresh token from encrypted file on disk
+	//! Load refresh token from encrypted file on disk into connection state
 	//! Returns true if loaded successfully, false if not found or expired
-	bool LoadRefreshToken();
+	bool LoadRefreshToken(BoilstreamConnectionState &conn_state);
 
 	//! Delete refresh token file from disk
 	void DeleteRefreshToken();
 
-	//! Check catalog versions and refresh credentials for changed catalogs
+	//! Check catalog versions and refresh credentials for changed catalogs (uses connection state)
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
-	void CheckCatalogVersions();
+	void CheckCatalogVersions(BoilstreamConnectionState &conn_state);
 
-	//! Fetch catalog versions from server
+	//! Fetch catalog versions from server (uses connection state)
 	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
-	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions();
+	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state);
 
-	//! Force refresh credentials for a specific catalog by name
-	void RefreshCatalogCredentials(const string &catalog_name);
+	//! Force refresh credentials for a specific catalog by name (uses connection state)
+	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);
+
+	//========================================================================
+	// Shared State (across all connections)
+	//========================================================================
 
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
@@ -269,58 +289,13 @@ private:
 	//! Lock for thread-safe endpoint updates
 	mutex endpoint_lock;
 
-	//! Access token (obtained via OPAQUE login, in-memory only)
-	string access_token;
-
-	//! OPAQUE session key (32 bytes, OPAQUE-derived with SHA-256, in-memory only)
-	vector<uint8_t> session_key;
-
-	//! OPAQUE refresh token (32 bytes, for session resumption, will be persisted)
-	vector<uint8_t> refresh_token;
-
-	//! Lock-step sequence counter (starts at 0, increments with each request)
-	uint64_t client_sequence;
-
-	//! Region identifier (e.g., "us-east-1", from server login response)
-	string region;
-
-	//! Session token expiration timestamp
-	std::chrono::system_clock::time_point token_expires_at;
-
-	//! Lock for session token state
-	mutex session_lock;
-
-	//! Flag indicating token exchange in progress
-	bool is_exchanging;
-
-	//! Hash of successful bootstrap token (to detect reuse attempts)
-	string bootstrap_token_hash;
-
-	//! Connection ID to user ID mapping
+	//! Connection ID to user ID mapping (for user context extraction)
 	case_insensitive_map_t<string> connection_user_map;
 
 	//! Lock for connection user map
 	mutex connection_lock;
 
-	//! Secret expiration timestamps (name -> expiration time)
-	case_insensitive_map_t<std::chrono::system_clock::time_point> secret_expiration;
-
-	//! Lock for expiration map
-	mutex expiration_lock;
-
-	//! Catalog version tracking (catalog_id UUID -> version info)
-	case_insensitive_map_t<CatalogVersionInfo> catalog_versions;
-
-	//! Lock for catalog versions map
-	mutex version_lock;
-
-	//! Last time catalog versions were checked
-	std::chrono::system_clock::time_point last_version_check;
-
-	//! Version check interval in seconds (default 60)
-	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
-
-	//! Session cookie for email/password authentication flow
+	//! Session cookie for email/password authentication flow (shared for registration)
 	string session_cookie;
 
 	//! Lock for session cookie
@@ -333,6 +308,16 @@ private:
 
 	//! Lock for registration state
 	mutex registration_lock;
+
+	//! Version check interval in seconds (default 60)
+	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
+
+	//========================================================================
+	// NOTE: Per-connection state has been moved to BoilstreamConnectionState
+	// This includes: access_token, session_key, refresh_token, client_sequence,
+	// region, token_expires_at, is_exchanging, bootstrap_token_hash,
+	// secret_expiration, catalog_versions, last_version_check
+	//========================================================================
 };
 
 } // namespace duckdb
