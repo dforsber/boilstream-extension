@@ -162,10 +162,13 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
 
+	// Get connection state from context for authenticated request
+	auto &conn_state = storage->EnsureConnectionState(context);
+
 	// Make HTTP GET request
 	string response;
 	try {
-		response = storage->HttpGet(ducklakes_url);
+		response = storage->HttpGetWithState(ducklakes_url, conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("BoilstreamDucklakesInit: Failed to fetch ducklakes: " << e.what());
 		throw IOException("Failed to fetch ducklakes from boilstream server: %s", e.what());
@@ -527,10 +530,13 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
 
+	// Get connection state from context for authenticated request
+	auto &conn_state = storage->EnsureConnectionState(context);
+
 	// Make HTTP GET request
 	string response;
 	try {
-		response = storage->HttpGet(buckets_url);
+		response = storage->HttpGetWithState(buckets_url, conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("BoilstreamBucketsInit: Failed to fetch buckets: " << e.what());
 		throw IOException("Failed to fetch buckets from boilstream server: %s", e.what());

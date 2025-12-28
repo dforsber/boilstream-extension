@@ -2636,8 +2636,12 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 		}
 	}
 
-	// Persist to REST API
-	WriteSecret(*secret, on_conflict);
+	// Persist to REST API (need connection state for authentication)
+	auto *conn_state = GetConnectionState(transaction);
+	if (!conn_state) {
+		throw InvalidInputException("No active boilstream session. Use PRAGMA boilstream_bootstrap_session first.");
+	}
+	WriteSecretWithState(*secret, on_conflict, *conn_state);
 
 	// Serialize the secret so we can deserialize it for memory storage
 	string secret_json = SerializeSecret(*secret);
@@ -2671,7 +2675,16 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 }
 
 void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) {
-	BOILSTREAM_LOG("WriteSecret: name=" << secret.GetName());
+	// This method is called by the base class but we need connection state for authentication.
+	// It should not be called directly - use StoreSecret instead which provides proper context.
+	BOILSTREAM_LOG("WriteSecret: ERROR - called without connection state");
+	throw InvalidInputException(
+	    "WriteSecret called without connection state. Use StoreSecret with transaction instead.");
+}
+
+void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
+                                                BoilstreamConnectionState &conn_state) {
+	BOILSTREAM_LOG("WriteSecretWithState: name=" << secret.GetName());
 
 	// Check if endpoint is configured
 	string url;
@@ -2680,18 +2693,18 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 		url = endpoint_url;
 	}
 
-	BOILSTREAM_LOG("WriteSecret: endpoint_url=" << url);
+	BOILSTREAM_LOG("WriteSecretWithState: endpoint_url=" << url);
 
 	if (url.empty()) {
-		BOILSTREAM_LOG("WriteSecret: ERROR - endpoint is empty!");
+		BOILSTREAM_LOG("WriteSecretWithState: ERROR - endpoint is empty!");
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
 		                            "boilstream_bootstrap_session('https://host/path/:TOKEN') to set it.");
 	}
 
 	// Serialize secret
-	BOILSTREAM_LOG("WriteSecret: serializing secret...");
+	BOILSTREAM_LOG("WriteSecretWithState: serializing secret...");
 	string secret_json = SerializeSecret(secret);
-	BOILSTREAM_LOG("WriteSecret: secret serialized, json_len=" << secret_json.size());
+	BOILSTREAM_LOG("WriteSecretWithState: secret serialized, json_len=" << secret_json.size());
 
 	// Prepare request body using yyjson (safe from injection)
 	auto doc = yyjson_mut_doc_new(nullptr);
@@ -2713,11 +2726,10 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
-	BOILSTREAM_LOG("WriteSecret: about to POST, body_len=" << body.size());
-	// Make HTTP POST request to the endpoint
-	// Token in Authorization header identifies the user
-	HttpPost(url, body);
-	BOILSTREAM_LOG("WriteSecret: POST successful");
+	BOILSTREAM_LOG("WriteSecretWithState: about to POST, body_len=" << body.size());
+	// Make HTTP POST request with connection state for authentication
+	HttpPostWithState(url, body, conn_state);
+	BOILSTREAM_LOG("WriteSecretWithState: POST successful");
 }
 
 SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string &type,
@@ -2780,10 +2792,15 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
-	// Make HTTP POST request
+	// Make HTTP POST request (need connection state for authentication)
+	if (!conn_state) {
+		BOILSTREAM_LOG("LookupSecret: No connection state, returning local match or empty");
+		return local_match;
+	}
+
 	string response;
 	try {
-		response = HttpPost(url, body);
+		response = HttpPostWithState(url, body, *conn_state);
 	} catch (...) {
 		// If request fails, return no match
 		return SecretMatch();
@@ -2881,10 +2898,15 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	free(body_str);
 	yyjson_mut_doc_free(doc);
 
-	// Make HTTP POST request
+	// Make HTTP POST request (need connection state for authentication)
+	if (!conn_state) {
+		BOILSTREAM_LOG("GetSecretByName: No connection state, returning local entry or null");
+		return local_entry;
+	}
+
 	string response;
 	try {
-		response = HttpPost(url, body);
+		response = HttpPostWithState(url, body, *conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("GetSecretByName: HttpPost exception: " << e.what());
 		return nullptr;
@@ -2990,9 +3012,15 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 	BOILSTREAM_LOG("AllSecrets: final url=" << url);
 
 	// Make HTTP GET request to fetch all secrets from REST API
+	// Need connection state for authenticated request
+	if (!conn_state) {
+		BOILSTREAM_LOG("AllSecrets: No connection state, returning local catalog");
+		return CatalogSetSecretStorage::AllSecrets(transaction);
+	}
+
 	string response;
 	try {
-		response = HttpGet(url);
+		response = HttpGetWithState(url, *conn_state);
 	} catch (...) {
 		// On error, return what's in local catalog
 		return CatalogSetSecretStorage::AllSecrets(transaction);

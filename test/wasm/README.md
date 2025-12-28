@@ -162,7 +162,7 @@ Once the extension loads successfully:
 
 1. Test the PRAGMA command:
    ```javascript
-   await conn.query("PRAGMA duckdb_secrets_boilstream_endpoint('https://localhost/secrets:TOKEN')");
+   await conn.query("PRAGMA boilstream_bootstrap_session('https://localhost/secrets/:TOKEN')");
    ```
 
 2. Test secret retrieval functions

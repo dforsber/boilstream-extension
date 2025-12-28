@@ -163,6 +163,10 @@ protected:
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
 
 private:
+	//! Write secret with explicit connection state (called from StoreSecret)
+	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
+	                          BoilstreamConnectionState &conn_state);
+
 	//! Request signing result containing all required headers
 	struct SigningResult {
 		string signature;        // Base64-encoded HMAC signature
