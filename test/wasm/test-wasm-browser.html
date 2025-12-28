@@ -90,7 +90,7 @@
   <div class="log-container" id="logContainer"></div>
 
   <script type="module">
-    import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.31.1-dev1.0/+esm';
+    import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
 
     let db = null;
     let conn = null;
@@ -228,13 +228,13 @@
         try {
           // Full URL to WASM extension file served by localhost
           // Use the same WASM format as the DuckDB bundle
-          // Note: duckdb-wasm@1.31.1-dev1.0 is based on DuckDB v1.4.1
-          const duckdbVersion = 'v1.4.1';
+          // Note: duckdb-wasm@1.32.0 is based on DuckDB v1.4.3
+          const duckdbVersion = 'v1.4.3';
           const extensionUrl = `http://localhost:8080/build/${wasmFormat}/repository/${duckdbVersion}/${wasmFormat}/boilstream.duckdb_extension.wasm`;
 
           log(`  Extension URL: ${extensionUrl}`, 'info');
           log(`  Using format: ${wasmFormat} (matches DuckDB bundle)`, 'info');
-          log(`  DuckDB version: ${duckdbVersion} (using duckdb-wasm@next with v1.4.1)`, 'info');
+          log(`  DuckDB version: ${duckdbVersion} (using duckdb-wasm@1.32.0)`, 'info');
 
           // Try to fetch the extension to verify it exists
           const testFetch = await fetch(extensionUrl);
@@ -395,7 +395,7 @@
           log('', 'info');
           log('To fix this:', 'info');
           log('1. Ensure WASM extension is built: make wasm_threads', 'info');
-          log('2. Verify file exists: ls build/wasm_threads/repository/v1.4.1/wasm_threads/boilstream.duckdb_extension.wasm', 'info');
+          log('2. Verify file exists: ls build/wasm_threads/repository/v1.4.3/wasm_threads/boilstream.duckdb_extension.wasm', 'info');
           log('3. Ensure server is serving /build/ directory correctly', 'info');
           log('', 'info');
           log('✅ DuckDB WASM is working (extension loading needs setup)', 'success');

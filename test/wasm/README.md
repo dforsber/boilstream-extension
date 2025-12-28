@@ -61,7 +61,7 @@ For the WASM extension to load, it must be in the DuckDB extension repository fo
 
 ```
 build/wasm_threads/repository/
-└── v1.4.1/
+└── v1.4.3/
     └── wasm_threads/
         ├── boilstream.duckdb_extension.wasm
         └── boilstream.duckdb_extension.info  (optional metadata)
@@ -84,7 +84,7 @@ npm test
 
 This uses the native `duckdb` package and loads:
 ```
-build/release/repository/v1.4.1/osx_arm64/boilstream.duckdb_extension
+build/release/repository/v1.4.3/osx_arm64/boilstream.duckdb_extension
 ```
 
 ## Files
@@ -112,7 +112,7 @@ build/release/repository/v1.4.1/osx_arm64/boilstream.duckdb_extension
 │                     ↓                               │
 │  ┌───────────────────────────────────────────────┐ │
 │  │  Fetch from repository:                       │ │
-│  │  /build/wasm_threads/repository/v1.4.1/       │ │
+│  │  /build/wasm_threads/repository/v1.4.3/       │ │
 │  │         wasm_threads/boilstream.wasm          │ │
 │  └───────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────┘
@@ -136,7 +136,7 @@ The test needs a web server because:
 1. Build the WASM extension: `make wasm_threads`
 2. Verify the file exists:
    ```bash
-   ls build/wasm_threads/repository/v1.4.1/wasm_threads/boilstream.duckdb_extension.wasm
+   ls build/wasm_threads/repository/v1.4.3/wasm_threads/boilstream.duckdb_extension.wasm
    ```
 3. Restart the server: `npm run serve`
 
@@ -171,7 +171,7 @@ Once the extension loads successfully:
 
 ## Package Versions
 
-- `@duckdb/duckdb-wasm`: v1.31.0 (browser WASM, based on DuckDB v1.4.0)
-- `duckdb`: v1.4.1 (native Node.js, for comparison testing)
+- `@duckdb/duckdb-wasm`: v1.32.0 (browser WASM)
+- `duckdb`: v1.4.3 (native Node.js, for comparison testing)
 
 Both are compatible with DuckDB v1.4.x extensions.

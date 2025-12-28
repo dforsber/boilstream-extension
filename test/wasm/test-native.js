@@ -39,7 +39,7 @@ async function testExtension() {
   log('  For WASM extension testing, see test-wasm-browser.html\n', colors.yellow);
 
   // Path to the native extension (not WASM)
-  const extensionPath = path.resolve(__dirname, '../../build/release/repository/v1.4.1/osx_arm64/boilstream.duckdb_extension');
+  const extensionPath = path.resolve(__dirname, '../../build/release/repository/v1.4.3/osx_arm64/boilstream.duckdb_extension');
 
   return new Promise((resolve, reject) => {
     try {
@@ -131,7 +131,6 @@ async function testExtension() {
             });
           });
         });
-      });
 
     } catch (error) {
       log(`\n✗ Test failed: ${error.message}`, colors.red);
