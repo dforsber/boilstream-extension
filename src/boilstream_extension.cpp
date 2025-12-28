@@ -49,6 +49,15 @@ namespace duckdb {
 static RestApiSecretStorage *global_rest_storage = nullptr;
 static mutex global_storage_lock;
 
+//! Helper to get the extension version string from a single source
+static std::string GetBoilstreamVersion() {
+#ifdef EXT_VERSION_BOILSTREAM
+	return EXT_VERSION_BOILSTREAM;
+#else
+	return "0.5.0";
+#endif
+}
+
 // Helper: Clear query logs to remove sensitive data (passwords, TOTP secrets, backup codes)
 // This only clears DuckDB's query logs - shell history (~/.duckdb_history) must be cleared manually
 static void ClearQueryLogs(ClientContext &context) {
@@ -2074,8 +2083,14 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 static string Help(ClientContext &context, const FunctionParameters &params) {
 	string result_sql = "SELECT unnest([\n";
 	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
+	result_sql += "  'Boilstream Extension v" + GetBoilstreamVersion() + "',\n";
+	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
+	result_sql += "  '',\n";
 	result_sql += "  'SECURITY WARNING: Passwords in CLI commands are saved to shell history!',\n";
 	result_sql += "  'For production: Use Web Auth GUI or clear history: rm ~/.duckdb_history',\n";
+	result_sql += "  '',\n";
+	result_sql += "  'NOTE: Each DuckDB connection has its own independent session state.',\n";
+	result_sql += "  'Sessions expire after ~24h. Run SELECT * FROM duckdb_secrets() to refresh.',\n";
 	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_register_user(url_with_email, password)',\n";
@@ -2092,13 +2107,14 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_login(url_with_email, password, mfa_code)',\n";
 	result_sql += "  '  - Login with email/password/MFA. Establishes OPAQUE session.',\n";
-	result_sql += "  '  - NOTE: Automatically calls boilstream_bootstrap_session()',\n";
+	result_sql += "  '  - Auto-fetches all secrets and ATTACHes all ducklakes.',\n";
 	result_sql += "  '  - SECURE ALTERNATIVE: Use Web Auth GUI for login instead.',\n";
 	result_sql +=
 	    "  '  PRAGMA boilstream_login(''https://localhost/email@example.com'', ''password123'', ''123456'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_bootstrap_session(url_with_token)',\n";
 	result_sql += "  '  - Login with bootstrap token. Establishes OPAQUE session.',\n";
+	result_sql += "  '  - Auto-fetches all secrets and ATTACHes all ducklakes.',\n";
 	result_sql += "  '  PRAGMA boilstream_bootstrap_session(''https://localhost/secrets/:token'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_create_ducklake(name, [description], [s3_bucket_name])',\n";
@@ -2115,7 +2131,8 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '  - can_create_ducklake: true if you can create ducklakes in this bucket.',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'SELECT * FROM boilstream_secrets()',\n";
-	result_sql += "  '  - List all secrets. Requires active session.'\n";
+	result_sql += "  '  - List all secrets. Requires active session.',\n";
+	result_sql += "  '  - Also triggers credential refresh if session is still valid.'\n";
 	result_sql += "]) as help;";
 
 	return result_sql;
@@ -2249,11 +2266,7 @@ std::string BoilstreamExtension::Name() {
 }
 
 std::string BoilstreamExtension::Version() const {
-#ifdef EXT_VERSION_BOILSTREAM
-	return EXT_VERSION_BOILSTREAM;
-#else
-	return "0.5.0";
-#endif
+	return GetBoilstreamVersion();
 }
 
 } // namespace duckdb
