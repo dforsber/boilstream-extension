@@ -16,6 +16,7 @@
 #include <chrono>
 #include <vector>
 #include <string>
+#include <atomic>
 
 namespace duckdb {
 
@@ -41,7 +42,8 @@ public:
 
 	BoilstreamConnectionState()
 	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
-	      last_version_check(std::chrono::system_clock::time_point::min()) {
+	      last_version_check(std::chrono::system_clock::time_point::min()),
+	      last_all_secrets_fetch(std::chrono::steady_clock::time_point::min()) {
 	}
 
 	//! Prevent copying (contains mutex)
@@ -88,6 +90,43 @@ public:
 
 	//! Last time catalog versions were checked
 	std::chrono::system_clock::time_point last_version_check;
+
+	//! Last time AllSecrets was fetched from server (for caching)
+	std::chrono::steady_clock::time_point last_all_secrets_fetch;
+
+	//! AllSecrets cache TTL in seconds
+	static constexpr int ALL_SECRETS_CACHE_TTL_SECONDS = 10;
+
+	//! Recursion guard flag - prevents re-entrant secret lookups that cause stack overflow
+	//! Uses atomic for thread safety (especially important in WASM async context)
+	std::atomic<bool> in_secret_lookup {false};
+
+	//! RAII guard for secret lookup recursion prevention
+	class SecretLookupGuard {
+	public:
+		SecretLookupGuard(BoilstreamConnectionState &state) : state_(state), acquired_(false) {
+			// Try to acquire the guard - if already held, we're in recursion
+			bool expected = false;
+			acquired_ = state_.in_secret_lookup.compare_exchange_strong(expected, true);
+		}
+		~SecretLookupGuard() {
+			if (acquired_) {
+				state_.in_secret_lookup.store(false);
+			}
+		}
+		//! Returns true if we successfully acquired the guard (not in recursion)
+		bool Acquired() const {
+			return acquired_;
+		}
+
+		// Prevent copying
+		SecretLookupGuard(const SecretLookupGuard &) = delete;
+		SecretLookupGuard &operator=(const SecretLookupGuard &) = delete;
+
+	private:
+		BoilstreamConnectionState &state_;
+		bool acquired_;
+	};
 
 	//========================================================================
 	// Thread Safety (per-connection locks - no cross-connection contention)

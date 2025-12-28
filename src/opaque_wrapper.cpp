@@ -12,6 +12,9 @@
 
 namespace duckdb {
 
+//! Maximum OPAQUE protocol message size (64KB) - protects against malicious servers
+static constexpr size_t MAX_OPAQUE_MESSAGE_SIZE = 64 * 1024;
+
 RegistrationStartResult OpaqueClientWrapper::RegistrationStart(const string &password) {
 	RegistrationState *state = nullptr;
 
@@ -52,6 +55,13 @@ RegistrationFinishResult OpaqueClientWrapper::RegistrationFinish(RegistrationSta
                                                                  const string &registration_response_base64) {
 	if (state == nullptr) {
 		throw InvalidInputException("OPAQUE registration finish: NULL state");
+	}
+
+	// Security: Validate message size before decoding
+	if (registration_response_base64.size() > MAX_OPAQUE_MESSAGE_SIZE) {
+		throw IOException("OPAQUE registration finish: Response too large (" +
+		                  std::to_string(registration_response_base64.size()) + " bytes, max " +
+		                  std::to_string(MAX_OPAQUE_MESSAGE_SIZE) + ")");
 	}
 
 	// Decode base64 registration response
@@ -136,6 +146,13 @@ LoginStartResult OpaqueClientWrapper::LoginStart(const string &password) {
 LoginFinishResult OpaqueClientWrapper::LoginFinish(LoginState *state, const string &credential_response_base64) {
 	if (state == nullptr) {
 		throw InvalidInputException("OPAQUE login finish: NULL state");
+	}
+
+	// Security: Validate message size before decoding
+	if (credential_response_base64.size() > MAX_OPAQUE_MESSAGE_SIZE) {
+		throw IOException("OPAQUE login finish: Response too large (" +
+		                  std::to_string(credential_response_base64.size()) + " bytes, max " +
+		                  std::to_string(MAX_OPAQUE_MESSAGE_SIZE) + ")");
 	}
 
 	// Decode base64 credential response

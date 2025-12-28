@@ -153,7 +153,7 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # Enable debug logging conditionally (set -DBOILSTREAM_DEBUG=ON to enable)
 # For WASM, always enable for easier browser debugging
-if(IS_WASM_BUILD OR BOILSTREAM_DEBUG)
+if(BOILSTREAM_DEBUG)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE BOILSTREAM_DEBUG)
     if(IS_WASM_BUILD)

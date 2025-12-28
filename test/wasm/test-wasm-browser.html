@@ -206,6 +206,54 @@
           log(`  Note: Could not verify setting: ${e.message}`, 'warning');
         }
 
+        // Step 4.6: Set custom extension repository FIRST for patched ducklake
+        log('', 'info');
+        log('ℹ Step 4.6: Setting custom extension repository for patched ducklake...', 'info');
+        const localRepoUrl = `http://localhost:8080/build/${wasmFormat}/repository`;
+        try {
+          await conn.query(`SET custom_extension_repository = '${localRepoUrl}'`);
+          log(`✓ Custom extension repository set to: ${localRepoUrl}`, 'success');
+        } catch (repoErr) {
+          log(`⚠️  Could not set custom extension repository: ${repoErr.message}`, 'warning');
+        }
+
+        // Step 4.7: Load httpfs from official repo (no local patch needed)
+        log('', 'info');
+        log('ℹ Step 4.7: Loading httpfs from official DuckDB repo...', 'info');
+        try {
+          // Temporarily use official repo for httpfs
+          await conn.query("INSTALL httpfs FROM core");
+          await conn.query("LOAD httpfs");
+          log('✓ httpfs extension installed and loaded', 'success');
+        } catch (httpfsErr) {
+          log('⚠️  httpfs install failed: ' + httpfsErr.message, 'warning');
+        }
+
+        // Step 4.8: Load ducklake from LOCAL repo (patched to fix stack overflow)
+        log('', 'info');
+        log('ℹ Step 4.8: Loading PATCHED ducklake from local repo...', 'info');
+        try {
+          const duckdbVersion = 'v1.4.3';
+          const ducklakeUrl = `http://localhost:8080/build/${wasmFormat}/repository/${duckdbVersion}/${wasmFormat}/ducklake.duckdb_extension.wasm`;
+          log(`  Loading from: ${ducklakeUrl}`, 'info');
+          await conn.query(`INSTALL '${ducklakeUrl}'`);
+          await conn.query(`LOAD '${ducklakeUrl}'`);
+          log('✓ PATCHED ducklake extension installed and loaded from local repo', 'success');
+        } catch (ducklakeErr) {
+          log('⚠️  ducklake install failed: ' + ducklakeErr.message, 'warning');
+        }
+
+        // Force S3 secret type registration by creating/dropping a dummy secret
+        // This ensures the S3 type is available for boilstream's memory storage caching
+        log('ℹ Step 4.7: Registering S3 secret type...', 'info');
+        try {
+          await conn.query("CREATE SECRET __boilstream_s3_type_init (TYPE s3, KEY_ID 'x', SECRET 'x', REGION 'x')");
+          await conn.query("DROP SECRET __boilstream_s3_type_init");
+          log('✓ S3 secret type registered', 'success');
+        } catch (s3TypeErr) {
+          log('⚠️  S3 type registration: ' + s3TypeErr.message, 'warning');
+        }
+
         // Step 5: Test basic query
         log('', 'info');
         log('ℹ Step 5: Running basic query (SELECT 42)...', 'info');
@@ -220,7 +268,7 @@
           throw new Error('Unexpected result');
         }
 
-        // Step 6: Load boilstream extension
+        // Step 6: Load boilstream extension (custom repo already set at Step 4.6)
         log('', 'info');
         log('ℹ Step 6: Loading boilstream extension...', 'info');
         log('  Attempting to load from localhost web server', 'info');
@@ -266,7 +314,7 @@
             log('', 'info');
             log('ℹ Step 7b: Testing PRAGMA boilstream_help...', 'info');
             try {
-              const helpResult = await conn.query("PRAGMA boilstream_help()");
+              const helpResult = await conn.query("PRAGMA boilstream_help");
               const helpRows = helpResult.toArray();
               log('✓ boilstream_help PRAGMA works', 'success');
               log(`  Returned ${helpRows.length} help lines`, 'info');
@@ -324,6 +372,22 @@
               }
             }
 
+            // Step 7e: Check local DuckDB secrets BEFORE authentication
+            log('', 'info');
+            log('ℹ Step 7e: Checking local DuckDB secrets cache (before auth)...', 'info');
+            try {
+              const preAuthSecretsResult = await conn.query("SELECT name, type, scope FROM duckdb_secrets()");
+              const preAuthSecretsRows = preAuthSecretsResult.toArray();
+              log(`Found ${preAuthSecretsRows.length} secret(s) in local cache before auth`, 'info');
+              if (preAuthSecretsRows.length > 0) {
+                preAuthSecretsRows.forEach((secret, index) => {
+                  log(`  Secret #${index + 1}: name=${secret.name}, type=${secret.type}, scope=${secret.scope}`, 'info');
+                });
+              }
+            } catch (preAuthSecretsErr) {
+              log('⚠️  Could not check pre-auth secrets: ' + preAuthSecretsErr.message, 'warning');
+            }
+
             // Test if PRAGMA function is registered
             log('', 'info');
             log('ℹ Step 8: Testing authentication flow...', 'info');
@@ -379,6 +443,21 @@
                 log('✅ PRAGMA executed successfully!', 'success');
                 log('Result:', 'success');
                 log(rows, 'data');
+
+                // Step 8.3: Check secrets loaded after bootstrap
+                log('', 'info');
+                log('ℹ Step 8.3: Checking secrets loaded after bootstrap...', 'info');
+                try {
+                  const postBootstrapSecrets = await conn.query("SELECT name, type, scope FROM duckdb_secrets()");
+                  const postBootstrapRows = postBootstrapSecrets.toArray();
+                  log(`Found ${postBootstrapRows.length} secret(s) after bootstrap:`, 'info');
+                  postBootstrapRows.forEach((secret, index) => {
+                    log(`  Secret #${index + 1}: name=${secret.name}, type=${secret.type}`, 'info');
+                    log(`    scope: ${secret.scope}`, 'info');
+                  });
+                } catch (secretsErr) {
+                  log('⚠️  Could not check post-bootstrap secrets: ' + secretsErr.message, 'warning');
+                }
 
                 // Step 9: List secrets from boilstream server
                 log('', 'info');
@@ -449,106 +528,115 @@
                       log(ducklake, 'data');
                     });
                   } else {
-                    log('  No ducklakes found - will try to create one', 'warning');
+                    log('  No ducklakes found', 'warning');
                   }
 
-                  // Step 10b: Try to create a test ducklake (demonstrates PRAGMA boilstream_create_ducklake)
+                  // Step 11: Manually ATTACH the ducklake (WASM skips auto-attach to avoid stack overflow)
+                  // We specifically attach duckie_s3snap which is the S3-backed DuckDB catalog variant
                   log('', 'info');
-                  log('ℹ Step 10b: Testing PRAGMA boilstream_create_ducklake...', 'info');
-                  const testDucklakeName = `wasm_test_lake_${Date.now()}`;
+                  log(`ℹ Step 11: Manually ATTACHing ducklake duckie_s3snap (READ_ONLY)...`, 'info');
+                  log(`  (WASM skips auto-attach to avoid JS↔WASM stack overflow)`, 'info');
+                  const databaseName = 'duckie_s3snap';
                   try {
-                    const createResult = await conn.query(`PRAGMA boilstream_create_ducklake('${testDucklakeName}', 'WASM integration test ducklake')`);
-                    const createRows = createResult.toArray();
-                    log(`✓ Created test ducklake "${testDucklakeName}"`, 'success');
-                    log('Result:', 'success');
-                    log(createRows, 'data');
+                    // Manually ATTACH duckie_s3snap with READ_ONLY flag
+                    const attachSQL = `ATTACH 'ducklake:duckie_s3snap' AS duckie_s3snap (READ_ONLY)`;
+                    log(`  Running: ${attachSQL}`, 'info');
+                    await conn.query(attachSQL);
+                    log(`✓ Ducklake "${databaseName}" attached successfully!`, 'success');
 
-                    // Refresh ducklakes list
-                    const refreshResult = await conn.query("SELECT * FROM boilstream_ducklakes()");
-                    ducklakesRows = refreshResult.toArray();
-                    log(`  Ducklakes list refreshed: now ${ducklakesRows.length} ducklake(s)`, 'info');
-                  } catch (createErr) {
-                    if (createErr.message.includes('already exists')) {
-                      log(`⚠️  Ducklake "${testDucklakeName}" already exists`, 'warning');
-                    } else if (createErr.message.includes('permission') || createErr.message.includes('unauthorized')) {
-                      log('⚠️  No permission to create ducklakes (this is expected for some accounts)', 'warning');
+                    // Verify it's attached
+                    const attachedResult = await conn.query(`SELECT * FROM duckdb_databases() WHERE database_name = '${databaseName}'`);
+                    const attachedRows = attachedResult.toArray();
+
+                    if (attachedRows.length > 0) {
+                      log(`✓ Ducklake "${databaseName}" confirmed in duckdb_databases()`, 'success');
+                      log(attachedRows, 'data');
                     } else {
-                      log(`⚠️  Could not create test ducklake: ${createErr.message}`, 'warning');
+                      log(`⚠️ Ducklake "${databaseName}" not found in duckdb_databases() after ATTACH`, 'warning');
+                      // Show all databases for debugging
+                      const allDbs = await conn.query("SELECT * FROM duckdb_databases()");
+                      log('  Available databases:', 'info');
+                      log(allDbs.toArray(), 'data');
                     }
-                    log('  Note: boilstream_create_ducklake requires appropriate server permissions', 'info');
-                  }
 
-                  // Step 11: Try to attach the first ducklake
-                  if (ducklakesRows.length > 0) {
-                    const firstDucklake = ducklakesRows[0];
-                    const catalogName = firstDucklake.catalog_name;
-
+                    // Step 12: USE the ducklake
                     log('', 'info');
-                    log(`ℹ Step 11: Attempting to ATTACH ducklake "${catalogName}"...`, 'info');
+                    log(`ℹ Step 12: Switching to ducklake "${databaseName}"...`, 'info');
+                    await conn.query(`USE ${databaseName}`);
+                    log(`✓ Now using ducklake "${databaseName}"`, 'success');
+
+                    // Step 13: List tables in ducklake (read-only - WASM clients can only read)
+                    log('', 'info');
+                    log('ℹ Step 13: Listing tables in ducklake (WASM is read-only)...', 'info');
                     try {
-                      // First check if already attached
-                      const attachedResult = await conn.query(`SELECT * FROM duckdb_databases() WHERE database_name = '${catalogName}'`);
-                      const attachedRows = attachedResult.toArray();
-
-                      if (attachedRows.length > 0) {
-                        log(`✓ Ducklake "${catalogName}" is already attached`, 'success');
-                      } else {
-                        // Try to attach using ducklake extension
-                        await conn.query(`ATTACH '' AS ${catalogName} (TYPE ducklake)`);
-                        log(`✓ Ducklake "${catalogName}" attached successfully`, 'success');
-                      }
-
-                      // Step 12: USE the ducklake
-                      log('', 'info');
-                      log(`ℹ Step 12: Switching to ducklake "${catalogName}"...`, 'info');
-                      await conn.query(`USE ${catalogName}`);
-                      log(`✓ Now using ducklake "${catalogName}"`, 'success');
-
-                      // Step 13: Create a test table
-                      log('', 'info');
-                      log('ℹ Step 13: Creating test table...', 'info');
-                      const testTableName = `wasm_test_${Date.now()}`;
-                      try {
-                        await conn.query(`CREATE TABLE ${testTableName} (id INTEGER, name VARCHAR, created_at TIMESTAMP)`);
-                        log(`✓ Created table "${testTableName}"`, 'success');
-
-                        // Step 14: Insert test data
-                        log('', 'info');
-                        log('ℹ Step 14: Inserting test data...', 'info');
-                        await conn.query(`INSERT INTO ${testTableName} VALUES
-                          (1, 'WASM Test Row 1', now()),
-                          (2, 'WASM Test Row 2', now()),
-                          (3, 'WASM Test Row 3', now())`);
-                        log('✓ Inserted 3 test rows', 'success');
-
-                        // Step 15: Query the data back
-                        log('', 'info');
-                        log('ℹ Step 15: Querying test data...', 'info');
-                        const queryResult = await conn.query(`SELECT * FROM ${testTableName} ORDER BY id`);
-                        const queryRows = queryResult.toArray();
-                        log(`✓ Query returned ${queryRows.length} rows:`, 'success');
-                        queryRows.forEach((row, index) => {
+                      const tablesResult = await conn.query(`SHOW TABLES`);
+                      const tablesRows = tablesResult.toArray();
+                      if (tablesRows.length > 0) {
+                        log(`✓ Found ${tablesRows.length} table(s) in ducklake:`, 'success');
+                        tablesRows.forEach((row, index) => {
                           log(row, 'data');
                         });
 
-                        // Step 16: Clean up - drop the test table
+                        // Step 13b: Check boilstream_meta table for catalog metadata
                         log('', 'info');
-                        log('ℹ Step 16: Cleaning up test table...', 'info');
-                        await conn.query(`DROP TABLE ${testTableName}`);
-                        log(`✓ Dropped table "${testTableName}"`, 'success');
+                        log('ℹ Step 13b: Checking boilstream_meta table for catalog info...', 'info');
+                        const hasBoilstreamMeta = tablesRows.some(row => row.name === 'boilstream_meta');
+                        if (hasBoilstreamMeta) {
+                          try {
+                            const metaResult = await conn.query(`SELECT key, value FROM boilstream_meta ORDER BY key`);
+                            const metaRows = metaResult.toArray();
+                            log(`✓ boilstream_meta table found with ${metaRows.length} entries:`, 'success');
+                            metaRows.forEach((row) => {
+                              log(`  ${row.key}: ${row.value}`, 'data');
+                            });
 
-                        log('', 'success');
-                        log('🎉 Full ducklake read/write test completed successfully!', 'success');
+                            // Check has_data flag
+                            const hasDataRow = metaRows.find(r => r.key === 'has_data');
+                            if (hasDataRow) {
+                              if (hasDataRow.value === 'true') {
+                                log('✓ Catalog has_data=true - synced from PostgreSQL with data', 'success');
+                              } else {
+                                log('⚠️  Catalog has_data=false - catalog was empty when synced', 'warning');
+                              }
+                            }
+                          } catch (metaErr) {
+                            log(`⚠️  Could not query boilstream_meta: ${metaErr.message}`, 'warning');
+                          }
+                        } else {
+                          log('⚠️  boilstream_meta table not found - catalog may be from older sync', 'warning');
+                        }
 
-                      } catch (tableErr) {
-                        log(`⚠️  Table operations failed: ${tableErr.message}`, 'warning');
-                        log('This may be due to missing S3 credentials for the ducklake', 'info');
+                        // Step 14: Query first non-meta table if any exist
+                        log('', 'info');
+                        log('ℹ Step 14: Querying first data table...', 'info');
+                        const dataTables = tablesRows.filter(row => row.name !== 'boilstream_meta');
+                        if (dataTables.length > 0) {
+                          const firstTable = dataTables[0].name;
+                          const queryResult = await conn.query(`SELECT * FROM "${firstTable}" LIMIT 5`);
+                          const queryRows = queryResult.toArray();
+                          log(`✓ Query returned ${queryRows.length} rows from "${firstTable}":`, 'success');
+                          queryRows.forEach((row, index) => {
+                            log(row, 'data');
+                          });
+                        } else {
+                          log('  No data tables found (only boilstream_meta)', 'info');
+                        }
+                      } else {
+                        log('✓ Ducklake is empty (no tables yet)', 'success');
                       }
 
-                    } catch (attachErr) {
-                      log(`⚠️  Could not attach ducklake: ${attachErr.message}`, 'warning');
-                      log('This may be due to missing ducklake extension or S3 credentials', 'info');
+                      log('', 'success');
+                      log('🎉 Ducklake read-only access verified successfully!', 'success');
+                      log('   Note: WASM clients have read-only access to ducklakes.', 'info');
+
+                    } catch (tableErr) {
+                      log(`⚠️  Table query failed: ${tableErr.message}`, 'warning');
+                      log('   This may be due to missing S3 credentials for the ducklake data files', 'info');
                     }
+
+                  } catch (attachErr) {
+                    log(`⚠️  Could not attach ducklake: ${attachErr.message}`, 'warning');
+                    log('   This may be due to missing extensions or S3 credentials', 'info');
                   }
                 } catch (ducklakesErr) {
                   log('⚠️  Could not retrieve ducklakes: ' + ducklakesErr.message, 'warning');
@@ -556,20 +644,84 @@
 
                 setStatus('✅ Authentication successful!', 'success');
               } catch (err) {
+                log('Error calling PRAGMA: ' + err.message, 'error');
+
+                // Check what secrets were loaded even if PRAGMA failed
+                log('', 'info');
+                log('ℹ Checking secrets loaded (after PRAGMA error)...', 'info');
+                try {
+                  const errorSecrets = await conn.query("SELECT name, type, scope FROM duckdb_secrets()");
+                  const errorSecretsRows = errorSecrets.toArray();
+                  log(`Found ${errorSecretsRows.length} secret(s) in cache:`, 'info');
+                  errorSecretsRows.forEach((secret, index) => {
+                    log(`  Secret #${index + 1}: name=${secret.name}, type=${secret.type}`, 'info');
+                    log(`    scope: ${secret.scope}`, 'info');
+                  });
+
+                  // Check if there's an S3 secret with endpoint
+                  const s3Secrets = errorSecretsRows.filter(s => s.type === 's3');
+                  if (s3Secrets.length > 0) {
+                    log('', 'info');
+                    log('S3 secrets found - checking for endpoint config:', 'info');
+                    for (const s3 of s3Secrets) {
+                      log(`  ${s3.name}: scope=${s3.scope}`, 'info');
+                    }
+
+                    // Get full S3 secret details
+                    try {
+                      const fullS3 = await conn.query("SELECT * FROM duckdb_secrets() WHERE type = 's3'");
+                      const fullS3Rows = fullS3.toArray();
+                      log('', 'info');
+                      log('Full S3 secret details:', 'info');
+                      fullS3Rows.forEach(row => {
+                        log(JSON.stringify(row, null, 2), 'data');
+                      });
+
+                      // Check which storages have secrets
+                      log('', 'info');
+                      log('Secrets by storage:', 'info');
+                      const byStorage = await conn.query("SELECT storage, COUNT(*) as cnt FROM duckdb_secrets() GROUP BY storage");
+                      const byStorageRows = byStorage.toArray();
+                      byStorageRows.forEach(row => {
+                        log(`  ${row.storage}: ${row.cnt} secret(s)`, 'info');
+                      });
+
+                      // Check if S3 secret is in memory storage specifically
+                      const memoryS3 = await conn.query("SELECT name, storage FROM duckdb_secrets() WHERE type = 's3' AND storage = 'memory'");
+                      const memoryS3Rows = memoryS3.toArray();
+                      if (memoryS3Rows.length === 0) {
+                        log('⚠️  NO S3 secrets in memory storage - httpfs won\'t find them!', 'warning');
+                        log('   The secret is in "boilstream" storage but httpfs needs "memory" storage.', 'info');
+                      } else {
+                        log(`✅ Found ${memoryS3Rows.length} S3 secret(s) in memory storage`, 'success');
+                      }
+                    } catch (e) {
+                      log('Could not get full secret details: ' + e.message, 'warning');
+                    }
+                  } else {
+                    log('⚠️  No S3 secrets found - this may be why MinIO access failed', 'warning');
+                  }
+                } catch (secretsCheckErr) {
+                  log('⚠️  Could not check secrets: ' + secretsCheckErr.message, 'warning');
+                }
+
                 if (err.message.includes('Token exchange failed') ||
                     err.message.includes('Connection refused') ||
                     err.message.includes('Could not connect') ||
                     err.message.includes('OPAQUE login failed')) {
                   log('⚠️  PRAGMA function executed but authentication failed', 'warning');
-                  log('Error: ' + err.message, 'warning');
                   log('This is expected if the auth server is not running or token is invalid', 'info');
                   setStatus('⚠️ Extension works, auth failed', 'warning');
                 } else if (err.message.includes('Catalog Error') || err.message.includes('not recognized')) {
                   log('❌ PRAGMA function NOT registered', 'error');
-                  log('Error: ' + err.message, 'error');
                   setStatus('⚠️  Extension loaded but PRAGMA not registered', 'warning');
+                } else if (err.message.includes('s3.amazonaws.com') || err.message.includes('NetworkError')) {
+                  log('', 'warning');
+                  log('⚠️  S3 access using AWS endpoint instead of MinIO!', 'warning');
+                  log('   This suggests the S3 secret with custom endpoint is not being used.', 'info');
+                  log('   Check that the S3 secret scope matches the metadata path.', 'info');
+                  setStatus('⚠️ S3 endpoint config issue', 'warning');
                 } else {
-                  log('Error calling PRAGMA: ' + err.message, 'error');
                   throw err;
                 }
               }

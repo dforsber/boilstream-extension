@@ -308,6 +308,37 @@ target_link_libraries(boilstream_connection_state_test PRIVATE ${DUCKDB_LIBS}
 # Link Rust dependencies (needed for DuckDB static lib)
 link_rust_dependencies(boilstream_connection_state_test)
 
+# WASM lock ordering test executable (verifies no deadlocks in lock patterns)
+add_executable(wasm_lock_ordering_test test_wasm_lock_ordering.cpp)
+
+target_include_directories(wasm_lock_ordering_test PRIVATE)
+
+# This test only uses standard library threading, no DuckDB needed
+target_link_libraries(wasm_lock_ordering_test PRIVATE Catch2::Catch2)
+
+# Input validation test executable (malicious/empty value handling)
+add_executable(
+  input_validation_test
+  test_input_validation.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+
+target_include_directories(
+  input_validation_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+
+# Enable debug logging for input validation testing
+target_compile_definitions(input_validation_test PRIVATE BOILSTREAM_DEBUG)
+
+# Link extension's DuckDB and mbedTLS libraries
+target_link_libraries(input_validation_test PRIVATE ${DUCKDB_LIBS}
+                                                    Catch2::Catch2)
+
+# Link Rust dependencies
+link_rust_dependencies(input_validation_test)
+
 # Enable testing
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
@@ -318,6 +349,8 @@ add_test(NAME BoilstreamCatalogVersionTests
          COMMAND boilstream_catalog_version_test)
 add_test(NAME BoilstreamConnectionStateTests
          COMMAND boilstream_connection_state_test)
+add_test(NAME WasmLockOrderingTests COMMAND wasm_lock_ordering_test)
+add_test(NAME InputValidationTests COMMAND input_validation_test)
 add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)

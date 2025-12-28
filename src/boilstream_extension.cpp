@@ -58,6 +58,16 @@ static std::string GetBoilstreamVersion() {
 #endif
 }
 
+//! Safe string extraction from yyjson - returns empty string if NULL or not a string
+//! This prevents undefined behavior from constructing std::string with NULL
+static inline string SafeYyjsonGetStr(duckdb_yyjson::yyjson_val *val) {
+	if (!val) {
+		return "";
+	}
+	const char *str = duckdb_yyjson::yyjson_get_str(val);
+	return str ? string(str) : "";
+}
+
 // Helper: Clear query logs to remove sensitive data (passwords, TOTP secrets, backup codes)
 // This only clears DuckDB's query logs - shell history (~/.duckdb_history) must be cleared manually
 static void ClearQueryLogs(ClientContext &context) {
@@ -162,13 +172,16 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
 
-	// Get connection state from context for authenticated request
-	auto &conn_state = storage->EnsureConnectionState(context);
+	// Get active session for authenticated request
+	auto *conn_state = storage->GetSession(nullptr);
+	if (!conn_state) {
+		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
+	}
 
 	// Make HTTP GET request
 	string response;
 	try {
-		response = storage->HttpGetWithState(ducklakes_url, conn_state);
+		response = storage->HttpGetWithState(ducklakes_url, *conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("BoilstreamDucklakesInit: Failed to fetch ducklakes: " << e.what());
 		throw IOException("Failed to fetch ducklakes from boilstream server: %s", e.what());
@@ -230,7 +243,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// catalog_id
 		auto catalog_id_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_id");
 		if (catalog_id_val && duckdb_yyjson::yyjson_is_str(catalog_id_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(catalog_id_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(catalog_id_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -238,7 +251,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// catalog_name
 		auto catalog_name_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_name");
 		if (catalog_name_val && duckdb_yyjson::yyjson_is_str(catalog_name_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(catalog_name_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(catalog_name_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -246,7 +259,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// description
 		auto description_val = duckdb_yyjson::yyjson_obj_get(val, "description");
 		if (description_val && duckdb_yyjson::yyjson_is_str(description_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(description_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(description_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -254,7 +267,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// access_mode
 		auto access_mode_val = duckdb_yyjson::yyjson_obj_get(val, "access_mode");
 		if (access_mode_val && duckdb_yyjson::yyjson_is_str(access_mode_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(access_mode_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(access_mode_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -262,7 +275,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// ownership
 		auto ownership_val = duckdb_yyjson::yyjson_obj_get(val, "ownership");
 		if (ownership_val && duckdb_yyjson::yyjson_is_str(ownership_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(ownership_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(ownership_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -270,7 +283,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// granted_by (optional)
 		auto granted_by_val = duckdb_yyjson::yyjson_obj_get(val, "granted_by");
 		if (granted_by_val && duckdb_yyjson::yyjson_is_str(granted_by_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(granted_by_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(granted_by_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -279,8 +292,12 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		auto granted_at_val = duckdb_yyjson::yyjson_obj_get(val, "granted_at");
 		if (granted_at_val && duckdb_yyjson::yyjson_is_str(granted_at_val)) {
 			try {
-				string granted_at_str = duckdb_yyjson::yyjson_get_str(granted_at_val);
-				row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(granted_at_str, true)));
+				string granted_at_str = SafeYyjsonGetStr(granted_at_val);
+				if (!granted_at_str.empty()) {
+					row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(granted_at_str, true)));
+				} else {
+					row.emplace_back(Value());
+				}
 			} catch (...) {
 				row.emplace_back(Value());
 			}
@@ -292,8 +309,12 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		auto created_at_val = duckdb_yyjson::yyjson_obj_get(val, "created_at");
 		if (created_at_val && duckdb_yyjson::yyjson_is_str(created_at_val)) {
 			try {
-				string created_at_str = duckdb_yyjson::yyjson_get_str(created_at_val);
-				row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(created_at_str, true)));
+				string created_at_str = SafeYyjsonGetStr(created_at_val);
+				if (!created_at_str.empty()) {
+					row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(created_at_str, true)));
+				} else {
+					row.emplace_back(Value());
+				}
 			} catch (...) {
 				row.emplace_back(Value());
 			}
@@ -391,7 +412,12 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 	vector<SecretEntry> secrets;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+#ifdef __EMSCRIPTEN__
+		// In WASM, use GetCachedSecrets to avoid stack overflow (AllSecrets returns empty in WASM)
+		secrets = storage->GetCachedSecrets(transaction);
+#else
 		secrets = storage->AllSecrets(transaction);
+#endif
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("BoilstreamSecretsInit: Failed to fetch secrets: " << e.what());
 		throw IOException("Failed to fetch secrets from boilstream storage: %s", e.what());
@@ -530,13 +556,16 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
 
-	// Get connection state from context for authenticated request
-	auto &conn_state = storage->EnsureConnectionState(context);
+	// Get active session for authenticated request
+	auto *conn_state = storage->GetSession(nullptr);
+	if (!conn_state) {
+		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
+	}
 
 	// Make HTTP GET request
 	string response;
 	try {
-		response = storage->HttpGetWithState(buckets_url, conn_state);
+		response = storage->HttpGetWithState(buckets_url, *conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("BoilstreamBucketsInit: Failed to fetch buckets: " << e.what());
 		throw IOException("Failed to fetch buckets from boilstream server: %s", e.what());
@@ -581,7 +610,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// bucket_id
 		auto bucket_id_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_id");
 		if (bucket_id_val && duckdb_yyjson::yyjson_is_str(bucket_id_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(bucket_id_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(bucket_id_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -589,7 +618,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// bucket_name
 		auto bucket_name_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_name");
 		if (bucket_name_val && duckdb_yyjson::yyjson_is_str(bucket_name_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(bucket_name_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(bucket_name_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -597,7 +626,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// region
 		auto region_val = duckdb_yyjson::yyjson_obj_get(val, "region");
 		if (region_val && duckdb_yyjson::yyjson_is_str(region_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(region_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(region_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -605,7 +634,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// cloud_provider
 		auto provider_val = duckdb_yyjson::yyjson_obj_get(val, "cloud_provider");
 		if (provider_val && duckdb_yyjson::yyjson_is_str(provider_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(provider_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(provider_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -613,7 +642,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// access_mode
 		auto access_mode_val = duckdb_yyjson::yyjson_obj_get(val, "access_mode");
 		if (access_mode_val && duckdb_yyjson::yyjson_is_str(access_mode_val)) {
-			row.emplace_back(Value(duckdb_yyjson::yyjson_get_str(access_mode_val)));
+			row.emplace_back(Value(SafeYyjsonGetStr(access_mode_val)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -728,10 +757,16 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	BOILSTREAM_LOG("CreateDucklake: Making POST request, body_len=" << body.size());
 
+	// Get active session for authenticated request
+	auto *conn_state = storage->GetSession(nullptr);
+	if (!conn_state) {
+		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
+	}
+
 	// Make HTTP POST request
 	string response;
 	try {
-		response = storage->HttpPost(create_url, body);
+		response = storage->HttpPostWithState(create_url, body, *conn_state);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("CreateDucklake: Failed to create ducklake: " << e.what());
 		throw IOException("Failed to create ducklake: %s", e.what());
@@ -743,7 +778,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	BOILSTREAM_LOG("CreateDucklake: Fetching all secrets to populate new ducklake");
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto secrets = storage->AllSecrets(transaction);
+		auto secrets = storage->FetchAllSecretsFromServer(transaction);
 		BOILSTREAM_LOG("CreateDucklake: Successfully fetched and cached secrets");
 
 		// Note: Auto-attach removed to prevent hanging when backends are not ready
@@ -906,7 +941,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
 
-		storage->PerformOpaqueLogin(context, bootstrap_token);
+		// Pass the token hash as session key - this creates/retrieves the session
+		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash);
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login successful");
 
 		// Store bootstrap token hash for reuse detection
@@ -944,14 +980,19 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto secrets = storage->AllSecrets(transaction);
-		BOILSTREAM_LOG("SetEndpoint: Successfully fetched and cached secrets");
+		// Use FetchAllSecretsFromServer to always fetch (AllSecrets returns empty in WASM)
+		auto secrets = storage->FetchAllSecretsFromServer(transaction);
+		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
 
 		// Collect all ducklake secret names for auto-attach
 		for (const auto &entry : secrets) {
-			if (entry.secret && entry.secret->GetType() == "ducklake") {
-				ducklake_names.push_back(entry.secret->GetName());
-				BOILSTREAM_LOG("SetEndpoint: Found ducklake secret: " << entry.secret->GetName());
+			if (entry.secret) {
+				BOILSTREAM_LOG("SetEndpoint: Secret '" << entry.secret->GetName() << "' type='"
+				                                       << entry.secret->GetType() << "'");
+				if (entry.secret->GetType() == "ducklake") {
+					ducklake_names.push_back(entry.secret->GetName());
+					BOILSTREAM_LOG("SetEndpoint: Found ducklake secret: " << entry.secret->GetName());
+				}
 			}
 		}
 	} catch (const std::exception &e) {
@@ -971,26 +1012,25 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	char expires_str[64];
 	std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%d %H:%M:%S", &tm_utc);
 
-	// Build multi-statement SQL: ATTACH statements + final SELECT
-	// DuckDB will parse and execute these sequentially AFTER releasing the PRAGMA lock
-	string result_sql = "";
-
-	// Add ATTACH statements for each ducklake
-	for (const auto &ducklake_name : ducklake_names) {
-		string attach_stmt =
-		    "ATTACH 'ducklake:" + ducklake_name + "' AS " + KeywordHelper::WriteOptionallyQuoted(ducklake_name) + ";\n";
-		result_sql += attach_stmt;
-		BOILSTREAM_LOG("SetEndpoint: Adding ATTACH statement for: " << ducklake_name);
+	// Build list of available ducklakes for user to attach manually
+	// This avoids context switches and system catalog transaction issues
+	string ducklakes_list;
+	for (size_t i = 0; i < ducklake_names.size(); i++) {
+		if (i > 0) {
+			ducklakes_list += ", ";
+		}
+		ducklakes_list += ducklake_names[i];
 	}
+	BOILSTREAM_LOG("SetEndpoint: Available ducklakes: " << ducklakes_list);
 
-	// Add final SELECT statement showing status
-	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at, " +
-	              std::to_string(ducklake_names.size()) + " as ducklakes_attached;";
+	// Return status with available ducklakes (user can attach manually)
+	// Example: ATTACH 'ducklake:name' AS name;
+	string result_sql = "SELECT 'Session established' as status, TIMESTAMP '" + string(expires_str) +
+	                    "' as expires_at, " + std::to_string(ducklake_names.size()) +
+	                    " as ducklakes_available, '" + ducklakes_list + "' as available_ducklakes;";
 
-	BOILSTREAM_LOG("SetEndpoint: Returning multi-statement SQL with " << ducklake_names.size() << " ATTACH command(s)");
+	BOILSTREAM_LOG("SetEndpoint: Returning SQL to DuckDB:\n" << result_sql);
 
-	// Return multi-statement SQL - DuckDB will parse and execute after lock is released
-	// Do NOT echo the token to prevent leakage in logs/query history
 	return result_sql;
 }
 
@@ -1228,8 +1268,11 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		duckdb_yyjson::yyjson_doc_free(csrf_doc);
 		throw IOException("CSRF response missing csrf_token field");
 	}
-	string csrf_token = duckdb_yyjson::yyjson_get_str(csrf_token_val);
+	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
 	duckdb_yyjson::yyjson_doc_free(csrf_doc);
+	if (csrf_token.empty()) {
+		throw IOException("CSRF token is empty");
+	}
 
 	BOILSTREAM_LOG("RegisterUser: CSRF token obtained");
 
@@ -1277,7 +1320,9 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	if (!success) {
 		auto error_val = duckdb_yyjson::yyjson_obj_get(signup_resp_root, "error");
-		string error_msg = error_val ? duckdb_yyjson::yyjson_get_str(error_val) : "Unknown error";
+		string error_msg = SafeYyjsonGetStr(error_val);
+		if (error_msg.empty())
+			error_msg = "Unknown error";
 		duckdb_yyjson::yyjson_doc_free(signup_resp_doc);
 		throw IOException("Signup failed: %s", error_msg.c_str());
 	}
@@ -1324,7 +1369,9 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	if (!login_success) {
 		auto error_val = duckdb_yyjson::yyjson_obj_get(login_resp_root, "error");
-		string error_msg = error_val ? duckdb_yyjson::yyjson_get_str(error_val) : "Unknown error";
+		string error_msg = SafeYyjsonGetStr(error_val);
+		if (error_msg.empty())
+			error_msg = "Unknown error";
 		duckdb_yyjson::yyjson_doc_free(login_resp_doc);
 		throw IOException("Login failed: %s", error_msg.c_str());
 	}
@@ -1394,8 +1441,12 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		duckdb_yyjson::yyjson_doc_free(totp_resp_doc);
 		throw IOException("TOTP enrollment response missing secret");
 	}
-	string totp_secret = duckdb_yyjson::yyjson_get_str(secret_val);
+	string totp_secret = SafeYyjsonGetStr(secret_val);
 	duckdb_yyjson::yyjson_doc_free(totp_resp_doc);
+
+	if (totp_secret.empty()) {
+		throw IOException("TOTP secret is empty");
+	}
 
 	BOILSTREAM_LOG("RegisterUser: TOTP secret obtained");
 
@@ -1598,7 +1649,9 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 
 	if (!success) {
 		auto error_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "error");
-		string error_msg = error_val ? duckdb_yyjson::yyjson_get_str(error_val) : "Invalid TOTP code";
+		string error_msg = SafeYyjsonGetStr(error_val);
+		if (error_msg.empty())
+			error_msg = "Invalid TOTP code";
 		duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
 		throw IOException("MFA verification failed: %s", error_msg.c_str());
 	}
@@ -1611,7 +1664,10 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		for (size_t i = 0; i < arr_size; i++) {
 			auto code_val = duckdb_yyjson::yyjson_arr_get(backup_codes_val, i);
 			if (code_val && duckdb_yyjson::yyjson_is_str(code_val)) {
-				backup_codes.push_back(duckdb_yyjson::yyjson_get_str(code_val));
+				string code = SafeYyjsonGetStr(code_val);
+				if (!code.empty()) {
+					backup_codes.push_back(code);
+				}
 			}
 		}
 	}
@@ -1816,8 +1872,11 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		duckdb_yyjson::yyjson_doc_free(csrf_doc);
 		throw IOException("CSRF response missing csrf_token field. Response preview: %s", preview.c_str());
 	}
-	string csrf_token = duckdb_yyjson::yyjson_get_str(csrf_token_val);
+	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
 	duckdb_yyjson::yyjson_doc_free(csrf_doc);
+	if (csrf_token.empty()) {
+		throw IOException("CSRF token is empty");
+	}
 
 	BOILSTREAM_LOG("Login: CSRF token obtained");
 
@@ -1922,7 +1981,9 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	if (!success) {
 		auto error_val = duckdb_yyjson::yyjson_obj_get(mfa_resp_root, "error");
-		string error_msg = error_val ? duckdb_yyjson::yyjson_get_str(error_val) : "Invalid MFA code";
+		string error_msg = SafeYyjsonGetStr(error_val);
+		if (error_msg.empty())
+			error_msg = "Invalid MFA code";
 		duckdb_yyjson::yyjson_doc_free(mfa_resp_doc);
 		throw IOException("MFA authentication failed: %s", error_msg.c_str());
 	}
@@ -1959,8 +2020,12 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		duckdb_yyjson::yyjson_doc_free(bootstrap_resp_doc);
 		throw IOException("Bootstrap token response missing bootstrap_token field");
 	}
-	string bootstrap_token = duckdb_yyjson::yyjson_get_str(bootstrap_token_val);
+	string bootstrap_token = SafeYyjsonGetStr(bootstrap_token_val);
 	duckdb_yyjson::yyjson_doc_free(bootstrap_resp_doc);
+
+	if (bootstrap_token.empty()) {
+		throw IOException("Bootstrap token is empty");
+	}
 
 	BOILSTREAM_LOG("Login: Bootstrap token obtained, now performing OPAQUE exchange");
 
@@ -2016,7 +2081,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("Login: endpoint_url=" << endpoint_url);
 
-		storage->PerformOpaqueLogin(context, bootstrap_token);
+		// Pass the token hash as session key
+		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash);
 		BOILSTREAM_LOG("Login: OPAQUE login successful");
 
 		// Store bootstrap token hash for reuse detection
@@ -2039,7 +2105,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto secrets = storage->AllSecrets(transaction);
+		auto secrets = storage->FetchAllSecretsFromServer(transaction);
 		BOILSTREAM_LOG("Login: Successfully fetched and cached secrets");
 
 		// Collect all ducklake secret names for auto-attach
@@ -2069,6 +2135,12 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Build multi-statement SQL: ATTACH statements + final SELECT
 	string result_sql = "";
 
+#ifdef __EMSCRIPTEN__
+	// WASM FIX: Skip auto-attach to avoid stack overflow during ducklake initialization.
+	// Ducklake's duckdb_secrets() call causes deep JS↔WASM call chains.
+	// User can manually run: ATTACH 'ducklake:name' AS name;
+	BOILSTREAM_LOG("Login: Skipping auto-attach in WASM mode (user can manually attach)");
+#else
 	// Add ATTACH statements for each ducklake
 	for (const auto &ducklake_name : ducklake_names) {
 		string attach_stmt =
@@ -2076,6 +2148,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		result_sql += attach_stmt;
 		BOILSTREAM_LOG("Login: Adding ATTACH statement for: " << ducklake_name);
 	}
+#endif
 
 	// Add final SELECT statement showing status
 	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at, " +

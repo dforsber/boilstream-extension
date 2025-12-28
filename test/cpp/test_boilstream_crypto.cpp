@@ -11,6 +11,7 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch.hpp>
 #include "boilstream_secret_storage.hpp"
+#include "boilstream_connection_state.hpp"
 #include "mbedtls_wrapper.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/types/blob.hpp"
@@ -59,13 +60,14 @@ public:
 		return storage->ExtractBoilstreamHeaders(headers);
 	}
 
-	// Refresh token test helpers
-	static void SaveRefreshTokenForTest(RestApiSecretStorage *storage, bool resumption_enabled) {
-		storage->SaveRefreshToken(resumption_enabled);
+	// Refresh token test helpers - now use connection state
+	static void SaveRefreshTokenForTest(RestApiSecretStorage *storage, BoilstreamConnectionState &conn_state,
+	                                    bool resumption_enabled) {
+		storage->SaveRefreshToken(conn_state, resumption_enabled);
 	}
 
-	static bool LoadRefreshTokenForTest(RestApiSecretStorage *storage) {
-		return storage->LoadRefreshToken();
+	static bool LoadRefreshTokenForTest(RestApiSecretStorage *storage, BoilstreamConnectionState &conn_state) {
+		return storage->LoadRefreshToken(conn_state);
 	}
 
 	static string GetRefreshTokenPath(RestApiSecretStorage *storage) {
@@ -80,6 +82,7 @@ struct TestFixture {
 	duckdb::unique_ptr<DuckDB> db;
 	duckdb::unique_ptr<RestApiSecretStorage> storage;
 	std::vector<uint8_t> session_key;
+	BoilstreamConnectionState conn_state;
 
 	TestFixture() {
 		// Database must outlive storage (storage holds reference to db->instance)
@@ -378,12 +381,19 @@ TEST_CASE("Secure Memory Zeroization", "[boilstream][crypto][memory]") {
 	TestFixture fixture;
 
 	SECTION("ClearSession zeros sensitive data") {
+		// Set some state first
+		fixture.conn_state.access_token = "test_token";
+		fixture.conn_state.session_key = {1, 2, 3, 4};
+		fixture.conn_state.bootstrap_token_hash = "test_hash";
+
 		// After clearing session, all key material should be zeroed
-		fixture.storage->ClearSession();
+		fixture.conn_state.ClearSession();
 
 		// Session should be invalid after clear
-		REQUIRE(fixture.storage->IsSessionTokenValid() == false);
-		REQUIRE(fixture.storage->GetBootstrapTokenHash().empty());
+		REQUIRE(fixture.conn_state.IsSessionTokenValid() == false);
+		REQUIRE(fixture.conn_state.GetBootstrapTokenHash().empty());
+		REQUIRE(fixture.conn_state.access_token.empty());
+		REQUIRE(fixture.conn_state.session_key.empty());
 	}
 
 	SECTION("Key derivation zeros intermediate values") {
@@ -696,6 +706,7 @@ TEST_CASE("Refresh Token - resume_user_id Calculation", "[boilstream][crypto][re
 TEST_CASE("Refresh Token - Storage Round-Trip", "[boilstream][crypto][refresh-token][storage]") {
 	auto db = duckdb::make_uniq<DuckDB>(nullptr);
 	auto storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
+	BoilstreamConnectionState conn_state;
 
 	// Clean up any existing token file
 	string token_path = BoilstreamCryptoTestAccess::GetRefreshTokenPath(storage.get());
@@ -760,13 +771,12 @@ TEST_CASE("Refresh Token - Storage Round-Trip", "[boilstream][crypto][refresh-to
 		handle->Close();
 
 		// 4. Load the token back using LoadRefreshToken
-		bool loaded = BoilstreamCryptoTestAccess::LoadRefreshTokenForTest(storage.get());
+		bool loaded = BoilstreamCryptoTestAccess::LoadRefreshTokenForTest(storage.get(), conn_state);
 		REQUIRE(loaded);
 
-		// 5. Now trigger a resume to compute the user_id from loaded token
-		// We can't easily access the private refresh_token member, but we verified
-		// that the base64 round-trip works in other tests, and LoadRefreshToken
-		// uses the same FromBase64 function
+		// 5. Verify the loaded token matches original
+		REQUIRE(conn_state.refresh_token.size() == 32);
+		REQUIRE(memcmp(conn_state.refresh_token.data(), original_token.data(), 32) == 0);
 
 		// Instead, let's verify the loaded file can be read back correctly
 		auto read_handle = fs.OpenFile(token_path, FileFlags::FILE_FLAGS_READ);

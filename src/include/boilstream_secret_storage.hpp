@@ -14,12 +14,14 @@
 #include "boilstream_connection_state.hpp"
 #include <string>
 #include <chrono>
+#include <unordered_map>
 
 // Forward declarations for test friend access (outside namespace)
 class BoilstreamCryptoTestAccess;
 class BoilstreamConformanceTestAccess;
 class BoilstreamEncryptionTestAccess;
 class BoilstreamCatalogVersionTestAccess;
+class BoilstreamInputValidationTestAccess;
 
 namespace duckdb {
 
@@ -34,6 +36,7 @@ class RestApiSecretStorage : public CatalogSetSecretStorage {
 	friend class ::BoilstreamConformanceTestAccess;
 	friend class ::BoilstreamEncryptionTestAccess;
 	friend class ::BoilstreamCatalogVersionTestAccess;
+	friend class ::BoilstreamInputValidationTestAccess;
 
 public:
 	//! Use CatalogVersionInfo from BoilstreamConnectionState
@@ -44,27 +47,47 @@ public:
 	//! Set the endpoint URL (without token)
 	void SetEndpoint(const string &endpoint);
 
-	//! Get connection state from transaction (for secret operations)
-	//! Returns nullptr if no connection context available
-	BoilstreamConnectionState *GetConnectionState(optional_ptr<CatalogTransaction> transaction);
+	//! Get active session from transaction context
+	//! Looks up session by endpoint_url (there's typically one active session per endpoint)
+	//! Returns nullptr if no active session exists
+	BoilstreamConnectionState *GetSession(optional_ptr<CatalogTransaction> transaction);
 
-	//! Get or create connection state from ClientContext (for PRAGMAs)
-	BoilstreamConnectionState &EnsureConnectionState(ClientContext &context);
+	//! Get or create session for a specific session key (bootstrap_token_hash)
+	//! Creates new session if none exists for this key
+	//! This is the primary method for PRAGMA to establish/retrieve sessions
+	BoilstreamConnectionState &GetOrCreateSession(const string &session_key);
 
-	//! Perform OPAQUE registration with password (uses connection state)
-	void PerformOpaqueRegistration(ClientContext &context, const string &password);
+	//! Check if a session exists for a session key
+	bool HasSession(const string &session_key);
 
-	//! Perform OPAQUE login with password (uses connection state)
-	void PerformOpaqueLogin(ClientContext &context, const string &password);
+	//! Get session by key (returns nullptr if not found)
+	BoilstreamConnectionState *GetSessionByKey(const string &session_key);
 
-	//! Perform OPAQUE session resumption with stored refresh token (uses connection state)
+	//! Set the active session key for this endpoint (called after successful login)
+	//! This associates the endpoint with the session for subsequent lookups
+	void SetActiveSessionKey(const string &session_key);
+
+	//! Get the active session key for this endpoint
+	string GetActiveSessionKey();
+
+	//! Perform OPAQUE registration with password
+	//! session_key is the bootstrap_token_hash, used to store/retrieve session
+	void PerformOpaqueRegistration(ClientContext &context, const string &password, const string &session_key);
+
+	//! Perform OPAQUE login with password
+	//! session_key is the bootstrap_token_hash, used to store/retrieve session
+	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &session_key);
+
+	//! Perform OPAQUE session resumption with stored refresh token
 	void PerformOpaqueResume(ClientContext &context);
 
-	//! Clear session state for connection (on error or logout)
+	//! Clear the active session (on error or logout)
 	void ClearSession(ClientContext &context);
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
-	void PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume);
+	//! session_key identifies which session to use
+	void PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume,
+	                              const string &session_key);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -78,20 +101,27 @@ public:
 	//! Validate token format and length
 	void ValidateTokenFormat(const string &token, const string &token_context);
 
-	//! Check if session token is valid for connection (not expired, with 30min buffer)
+	//! Check if active session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid(ClientContext &context);
 
-	//! Get stored bootstrap token hash for connection (for reuse detection)
+	//! Get stored bootstrap token hash for active session (for reuse detection)
 	string GetBootstrapTokenHash(ClientContext &context);
 
-	//! Set bootstrap token hash for connection (after successful exchange)
+	//! Set bootstrap token hash for active session (after successful exchange)
 	void SetBootstrapTokenHash(ClientContext &context, const string &hash);
 
-	//! Get session token expiration timestamp for connection
+	//! Get session token expiration timestamp for active session
 	std::chrono::system_clock::time_point GetTokenExpiresAt(ClientContext &context);
 
 	//! Override to fetch all secrets from REST API
 	vector<SecretEntry> AllSecrets(optional_ptr<CatalogTransaction> transaction) override;
+
+	//! Get cached secrets without triggering server fetch (for WASM table function)
+	vector<SecretEntry> GetCachedSecrets(optional_ptr<CatalogTransaction> transaction);
+
+	//! Fetch all secrets from server (always fetches, bypasses WASM AllSecrets guard)
+	//! Use this for bootstrap/login instead of AllSecrets() in WASM
+	vector<SecretEntry> FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction);
 
 	//! Override to lookup secrets from REST API
 	SecretMatch LookupSecret(const string &path, const string &type,
@@ -138,12 +168,28 @@ public:
 	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
 	static bool IsMultiTenantMode(ClientContext &context);
 
+	//! Check if running in WASM environment (compile-time constant)
+	static constexpr bool IsWasmMode() {
+#ifdef __EMSCRIPTEN__
+		return true;
+#else
+		return false;
+#endif
+	}
+
 	//! Append ?multitenant=true to URL if in multi-tenant mode
 	//! Uses transaction to access ClientContext for checking the tenant_id setting
 	string AppendMultiTenantParam(const string &url, optional_ptr<CatalogTransaction> transaction);
 
 	//! Append ?multitenant=true to URL if in multi-tenant mode (using explicit context)
 	static string AppendMultiTenantParam(const string &url, ClientContext &context);
+
+	//! Append platform query parameters to URL (multitenant, wasm)
+	//! Combines IsMultiTenantMode and IsWasmMode checks
+	static string AppendPlatformParams(const string &url, ClientContext &context);
+
+	//! Append platform query parameters using transaction context
+	string AppendPlatformParams(const string &url, optional_ptr<CatalogTransaction> transaction);
 
 	//! Store registration state (base_url, session_token, and totp_uri) for MFA verification
 	void StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri);
@@ -318,11 +364,29 @@ private:
 	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
 
 	//========================================================================
-	// NOTE: Per-connection state has been moved to BoilstreamConnectionState
-	// This includes: access_token, session_key, refresh_token, client_sequence,
-	// region, token_expires_at, is_exchanging, bootstrap_token_hash,
-	// secret_expiration, catalog_versions, last_version_check
+	// Session Storage (database-level, shared across all ClientContexts)
+	// Sessions are keyed by bootstrap_token_hash which provides:
+	// - Session reuse: same token = same session (across connections)
+	// - Isolation: different tokens = different sessions
+	// - Works with vanilla DuckDB (no TenantIsolation dependency)
+	// - Works uniformly for WASM and native builds
+	// - Survives context switches during ATTACH and catalog operations
 	//========================================================================
+
+	//! Map of session_key (bootstrap_token_hash) -> session state
+	std::unordered_map<string, shared_ptr<BoilstreamConnectionState>> sessions_;
+
+	//! Map of refresh_token_hash -> session_key (trusted mapping for resume)
+	//! This is stored in database-level storage, NOT in tenant-controlled files
+	//! Prevents malicious tenants from hijacking sessions by modifying their refresh token file
+	std::unordered_map<string, string> refresh_to_session_;
+
+	//! Currently active session key for this endpoint
+	//! Set during login, used by GetSession() for lookups
+	string active_session_key_;
+
+	//! Lock for sessions_ map, refresh_to_session_, and active_session_key_ access
+	mutex sessions_lock_;
 };
 
 } // namespace duckdb
