@@ -269,7 +269,8 @@ TEST_CASE("Session Snapshot Thread Safety", "[boilstream][connection][threading]
 	auto &state = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con.context);
 
 	// Set up session state
-	BoilstreamConnectionStateTestAccess::SetAccessToken(state, "test-token-64chars-0123456789abcdef0123456789abcdef0123456789ab");
+	BoilstreamConnectionStateTestAccess::SetAccessToken(
+	    state, "test-token-64chars-0123456789abcdef0123456789abcdef0123456789ab");
 	duckdb::vector<uint8_t> key(32, 0x42);
 	BoilstreamConnectionStateTestAccess::SetSessionKey(state, key);
 	BoilstreamConnectionStateTestAccess::SetRegion(state, "us-east-1");
@@ -292,7 +293,7 @@ TEST_CASE("Session Snapshot Thread Safety", "[boilstream][connection][threading]
 
 		std::vector<std::thread> threads;
 		std::vector<std::vector<uint64_t>> sequences(NUM_THREADS);
-		std::atomic<bool> start_flag{false};
+		std::atomic<bool> start_flag {false};
 
 		for (int i = 0; i < NUM_THREADS; i++) {
 			threads.emplace_back([&, i]() {
@@ -348,7 +349,7 @@ TEST_CASE("Multiple Connections Concurrent Access", "[boilstream][connection][th
 		}
 
 		std::vector<std::thread> threads;
-		std::atomic<int> completed{0};
+		std::atomic<int> completed {0};
 
 		for (int i = 0; i < NUM_CONNECTIONS; i++) {
 			threads.emplace_back([&, i]() {
@@ -426,7 +427,8 @@ TEST_CASE("Token Expiration Per Connection", "[boilstream][connection]") {
 		auto &state2 = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con2.context);
 
 		// Set up connection 1 with valid session
-		BoilstreamConnectionStateTestAccess::SetAccessToken(state1, "valid-token-1234567890abcdef1234567890abcdef1234567890abcdef12");
+		BoilstreamConnectionStateTestAccess::SetAccessToken(
+		    state1, "valid-token-1234567890abcdef1234567890abcdef1234567890abcdef12");
 		duckdb::vector<uint8_t> key1(32, 0x01);
 		BoilstreamConnectionStateTestAccess::SetSessionKey(state1, key1);
 		{
@@ -449,8 +451,10 @@ TEST_CASE("Token Expiration Per Connection", "[boilstream][connection]") {
 		auto &state2 = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con2.context);
 
 		// Both have tokens
-		BoilstreamConnectionStateTestAccess::SetAccessToken(state1, "token-1-abcdef1234567890abcdef1234567890abcdef1234567890abcd");
-		BoilstreamConnectionStateTestAccess::SetAccessToken(state2, "token-2-abcdef1234567890abcdef1234567890abcdef1234567890abcd");
+		BoilstreamConnectionStateTestAccess::SetAccessToken(
+		    state1, "token-1-abcdef1234567890abcdef1234567890abcdef1234567890abcd");
+		BoilstreamConnectionStateTestAccess::SetAccessToken(
+		    state2, "token-2-abcdef1234567890abcdef1234567890abcdef1234567890abcd");
 
 		duckdb::vector<uint8_t> key(32, 0x42);
 		BoilstreamConnectionStateTestAccess::SetSessionKey(state1, key);
@@ -487,7 +491,8 @@ TEST_CASE("Connection Destruction Cleanup", "[boilstream][connection]") {
 			auto &state = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con.context);
 
 			// Set some state
-			BoilstreamConnectionStateTestAccess::SetAccessToken(state, "temp-token-abcdef1234567890abcdef1234567890abcdef1234567890");
+			BoilstreamConnectionStateTestAccess::SetAccessToken(
+			    state, "temp-token-abcdef1234567890abcdef1234567890abcdef1234567890");
 			duckdb::vector<uint8_t> key(32, 0xFF);
 			BoilstreamConnectionStateTestAccess::SetSessionKey(state, key);
 

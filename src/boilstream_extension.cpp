@@ -539,9 +539,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	// Check if response is empty (indicates error like 401, 403, etc.)
 	if (response.empty()) {
 		BOILSTREAM_LOG("BoilstreamBucketsInit: Empty response from server (likely authentication error)");
-		throw IOException(
-		    "Failed to fetch buckets: Server returned an error (possibly authentication issue). "
-		    "Check your token permissions or try refreshing the session.");
+		throw IOException("Failed to fetch buckets: Server returned an error (possibly authentication issue). "
+		                  "Check your token permissions or try refreshing the session.");
 	}
 
 	// Parse JSON response
@@ -673,7 +672,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 		s3_bucket_name = params.values[2].ToString();
 	}
 
-	BOILSTREAM_LOG("CreateDucklake: catalog_name=" << catalog_name << ", description=" << description << ", s3_bucket_name=" << s3_bucket_name);
+	BOILSTREAM_LOG("CreateDucklake: catalog_name=" << catalog_name << ", description=" << description
+	                                               << ", s3_bucket_name=" << s3_bucket_name);
 
 	// Validate catalog_name
 	if (catalog_name.empty()) {
@@ -1185,8 +1185,9 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		if (status_code < 200 || status_code >= 300) {
 			// Special handling for rate limit / replay protection
 			if (status_code == 429) {
-				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
-				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+				throw IOException(
+				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
+				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
 			}
 
 			// Include response body (may contain JSON error) in exception
@@ -1519,8 +1520,9 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		if (status_code < 200 || status_code >= 300) {
 			// Special handling for rate limit / replay protection
 			if (status_code == 429) {
-				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
-				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+				throw IOException(
+				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
+				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
 			}
 
 			// Include response body (may contain JSON error) in exception
@@ -1769,8 +1771,9 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		if (status_code < 200 || status_code >= 300) {
 			// Special handling for rate limit / replay protection
 			if (status_code == 429) {
-				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
-				                  "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+				throw IOException(
+				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
+				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
 			}
 
 			// General error handling

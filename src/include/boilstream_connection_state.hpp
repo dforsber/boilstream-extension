@@ -40,8 +40,7 @@ public:
 	};
 
 	BoilstreamConnectionState()
-	    : client_sequence(0), is_exchanging(false),
-	      token_expires_at(std::chrono::system_clock::time_point::min()),
+	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()) {
 	}
 

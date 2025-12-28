@@ -244,7 +244,8 @@ private:
 	bool IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state);
 
 	//! Store expiration timestamp for a secret (uses connection state)
-	void StoreExpiration(const string &secret_name, const string &expires_at_str, BoilstreamConnectionState &conn_state);
+	void StoreExpiration(const string &secret_name, const string &expires_at_str,
+	                     BoilstreamConnectionState &conn_state);
 
 	//! Clear expiration data for a secret (uses connection state)
 	void ClearExpiration(const string &secret_name, BoilstreamConnectionState &conn_state);

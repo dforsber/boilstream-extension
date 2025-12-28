@@ -1119,8 +1119,7 @@ case_insensitive_map_t<string> RestApiSecretStorage::ExtractBoilstreamHeaders(co
 	return header_map;
 }
 
-HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method, const string &url,
-                                                            const string &body,
+HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
                                                             BoilstreamConnectionState &conn_state) {
 	// Get session snapshot from connection state (thread-safe, increments sequence)
 	auto snapshot = conn_state.GetSessionSnapshot();
@@ -1918,8 +1917,8 @@ void RestApiSecretStorage::ClearExpiration(const string &secret_name, Boilstream
 	conn_state.secret_expiration.erase(secret_name);
 }
 
-std::chrono::system_clock::time_point RestApiSecretStorage::GetSecretExpiration(
-    const string &secret_name, optional_ptr<CatalogTransaction> transaction) {
+std::chrono::system_clock::time_point
+RestApiSecretStorage::GetSecretExpiration(const string &secret_name, optional_ptr<CatalogTransaction> transaction) {
 	auto *conn_state = GetConnectionState(transaction);
 	if (!conn_state) {
 		// No connection state available
@@ -2414,8 +2413,9 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 
 			// Special handling for rate limit errors
 			if (status_code == 429) {
-				throw IOException("HTTP POST failed: HTTP 429 - Too Many Requests. "
-				                  "The server is rate-limiting your requests. Please wait a few minutes before retrying.");
+				throw IOException(
+				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
+				    "The server is rate-limiting your requests. Please wait a few minutes before retrying.");
 			}
 
 			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) +
@@ -3147,8 +3147,8 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 	}
 }
 
-case_insensitive_map_t<RestApiSecretStorage::CatalogVersionInfo> RestApiSecretStorage::FetchCatalogVersions(
-    BoilstreamConnectionState &conn_state) {
+case_insensitive_map_t<RestApiSecretStorage::CatalogVersionInfo>
+RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state) {
 	case_insensitive_map_t<CatalogVersionInfo> versions;
 
 	// Guard: Check if we have a valid session before making HTTP calls
@@ -3230,7 +3230,7 @@ case_insensitive_map_t<RestApiSecretStorage::CatalogVersionInfo> RestApiSecretSt
 }
 
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
-                                                      BoilstreamConnectionState &conn_state) {
+                                                     BoilstreamConnectionState &conn_state) {
 	BOILSTREAM_LOG("RefreshCatalogCredentials: Refreshing credentials for catalog " << catalog_name);
 
 	// Force expiration by setting expires_at to past
@@ -3277,9 +3277,9 @@ void RestApiSecretStorage::CheckCatalogVersions(BoilstreamConnectionState &conn_
 			auto it = conn_state.catalog_versions.find(catalog_id);
 			if (it != conn_state.catalog_versions.end()) {
 				if (new_info.version > it->second.version) {
-					BOILSTREAM_LOG("CheckCatalogVersions: Version changed for " << new_info.catalog_name << " ("
-					                                                            << it->second.version << " -> "
-					                                                            << new_info.version << ")");
+					BOILSTREAM_LOG("CheckCatalogVersions: Version changed for "
+					               << new_info.catalog_name << " (" << it->second.version << " -> " << new_info.version
+					               << ")");
 					catalogs_to_refresh.push_back(new_info.catalog_name);
 				}
 			}
