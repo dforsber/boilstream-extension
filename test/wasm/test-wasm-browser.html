@@ -229,16 +229,13 @@
           log('⚠️  httpfs install failed: ' + httpfsErr.message, 'warning');
         }
 
-        // Step 4.8: Load ducklake from LOCAL repo (patched to fix stack overflow)
+        // Step 4.8: Load ducklake from official DuckDB repo
         log('', 'info');
-        log('ℹ Step 4.8: Loading PATCHED ducklake from local repo...', 'info');
+        log('ℹ Step 4.8: Loading ducklake from official DuckDB repo...', 'info');
         try {
-          const duckdbVersion = 'v1.4.3';
-          const ducklakeUrl = `http://localhost:8080/build/${wasmFormat}/repository/${duckdbVersion}/${wasmFormat}/ducklake.duckdb_extension.wasm`;
-          log(`  Loading from: ${ducklakeUrl}`, 'info');
-          await conn.query(`INSTALL '${ducklakeUrl}'`);
-          await conn.query(`LOAD '${ducklakeUrl}'`);
-          log('✓ PATCHED ducklake extension installed and loaded from local repo', 'success');
+          await conn.query("INSTALL ducklake FROM core");
+          await conn.query("LOAD ducklake");
+          log('✓ ducklake extension installed and loaded', 'success');
         } catch (ducklakeErr) {
           log('⚠️  ducklake install failed: ' + ducklakeErr.message, 'warning');
         }
