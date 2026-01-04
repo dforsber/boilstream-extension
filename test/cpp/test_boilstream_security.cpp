@@ -78,13 +78,16 @@ TEST_CASE("Token Format Validation", "[boilstream][security]") {
 
 	SECTION("Invalid characters fail validation") {
 		// Space
-		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcd efgh ijkl mnop qrst uvwx yz01", "Test"), IOException);
+		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcd efgh ijkl mnop qrst uvwx yz01", "Test"),
+		                  IOException);
 
 		// Special chars
-		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcd@efgh#ijkl$mnop%qrst^uvwx&yz01", "Test"), IOException);
+		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcd@efgh#ijkl$mnop%qrst^uvwx&yz01", "Test"),
+		                  IOException);
 
 		// Newline
-		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcdefghijklmnopqrstuvwxyz\n012345", "Test"), IOException);
+		REQUIRE_THROWS_AS(fixture.storage->ValidateTokenFormat("abcdefghijklmnopqrstuvwxyz\n012345", "Test"),
+		                  IOException);
 	}
 }
 

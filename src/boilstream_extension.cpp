@@ -1026,8 +1026,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	// Return status with available ducklakes (user can attach manually)
 	// Example: ATTACH 'ducklake:name' AS name;
 	string result_sql = "SELECT 'Session established' as status, TIMESTAMP '" + string(expires_str) +
-	                    "' as expires_at, " + std::to_string(ducklake_names.size()) +
-	                    " as ducklakes_available, '" + ducklakes_list + "' as available_ducklakes;";
+	                    "' as expires_at, " + std::to_string(ducklake_names.size()) + " as ducklakes_available, '" +
+	                    ducklakes_list + "' as available_ducklakes;";
 
 	BOILSTREAM_LOG("SetEndpoint: Returning SQL to DuckDB:\n" << result_sql);
 

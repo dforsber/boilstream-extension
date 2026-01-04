@@ -200,8 +200,8 @@ RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string 
       endpoint_url(endpoint_url_p) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
 	persistent = true; // Acts as persistent storage
-	// Sessions are stored in sessions_ map keyed by bootstrap_token_hash
-	// This works uniformly for WASM and native, and survives context switches
+	                   // Sessions are stored in sessions_ map keyed by bootstrap_token_hash
+	                   // This works uniformly for WASM and native, and survives context switches
 }
 
 //! Get active session (for secret operations like AllSecrets, LookupSecret)
@@ -590,7 +590,7 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 }
 
 void RestApiSecretStorage::PerformOpaqueRegistration(ClientContext &context, const string &password,
-                                                      const string &session_key) {
+                                                     const string &session_key) {
 	BOILSTREAM_LOG("PerformOpaqueRegistration: starting OPAQUE registration");
 	(void)context; // Context not needed - we use session_key
 
@@ -1087,7 +1087,7 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, cons
 }
 
 void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const string &password,
-                                               const string &session_key) {
+                                              const string &session_key) {
 	PerformOpaqueLoginCommon(context, password, false, session_key);
 
 	// After successful login, set this as the active session

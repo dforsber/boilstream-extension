@@ -130,7 +130,7 @@ TEST_CASE("RefreshCatalogCredentials", "[boilstream][catalog_versions]") {
 
 		// Call refresh
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, catalog_name,
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 
 		// Verify expiration was set to minimum
 		auto &expiration_map = BoilstreamCatalogVersionTestAccess::GetSecretExpiration(fixture.conn_state);
@@ -140,11 +140,11 @@ TEST_CASE("RefreshCatalogCredentials", "[boilstream][catalog_versions]") {
 
 	SECTION("Multiple catalogs can be refreshed independently") {
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, "catalog_1",
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, "catalog_2",
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, "catalog_3",
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 
 		auto &expiration_map = BoilstreamCatalogVersionTestAccess::GetSecretExpiration(fixture.conn_state);
 		REQUIRE(expiration_map.size() >= 3);
@@ -157,9 +157,9 @@ TEST_CASE("RefreshCatalogCredentials", "[boilstream][catalog_versions]") {
 		string catalog_name = "double_refresh_test";
 
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, catalog_name,
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 		BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, catalog_name,
-		                                                               fixture.conn_state);
+		                                                              fixture.conn_state);
 
 		auto &expiration_map = BoilstreamCatalogVersionTestAccess::GetSecretExpiration(fixture.conn_state);
 		REQUIRE(expiration_map[catalog_name] == std::chrono::system_clock::time_point::min());
@@ -294,7 +294,7 @@ TEST_CASE("Catalog Version Thread Safety", "[boilstream][catalog_versions][.]") 
 				for (int i = 0; i < ops_per_thread; i++) {
 					string catalog_name = "catalog_" + std::to_string(t) + "_" + std::to_string(i);
 					BoilstreamCatalogVersionTestAccess::RefreshCatalogCredentials(*fixture.storage, catalog_name,
-					                                                               fixture.conn_state);
+					                                                              fixture.conn_state);
 				}
 			});
 		}
