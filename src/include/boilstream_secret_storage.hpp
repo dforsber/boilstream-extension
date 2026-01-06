@@ -168,6 +168,13 @@ public:
 	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
 	static bool IsMultiTenantMode(ClientContext &context);
 
+	//! Get the tenant ID from context (returns empty string if not in multi-tenant mode)
+	static string GetTenantId(ClientContext &context);
+
+	//! Strip tenant prefix from a name (e.g., "__BS_u123__duckie" -> "duckie")
+	//! Returns the original name if no prefix found or not in multi-tenant mode
+	static string StripTenantPrefix(const string &name, ClientContext &context);
+
 	//! Check if running in WASM environment (compile-time constant)
 	static constexpr bool IsWasmMode() {
 #ifdef __EMSCRIPTEN__

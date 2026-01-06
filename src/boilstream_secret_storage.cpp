@@ -2214,6 +2214,28 @@ bool RestApiSecretStorage::IsMultiTenantMode(ClientContext &context) {
 	return false;
 }
 
+string RestApiSecretStorage::GetTenantId(ClientContext &context) {
+	Value tenant_id;
+	if (context.TryGetCurrentSetting("boilstream.tenant_id", tenant_id)) {
+		return tenant_id.ToString();
+	}
+	return "";
+}
+
+string RestApiSecretStorage::StripTenantPrefix(const string &name, ClientContext &context) {
+	auto tenant_id = GetTenantId(context);
+	if (tenant_id.empty()) {
+		return name;
+	}
+
+	// Tenant prefix format: __BS_u{tenant_id}__
+	string prefix = "__BS_u" + tenant_id + "__";
+	if (name.find(prefix) == 0) {
+		return name.substr(prefix.length());
+	}
+	return name;
+}
+
 string RestApiSecretStorage::AppendMultiTenantParam(const string &url, optional_ptr<CatalogTransaction> transaction) {
 	// If no transaction or no context, return URL unchanged
 	if (!transaction || !transaction->HasContext()) {
@@ -2318,9 +2340,12 @@ void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> sec
 	auto trans = GetTransactionOrDefault(transaction);
 	auto secret_name = secret->GetName();
 
+	BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Adding '" << secret_name << "'");
+
 	// Check if secret already exists in catalog
 	auto existing = secrets->GetEntry(trans, secret_name);
 	if (existing) {
+		BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Dropping existing entry for '" << secret_name << "'");
 		// Drop the existing entry
 		secrets->DropEntry(trans, secret_name, false, true);
 	}
@@ -2332,6 +2357,11 @@ void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> sec
 	secret_entry->secret->persist_type = SecretPersistType::PERSISTENT;
 	LogicalDependencyList l;
 	secrets->CreateEntry(trans, secret_name, std::move(secret_entry), l);
+
+	// Verify entry was created
+	auto verify = secrets->GetEntry(trans, secret_name);
+	BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Entry created for '"
+	               << secret_name << "', verify=" << (verify ? "found" : "NOT FOUND"));
 }
 
 string RestApiSecretStorage::HttpGet(const string &url, optional_ptr<CatalogTransaction> transaction) {
@@ -3425,7 +3455,10 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 			BOILSTREAM_LOG("AllSecrets EXIT: using cached result (fetched "
 			               << seconds_since_fetch
 			               << "s ago, TTL=" << BoilstreamConnectionState::ALL_SECRETS_CACHE_TTL_SECONDS << "s)");
-			return CatalogSetSecretStorage::AllSecrets(transaction);
+			auto cached_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
+			BOILSTREAM_LOG("AllSecrets: CatalogSetSecretStorage::AllSecrets returned " << cached_secrets.size()
+			                                                                           << " secrets");
+			return cached_secrets;
 		}
 	}
 
@@ -3553,18 +3586,26 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 
 				// Add or update secret in local catalog
 				AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+				BOILSTREAM_LOG("AllSecrets: Added '" << secret_name << "' to local catalog");
 
 				// Also cache in memory storage for DuckLake
 				try {
 					auto trans = GetTransactionOrDefault(transaction);
 					BOILSTREAM_LOG("AllSecrets: Attempting to cache '" << secret_name << "' in memory storage");
+					BOILSTREAM_LOG("AllSecrets: trans.HasContext()=" << (trans.HasContext() ? "true" : "false"));
 					auto secret_copy = DeserializeSecret(secret_json_for_cache, manager);
 					if (secret_copy) {
 						BOILSTREAM_LOG("AllSecrets: Deserialized '" << secret_name
 						                                            << "', type=" << secret_copy->GetType());
-						manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
-						                       SecretPersistType::TEMPORARY, "memory");
-						BOILSTREAM_LOG("AllSecrets: Successfully cached '" << secret_name << "' in memory storage");
+						auto registered =
+						    manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
+						                           SecretPersistType::TEMPORARY, "memory");
+						if (registered) {
+							BOILSTREAM_LOG("AllSecrets: Registered in memory as '" << registered->secret->GetName()
+							                                                       << "'");
+						} else {
+							BOILSTREAM_LOG("AllSecrets: RegisterSecret returned null for '" << secret_name << "'");
+						}
 					} else {
 						BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null for memory cache of '"
 						               << secret_name << "'");
@@ -3594,8 +3635,11 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	}
 
 	// Return all secrets from local catalog (now includes REST API secrets)
-	BOILSTREAM_LOG("AllSecrets EXIT: success, added " << secrets_added << " secrets");
-	return CatalogSetSecretStorage::AllSecrets(transaction);
+	auto final_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
+	BOILSTREAM_LOG("AllSecrets EXIT: success, added "
+	               << secrets_added << " secrets, CatalogSetSecretStorage::AllSecrets returned " << final_secrets.size()
+	               << " secrets");
+	return final_secrets;
 }
 
 vector<SecretEntry> RestApiSecretStorage::GetCachedSecrets(optional_ptr<CatalogTransaction> transaction) {

@@ -248,10 +248,11 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 			row.emplace_back(Value());
 		}
 
-		// catalog_name
+		// catalog_name (strip tenant prefix for display)
 		auto catalog_name_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_name");
 		if (catalog_name_val && duckdb_yyjson::yyjson_is_str(catalog_name_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(catalog_name_val)));
+			string catalog_name = SafeYyjsonGetStr(catalog_name_val);
+			row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(catalog_name, context)));
 		} else {
 			row.emplace_back(Value());
 		}
@@ -437,8 +438,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		auto &secret = *entry.secret;
 		vector<Value> row;
 
-		// name
-		row.emplace_back(Value(secret.GetName()));
+		// name (strip tenant prefix for display)
+		row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(secret.GetName(), context)));
 
 		// type
 		row.emplace_back(Value(secret.GetType()));
@@ -1014,12 +1015,13 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Build list of available ducklakes for user to attach manually
 	// This avoids context switches and system catalog transaction issues
+	// Strip tenant prefix for user-friendly display
 	string ducklakes_list;
 	for (size_t i = 0; i < ducklake_names.size(); i++) {
 		if (i > 0) {
 			ducklakes_list += ", ";
 		}
-		ducklakes_list += ducklake_names[i];
+		ducklakes_list += RestApiSecretStorage::StripTenantPrefix(ducklake_names[i], context);
 	}
 	BOILSTREAM_LOG("SetEndpoint: Available ducklakes: " << ducklakes_list);
 
@@ -2135,20 +2137,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Build multi-statement SQL: ATTACH statements + final SELECT
 	string result_sql = "";
 
-#ifdef __EMSCRIPTEN__
-	// WASM FIX: Skip auto-attach to avoid stack overflow during ducklake initialization.
-	// Ducklake's duckdb_secrets() call causes deep JS↔WASM call chains.
-	// User can manually run: ATTACH 'ducklake:name' AS name;
-	BOILSTREAM_LOG("Login: Skipping auto-attach in WASM mode (user can manually attach)");
-#else
-	// Add ATTACH statements for each ducklake
-	for (const auto &ducklake_name : ducklake_names) {
-		string attach_stmt =
-		    "ATTACH 'ducklake:" + ducklake_name + "' AS " + KeywordHelper::WriteOptionallyQuoted(ducklake_name) + ";\n";
-		result_sql += attach_stmt;
-		BOILSTREAM_LOG("Login: Adding ATTACH statement for: " << ducklake_name);
-	}
-#endif
+	// Skip auto-attach - user can manually run: ATTACH 'ducklake:name' AS name;
+	BOILSTREAM_LOG("Login: Skipping auto-attach (user can manually attach)");
 
 	// Add final SELECT statement showing status
 	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at, " +
