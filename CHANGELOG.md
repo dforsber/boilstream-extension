@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fix timestamp anti-replay bypass**: The `catch(...)` block in `VerifyResponseSignature` was swallowing the `IOException` thrown when a response timestamp exceeded the 60-second window, making the anti-replay check a no-op. The window check is now outside the try/catch so it always propagates
 - **Require x-boilstream-date header**: Response signature verification now rejects responses missing the `x-boilstream-date` header, preventing timestamp check bypass by header omission
 - **Fix insecure memory zeroing in ClearSession**: Replaced `std::fill` with volatile-write helpers (`SecureZeroString`, `SecureZeroVector`) to prevent the compiler from optimizing away memory clearing of sensitive session credentials
+- **Fix missed SQL injection in cached TOTP path**: The cached registration code path was missing `EscapeSqlLiteral()` on `formatted_secret` and `cached_totp_uri`
+
+### Fixed
+
+- **Fix double response body in HttpGetWithState**: `response_handler` was assigning `response.body` while `content_handler` also appended chunks, causing potential data duplication
+- **Add NULL checks for yyjson_mut_write**: All 16 call sites now use `SafeJsonSerialize()` which throws on allocation failure instead of passing NULL to `std::string` constructor (undefined behavior)
+- **Fix broken Rust password validation test**: Test string `"12chars_ok"` was only 10 characters, causing the assertion to fail
 
 ## [0.5.0] - 2025-12-27
 

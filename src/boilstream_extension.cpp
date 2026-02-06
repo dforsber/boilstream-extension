@@ -44,6 +44,17 @@
 
 namespace duckdb {
 
+// Serialize a yyjson mutable doc to string, throwing on allocation failure.
+static string SafeJsonSerialize(duckdb_yyjson::yyjson_mut_doc *doc) {
+	auto json_str = duckdb_yyjson::yyjson_mut_write(doc, 0, nullptr);
+	if (!json_str) {
+		throw IOException("Failed to serialize JSON document");
+	}
+	string result(json_str);
+	free(json_str);
+	return result;
+}
+
 // Escape a string for safe embedding in a SQL single-quoted literal.
 // Replaces ' with '' to prevent SQL injection via server-controlled data.
 static string EscapeSqlLiteral(const string &s) {
@@ -766,9 +777,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 		duckdb_yyjson::yyjson_mut_obj_add_strcpy(doc, obj, "s3_bucket_name", s3_bucket_name.c_str());
 	}
 
-	auto body_str = duckdb_yyjson::yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	duckdb_yyjson::yyjson_mut_doc_free(doc);
 
 	BOILSTREAM_LOG("CreateDucklake: Making POST request, body_len=" << body.size());
@@ -1156,8 +1165,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 			// Return cached QR code response
 			string result_sql = "INSTALL textplot FROM community;\n";
 			result_sql += "LOAD textplot;\n";
-			result_sql += "SELECT unnest(['" + formatted_secret +
-			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + cached_totp_uri +
+			result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
+			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + EscapeSqlLiteral(cached_totp_uri) +
 			              "'), chr(10))) as qr_code;";
 
 			return result_sql;
@@ -1304,9 +1313,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(signup_doc, signup_obj, "password", password.c_str());
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(signup_doc, signup_obj, "csrf_token", csrf_token.c_str());
 
-	auto signup_body_str = duckdb_yyjson::yyjson_mut_write(signup_doc, 0, nullptr);
-	string signup_body(signup_body_str);
-	free(signup_body_str);
+	string signup_body = SafeJsonSerialize(signup_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(signup_doc);
 
 	string signup_response;
@@ -1359,9 +1366,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "password", password.c_str());
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "csrf_token", csrf_token.c_str());
 
-	auto login_body_str = duckdb_yyjson::yyjson_mut_write(login_doc, 0, nullptr);
-	string login_body(login_body_str);
-	free(login_body_str);
+	string login_body = SafeJsonSerialize(login_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(login_doc);
 
 	// Capture response headers to get Set-Cookie
@@ -1431,9 +1436,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	auto totp_obj = duckdb_yyjson::yyjson_mut_obj(totp_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(totp_doc, totp_obj);
 	// Empty body for enrollment
-	auto totp_body_str = duckdb_yyjson::yyjson_mut_write(totp_doc, 0, nullptr);
-	string totp_body(totp_body_str);
-	free(totp_body_str);
+	string totp_body = SafeJsonSerialize(totp_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(totp_doc);
 
 	// Make authenticated request with session cookie
@@ -1621,9 +1624,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(verify_doc, verify_obj, "code", totp_code.c_str());
 	// Note: secret is not needed for verify-enrollment, it's already stored server-side
 
-	auto verify_body_str = duckdb_yyjson::yyjson_mut_write(verify_doc, 0, nullptr);
-	string verify_body(verify_body_str);
-	free(verify_body_str);
+	string verify_body = SafeJsonSerialize(verify_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(verify_doc);
 
 	// Make authenticated request with session cookie
@@ -1908,9 +1909,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "password", password.c_str());
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "csrf_token", csrf_token.c_str());
 
-	auto login_body_str = duckdb_yyjson::yyjson_mut_write(login_doc, 0, nullptr);
-	string login_body(login_body_str);
-	free(login_body_str);
+	string login_body = SafeJsonSerialize(login_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(login_doc);
 
 	BOILSTREAM_LOG("Login: Posting credentials to /auth/email/login (step 1/2)");
@@ -1969,9 +1968,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(mfa_doc, mfa_obj, "code", mfa_code.c_str());
 
-	auto mfa_body_str = duckdb_yyjson::yyjson_mut_write(mfa_doc, 0, nullptr);
-	string mfa_body(mfa_body_str);
-	free(mfa_body_str);
+	string mfa_body = SafeJsonSerialize(mfa_doc);
 	duckdb_yyjson::yyjson_mut_doc_free(mfa_doc);
 
 	BOILSTREAM_LOG("Login: Posting MFA code to /auth/api/mfa/verify/totp (step 2/2)");

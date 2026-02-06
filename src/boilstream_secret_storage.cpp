@@ -135,6 +135,17 @@ using namespace duckdb_yyjson;
 
 namespace duckdb {
 
+// Serialize a yyjson mutable doc to string, throwing on allocation failure.
+static string SafeJsonSerialize(yyjson_mut_doc *doc) {
+	auto json_str = yyjson_mut_write(doc, 0, nullptr);
+	if (!json_str) {
+		throw IOException("Failed to serialize JSON document");
+	}
+	string result(json_str);
+	free(json_str);
+	return result;
+}
+
 //===----------------------------------------------------------------------===//
 // Security Limits - Prevent DoS via oversized payloads
 //===----------------------------------------------------------------------===//
@@ -378,9 +389,7 @@ void RestApiSecretStorage::SaveRefreshToken(BoilstreamConnectionState &conn_stat
 	std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
 	yyjson_mut_obj_add_strcpy(doc, obj, "expires_at", expires_str);
 
-	auto json_str = yyjson_mut_write(doc, 0, nullptr);
-	string json_output(json_str);
-	free(json_str);
+	string json_output = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 #ifdef __EMSCRIPTEN__
@@ -643,9 +652,7 @@ void RestApiSecretStorage::PerformOpaqueRegistration(ClientContext &context, con
 	yyjson_mut_obj_add_strcpy(doc, obj, "user_id", user_id.c_str());
 	yyjson_mut_obj_add_strcpy(doc, obj, "registration_request", reg_start.registration_request_base64.c_str());
 
-	auto body_str = yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	string response;
@@ -702,9 +709,7 @@ void RestApiSecretStorage::PerformOpaqueRegistration(ClientContext &context, con
 	yyjson_mut_obj_add_strcpy(upload_doc, upload_obj, "registration_upload",
 	                          reg_finish.registration_upload_base64.c_str());
 
-	auto upload_body_str = yyjson_mut_write(upload_doc, 0, nullptr);
-	string upload_body(upload_body_str);
-	free(upload_body_str);
+	string upload_body = SafeJsonSerialize(upload_doc);
 	yyjson_mut_doc_free(upload_doc);
 
 	try {
@@ -790,9 +795,7 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, cons
 	yyjson_mut_obj_add_strcpy(doc, obj, "user_id", user_id.c_str());
 	yyjson_mut_obj_add_strcpy(doc, obj, "credential_request", login_start.credential_request_base64.c_str());
 
-	auto body_str = yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	BOILSTREAM_LOG("PerformOpaqueLogin: login-start request: " << body);
@@ -884,9 +887,7 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, cons
 	yyjson_mut_obj_add_strcpy(final_doc, final_obj, "credential_finalization",
 	                          login_finish.credential_finalization_base64.c_str());
 
-	auto final_body_str = yyjson_mut_write(final_doc, 0, nullptr);
-	string final_body(final_body_str);
-	free(final_body_str);
+	string final_body = SafeJsonSerialize(final_doc);
 	yyjson_mut_doc_free(final_doc);
 
 	BOILSTREAM_LOG("PerformOpaqueLogin: login-finish request: " << final_body);
@@ -2019,9 +2020,7 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 	yyjson_mut_obj_add_strcpy(doc, obj, "expires_at", expires_at_buf);
 
 	// Convert to string
-	auto json_str = yyjson_mut_write(doc, 0, nullptr);
-	string result(json_str);
-	free(json_str);
+	string result = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	return result;
@@ -2447,7 +2446,7 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 		string response_body;
 		HTTPHeaders response_headers_captured(db);
 		auto response_handler = [&](const HTTPResponse &response) {
-			response_body = response.body;
+			// Don't use response.body - it may be empty when content_handler is used
 			// Capture response headers for signature verification
 			response_headers_captured = response.headers;
 			return true;
@@ -3074,9 +3073,7 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	yyjson_mut_obj_add_strcpy(doc, obj, "on_conflict",
 	                          on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT ? "replace" : "error");
 
-	auto body_str = yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	BOILSTREAM_LOG("WriteSecretWithState: about to POST, body_len=" << body.size());
@@ -3196,9 +3193,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	yyjson_mut_obj_add_strcpy(doc, obj, "type", StringUtil::Lower(type).c_str());
 	yyjson_mut_obj_add_bool(doc, obj, "expired", has_expired_cache);
 
-	auto body_str = yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	// Make HTTP POST request (need connection state for authentication)
@@ -3335,9 +3330,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	yyjson_mut_obj_add_strcpy(doc, obj, "name", name.c_str());
 	yyjson_mut_obj_add_bool(doc, obj, "expired", has_expired_cache);
 
-	auto body_str = yyjson_mut_write(doc, 0, nullptr);
-	string body(body_str);
-	free(body_str);
+	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
 	// Make HTTP POST request (need connection state for authentication)

@@ -213,8 +213,8 @@ mod tests {
     fn test_validate_password_weak() {
         assert!(validate_password("").is_err());
         assert!(validate_password("short").is_err());
-        assert!(validate_password("11chars").is_err());
-        assert!(validate_password("12chars_ok").is_ok());
+        assert!(validate_password("11chars____").is_err());
+        assert!(validate_password("12chars_ok!!").is_ok());
     }
 
     #[test]
