@@ -499,10 +499,23 @@ TEST_CASE("Canonical Response Format", "[boilstream][crypto][canonical]") {
 			hashed_payload += hex_chars[byte & 0xF];
 		}
 
+		// Generate current timestamp for the response (must be within 60-second window)
+		auto now = std::chrono::system_clock::now();
+		auto now_t = std::chrono::system_clock::to_time_t(now);
+		std::tm tm_utc;
+#ifdef _WIN32
+		gmtime_s(&tm_utc, &now_t);
+#else
+		gmtime_r(&now_t, &tm_utc);
+#endif
+		char ts_buf[17];
+		std::strftime(ts_buf, sizeof(ts_buf), "%Y%m%dT%H%M%SZ", &tm_utc);
+		string current_timestamp(ts_buf);
+
 		// Build canonical response with sorted headers (alphabetical order)
 		string canonical_response = "200\n"
 		                            "x-boilstream-cipher:0x0001\n"
-		                            "x-boilstream-date:20251009T120000Z\n"
+		                            "x-boilstream-date:" + current_timestamp + "\n"
 		                            "x-boilstream-encrypted:false\n"
 		                            "\n"
 		                            "x-boilstream-cipher;x-boilstream-date;x-boilstream-encrypted\n" +
@@ -519,7 +532,7 @@ TEST_CASE("Canonical Response Format", "[boilstream][crypto][canonical]") {
 		case_insensitive_map_t<string> headers;
 		headers["x-boilstream-response-signature"] = signature_b64;
 		headers["x-boilstream-cipher"] = "0x0001";
-		headers["x-boilstream-date"] = "20251009T120000Z";
+		headers["x-boilstream-date"] = current_timestamp;
 		headers["x-boilstream-encrypted"] = "false";
 
 		// Should verify successfully with correctly sorted headers

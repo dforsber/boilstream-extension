@@ -22,7 +22,9 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "mbedtls/md.h"
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <iomanip>
 #include <sstream>
 
@@ -131,6 +133,58 @@ std::string BytesToHex(const uint8_t *bytes, size_t len) {
 		ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
 	}
 	return ss.str();
+}
+
+// Generate current UTC timestamp in YYYYMMDDTHHMMSSZ format
+std::string CurrentTimestamp() {
+	auto now = std::chrono::system_clock::now();
+	auto now_t = std::chrono::system_clock::to_time_t(now);
+	std::tm tm_utc;
+#ifdef _WIN32
+	gmtime_s(&tm_utc, &now_t);
+#else
+	gmtime_r(&now_t, &tm_utc);
+#endif
+	char buf[17];
+	std::strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", &tm_utc);
+	return std::string(buf);
+}
+
+// Compute response signature for a given body, status, timestamp, and session key
+std::string ComputeResponseSignature(const std::string &response_body, uint16_t status_code,
+                                     const std::string &timestamp,
+                                     const std::vector<uint8_t> &session_key) {
+	// Derive integrity key
+	auto integrity_key = BoilstreamConformanceTestAccess::DeriveIntegrityKey(session_key);
+
+	// Hash body (SHA-256, lowercase hex)
+	char body_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(response_body.c_str(), response_body.size(), body_hash);
+
+	std::string hashed_payload;
+	hashed_payload.reserve(64);
+	const char *hex_chars = "0123456789abcdef";
+	for (size_t i = 0; i < 32; i++) {
+		unsigned char byte = static_cast<unsigned char>(body_hash[i]);
+		hashed_payload += hex_chars[(byte >> 4) & 0xF];
+		hashed_payload += hex_chars[byte & 0xF];
+	}
+
+	// Build canonical response: status\nheaders\n\nsigned_headers\nhashed_payload
+	std::string canonical_response = std::to_string(status_code) + "\n"
+	                                  "x-boilstream-date:" + timestamp + "\n"
+	                                  "\n"
+	                                  "x-boilstream-date\n" +
+	                                  hashed_payload;
+
+	// HMAC-SHA256
+	unsigned char hmac_output[32];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()),
+	                                        integrity_key.size(), canonical_response.c_str(),
+	                                        canonical_response.size(), reinterpret_cast<char *>(hmac_output));
+
+	std::string hmac_str(reinterpret_cast<char *>(hmac_output), 32);
+	return Blob::ToBase64(string_t(hmac_str));
 }
 
 //===----------------------------------------------------------------------===//
@@ -751,13 +805,15 @@ TEST_CASE("Tier 4: A.9 - Complete Response Verification (PRODUCTION CODE)", "[co
 	std::string response_body = "";
 	uint16_t status_code = 200;
 
-	// Expected signature from specification A.9: TBjZBAXiayRe/JfkrPtM4aRJAH6fnIeVeUs1d4GvDas=
-	// This is the CORRECT signature that the server produces
-	std::string correct_signature_b64 = "TBjZBAXiayRe/JfkrPtM4aRJAH6fnIeVeUs1d4GvDas=";
+	// Generate current timestamp and compute the correct signature dynamically
+	// (timestamp must be within 60-second window for verification to pass)
+	std::string current_ts = CurrentTimestamp();
+	std::string correct_signature_b64 = ComputeResponseSignature(response_body, status_code,
+	                                                              current_ts, fixture.test_session_key);
 
 	// Build HTTP response headers (what server would send)
 	case_insensitive_map_t<std::string> headers;
-	headers["x-boilstream-date"] = "20251009T120100Z";
+	headers["x-boilstream-date"] = current_ts;
 	headers["x-boilstream-response-signature"] = correct_signature_b64;
 
 	// TEST 1: Verify CORRECT signature passes (calls PRODUCTION VerifyResponseSignature)
