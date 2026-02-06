@@ -174,15 +174,31 @@ public:
 		return (token_expires_at - buffer) > now;
 	}
 
+	//! Securely zero a string using volatile writes to prevent compiler optimization
+	static void SecureZeroString(string &s) {
+		volatile char *p = const_cast<volatile char *>(s.data());
+		for (size_t i = 0; i < s.size(); i++) {
+			p[i] = 0;
+		}
+	}
+
+	//! Securely zero a vector using volatile writes to prevent compiler optimization
+	static void SecureZeroVector(vector<uint8_t> &v) {
+		volatile uint8_t *p = v.data();
+		for (size_t i = 0; i < v.size(); i++) {
+			p[i] = 0;
+		}
+	}
+
 	//! Clear session state (on error or logout)
 	void ClearSession() {
 		lock_guard<mutex> lock(session_lock);
-		// Secure memory wiping
-		std::fill(access_token.begin(), access_token.end(), '\0');
+		// Secure memory wiping using volatile to prevent compiler optimization
+		SecureZeroString(access_token);
 		access_token.clear();
-		std::fill(session_key.begin(), session_key.end(), 0);
+		SecureZeroVector(session_key);
 		session_key.clear();
-		std::fill(refresh_token.begin(), refresh_token.end(), 0);
+		SecureZeroVector(refresh_token);
 		refresh_token.clear();
 		client_sequence = 0;
 		region.clear();

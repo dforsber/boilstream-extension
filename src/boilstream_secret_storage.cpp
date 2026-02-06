@@ -1502,11 +1502,15 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 
 	// Validate timestamp (must be within 60 seconds)
 	auto date_it = headers.find("x-boilstream-date");
-	if (date_it != headers.end()) {
+	if (date_it == headers.end()) {
+		throw IOException("Response signature verification failed: missing x-boilstream-date header");
+	}
+	{
 		string timestamp_str = date_it->second;
 		// Parse ISO8601 timestamp: YYYYMMDDTHHMMSSZ
 		// Manual parsing (std::get_time not available in C++11)
 		if (timestamp_str.length() == 16 && timestamp_str[8] == 'T' && timestamp_str[15] == 'Z') {
+			time_t response_time = -1;
 			try {
 				int year = std::stoi(timestamp_str.substr(0, 4));
 				int month = std::stoi(timestamp_str.substr(4, 2));
@@ -1524,26 +1528,27 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 				tm.tm_sec = second;
 				tm.tm_isdst = 0;
 
-				time_t response_time = 0;
 #ifdef _WIN32
 				response_time = _mkgmtime(&tm);
 #else
 				response_time = timegm(&tm);
 #endif
-				if (response_time != -1) {
-					auto response_tp = std::chrono::system_clock::from_time_t(response_time);
-					auto now = std::chrono::system_clock::now();
-					auto diff_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-					                        now > response_tp ? now - response_tp : response_tp - now)
-					                        .count();
-
-					if (diff_seconds > 60) {
-						throw IOException("Response signature verification failed: timestamp outside 60-second window");
-					}
-				}
 			} catch (...) {
-				// Timestamp parsing failed - log but don't fail verification
+				// stoi can throw std::invalid_argument or std::out_of_range
 				BOILSTREAM_LOG("VerifyResponseSignature: Failed to parse timestamp");
+			}
+
+			// Timestamp window check is outside the try/catch so it always propagates
+			if (response_time != -1) {
+				auto response_tp = std::chrono::system_clock::from_time_t(response_time);
+				auto now = std::chrono::system_clock::now();
+				auto diff_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+				                        now > response_tp ? now - response_tp : response_tp - now)
+				                        .count();
+
+				if (diff_seconds > 60) {
+					throw IOException("Response signature verification failed: timestamp outside 60-second window");
+				}
 			}
 		}
 	}

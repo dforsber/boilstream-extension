@@ -5,6 +5,15 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-02-06
+
+### Security
+
+- **Fix SQL injection in PRAGMA return values**: All server-controlled data (ducklake names, backup codes, TOTP secrets) interpolated into PRAGMA return SQL strings is now escaped via `EscapeSqlLiteral()` to prevent SQL injection from a malicious server
+- **Fix timestamp anti-replay bypass**: The `catch(...)` block in `VerifyResponseSignature` was swallowing the `IOException` thrown when a response timestamp exceeded the 60-second window, making the anti-replay check a no-op. The window check is now outside the try/catch so it always propagates
+- **Require x-boilstream-date header**: Response signature verification now rejects responses missing the `x-boilstream-date` header, preventing timestamp check bypass by header omission
+- **Fix insecure memory zeroing in ClearSession**: Replaced `std::fill` with volatile-write helpers (`SecureZeroString`, `SecureZeroVector`) to prevent the compiler from optimizing away memory clearing of sensitive session credentials
+
 ## [0.5.0] - 2025-12-27
 
 ### Added

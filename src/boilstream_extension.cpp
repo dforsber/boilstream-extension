@@ -44,6 +44,21 @@
 
 namespace duckdb {
 
+// Escape a string for safe embedding in a SQL single-quoted literal.
+// Replaces ' with '' to prevent SQL injection via server-controlled data.
+static string EscapeSqlLiteral(const string &s) {
+	string result;
+	result.reserve(s.size());
+	for (char c : s) {
+		if (c == '\'') {
+			result += "''";
+		} else {
+			result += c;
+		}
+	}
+	return result;
+}
+
 // Global storage pointer (set during extension load)
 // Using raw pointer with careful lifetime management
 static RestApiSecretStorage *global_rest_storage = nullptr;
@@ -54,7 +69,7 @@ static std::string GetBoilstreamVersion() {
 #ifdef EXT_VERSION_BOILSTREAM
 	return EXT_VERSION_BOILSTREAM;
 #else
-	return "0.5.0";
+	return "0.5.1";
 #endif
 }
 
@@ -791,7 +806,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	}
 
 	// Return success message
-	return "SELECT 'Ducklake created successfully' as status, '" + catalog_name + "' as catalog_name;";
+	return "SELECT 'Ducklake created successfully' as status, '" + EscapeSqlLiteral(catalog_name) + "' as catalog_name;";
 }
 
 //! PRAGMA function to set the REST API endpoint URL
@@ -1021,7 +1036,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		if (i > 0) {
 			ducklakes_list += ", ";
 		}
-		ducklakes_list += RestApiSecretStorage::StripTenantPrefix(ducklake_names[i], context);
+		ducklakes_list += EscapeSqlLiteral(RestApiSecretStorage::StripTenantPrefix(ducklake_names[i], context));
 	}
 	BOILSTREAM_LOG("SetEndpoint: Available ducklakes: " << ducklakes_list);
 
@@ -1498,8 +1513,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Remaining rows: QR code
 	string result_sql = "INSTALL textplot FROM community;\n";
 	result_sql += "LOAD textplot;\n";
-	result_sql += "SELECT unnest(['" + formatted_secret +
-	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + totp_uri +
+	result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
+	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + EscapeSqlLiteral(totp_uri) +
 	              "'), chr(10))) as qr_code;";
 
 	return result_sql;
@@ -1687,7 +1702,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		for (size_t i = 0; i < backup_codes.size(); i++) {
 			if (i > 0)
 				result_sql += "', '";
-			result_sql += backup_codes[i];
+			result_sql += EscapeSqlLiteral(backup_codes[i]);
 		}
 		result_sql += "']) as backup_code;";
 	} else {
