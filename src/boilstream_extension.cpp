@@ -70,9 +70,10 @@ static string EscapeSqlLiteral(const string &s) {
 	return result;
 }
 
-// Global storage pointer (set during extension load)
-// Using raw pointer with careful lifetime management
-static RestApiSecretStorage *global_rest_storage = nullptr;
+// Per-DatabaseInstance storage map (set during extension load)
+// Each DatabaseInstance gets its own RestApiSecretStorage registered with its SecretManager.
+// A process-global pointer would be wrong when multiple DatabaseInstance objects exist.
+static unordered_map<DatabaseInstance *, RestApiSecretStorage *> global_rest_storages;
 static mutex global_storage_lock;
 
 //! Helper to get the extension version string from a single source
@@ -108,15 +109,21 @@ static void ClearQueryLogs(ClientContext &context) {
 	}
 }
 
-//! Helper to get the global storage safely
-static RestApiSecretStorage *GetGlobalStorage() {
+//! Helper to get the boilstream storage for the given context's DatabaseInstance.
+//! Each DatabaseInstance has its own RestApiSecretStorage registered during extension load.
+static RestApiSecretStorage *GetStorageFromContext(ClientContext &context) {
+	auto &db = DatabaseInstance::GetDatabase(context);
 	lock_guard<mutex> lock(global_storage_lock);
-	return global_rest_storage;
+	auto it = global_rest_storages.find(&db);
+	if (it != global_rest_storages.end()) {
+		return it->second;
+	}
+	return nullptr;
 }
 
 //! Helper to set user context for a connection
 static void SetUserContext(ClientContext &context, const string &user_id) {
-	auto storage = GetGlobalStorage();
+	auto storage = GetStorageFromContext(context);
 	if (storage) {
 		storage->SetUserContextForConnection(context.GetConnectionId(), user_id);
 	}
@@ -172,8 +179,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
                                                                     TableFunctionInitInput &input) {
 	auto result = make_uniq<BoilstreamDucklakesGlobalState>();
 
-	// Get global storage
-	auto storage = GetGlobalStorage();
+	// Get storage from context's SecretManager (correct when multiple DB instances exist)
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw InvalidInputException(
 		    "boilstream_ducklakes: No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -419,8 +426,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
                                                                   TableFunctionInitInput &input) {
 	auto result = make_uniq<BoilstreamSecretsGlobalState>();
 
-	// Get global storage
-	auto storage = GetGlobalStorage();
+	// Get storage from context's SecretManager (correct when multiple DB instances exist)
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw InvalidInputException(
 		    "boilstream_secrets: No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -562,8 +569,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
                                                                   TableFunctionInitInput &input) {
 	auto result = make_uniq<BoilstreamBucketsGlobalState>();
 
-	// Get global storage
-	auto storage = GetGlobalStorage();
+	// Get storage from context's SecretManager (correct when multiple DB instances exist)
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw InvalidInputException(
 		    "boilstream_buckets: No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -742,8 +749,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 		throw InvalidInputException("catalog_name cannot be empty");
 	}
 
-	// Get global storage
-	auto storage = GetGlobalStorage();
+	// Get storage from context's SecretManager (correct when multiple DB instances exist)
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw InvalidInputException(
 		    "boilstream_create_ducklake: No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -815,7 +822,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	}
 
 	// Return success message
-	return "SELECT 'Ducklake created successfully' as status, '" + EscapeSqlLiteral(catalog_name) + "' as catalog_name;";
+	return "SELECT 'Ducklake created successfully' as status, '" + EscapeSqlLiteral(catalog_name) +
+	       "' as catalog_name;";
 }
 
 //! PRAGMA function to set the REST API endpoint URL
@@ -907,8 +915,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	}
 
 	// Update the REST API storage with endpoint first
-	BOILSTREAM_LOG("Step 10: Getting global storage");
-	auto storage = GetGlobalStorage();
+	BOILSTREAM_LOG("Step 10: Getting storage from context");
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		BOILSTREAM_LOG("SetEndpoint: WARNING - storage is NULL!");
 		throw InvalidInputException("rest_set_endpoint: Storage not initialized");
@@ -1130,7 +1138,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Check if we already have registration state (cached registration in progress)
 	// This allows users to re-run the command to see the QR code again if it was truncated
-	auto storage = GetGlobalStorage();
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw IOException("No boilstream storage available");
 	}
@@ -1166,8 +1174,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 			string result_sql = "INSTALL textplot FROM community;\n";
 			result_sql += "LOAD textplot;\n";
 			result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
-			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + EscapeSqlLiteral(cached_totp_uri) +
-			              "'), chr(10))) as qr_code;";
+			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
+			              EscapeSqlLiteral(cached_totp_uri) + "'), chr(10))) as qr_code;";
 
 			return result_sql;
 		}
@@ -1517,8 +1525,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	string result_sql = "INSTALL textplot FROM community;\n";
 	result_sql += "LOAD textplot;\n";
 	result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
-	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" + EscapeSqlLiteral(totp_uri) +
-	              "'), chr(10))) as qr_code;";
+	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
+	              EscapeSqlLiteral(totp_uri) + "'), chr(10))) as qr_code;";
 
 	return result_sql;
 }
@@ -1546,7 +1554,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	}
 
 	// Retrieve registration state from storage
-	auto storage = GetGlobalStorage();
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw IOException("No boilstream storage available");
 	}
@@ -2045,7 +2053,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	// Step 5: Perform OPAQUE bootstrap token exchange
 	// This establishes the OPAQUE session with the bootstrap token
-	auto storage = GetGlobalStorage();
+	auto storage = GetStorageFromContext(context);
 	if (!storage) {
 		throw IOException("No boilstream storage available");
 	}
@@ -2261,7 +2269,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	{
 		lock_guard<mutex> lock(global_storage_lock);
-		global_rest_storage = storage.get();
+		global_rest_storages[&db] = storage.get();
 	}
 
 	auto &secret_manager = db.GetSecretManager();

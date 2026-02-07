@@ -515,7 +515,9 @@ TEST_CASE("Canonical Response Format", "[boilstream][crypto][canonical]") {
 		// Build canonical response with sorted headers (alphabetical order)
 		string canonical_response = "200\n"
 		                            "x-boilstream-cipher:0x0001\n"
-		                            "x-boilstream-date:" + current_timestamp + "\n"
+		                            "x-boilstream-date:" +
+		                            current_timestamp +
+		                            "\n"
 		                            "x-boilstream-encrypted:false\n"
 		                            "\n"
 		                            "x-boilstream-cipher;x-boilstream-date;x-boilstream-encrypted\n" +

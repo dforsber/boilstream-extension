@@ -152,8 +152,7 @@ std::string CurrentTimestamp() {
 
 // Compute response signature for a given body, status, timestamp, and session key
 std::string ComputeResponseSignature(const std::string &response_body, uint16_t status_code,
-                                     const std::string &timestamp,
-                                     const std::vector<uint8_t> &session_key) {
+                                     const std::string &timestamp, const std::vector<uint8_t> &session_key) {
 	// Derive integrity key
 	auto integrity_key = BoilstreamConformanceTestAccess::DeriveIntegrityKey(session_key);
 
@@ -171,17 +170,20 @@ std::string ComputeResponseSignature(const std::string &response_body, uint16_t 
 	}
 
 	// Build canonical response: status\nheaders\n\nsigned_headers\nhashed_payload
-	std::string canonical_response = std::to_string(status_code) + "\n"
-	                                  "x-boilstream-date:" + timestamp + "\n"
-	                                  "\n"
-	                                  "x-boilstream-date\n" +
-	                                  hashed_payload;
+	std::string canonical_response = std::to_string(status_code) +
+	                                 "\n"
+	                                 "x-boilstream-date:" +
+	                                 timestamp +
+	                                 "\n"
+	                                 "\n"
+	                                 "x-boilstream-date\n" +
+	                                 hashed_payload;
 
 	// HMAC-SHA256
 	unsigned char hmac_output[32];
-	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()),
-	                                        integrity_key.size(), canonical_response.c_str(),
-	                                        canonical_response.size(), reinterpret_cast<char *>(hmac_output));
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
+	                                        canonical_response.c_str(), canonical_response.size(),
+	                                        reinterpret_cast<char *>(hmac_output));
 
 	std::string hmac_str(reinterpret_cast<char *>(hmac_output), 32);
 	return Blob::ToBase64(string_t(hmac_str));
@@ -808,8 +810,8 @@ TEST_CASE("Tier 4: A.9 - Complete Response Verification (PRODUCTION CODE)", "[co
 	// Generate current timestamp and compute the correct signature dynamically
 	// (timestamp must be within 60-second window for verification to pass)
 	std::string current_ts = CurrentTimestamp();
-	std::string correct_signature_b64 = ComputeResponseSignature(response_body, status_code,
-	                                                              current_ts, fixture.test_session_key);
+	std::string correct_signature_b64 =
+	    ComputeResponseSignature(response_body, status_code, current_ts, fixture.test_session_key);
 
 	// Build HTTP response headers (what server would send)
 	case_insensitive_map_t<std::string> headers;
