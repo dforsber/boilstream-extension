@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-# staticlib for C FFI on all platforms (native and WASM)
+# staticlib for standalone C FFI builds (native and WASM)
+# lib (rlib) for embedding in a shared rust-bridge staticlib (avoids duplicate Rust std)
 # Note: cdylib removed - not supported on musl targets and not needed for our use case
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "lib"]
 
 [dependencies]
 opaque-ke = "3.0.0"

@@ -82,7 +82,16 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
 endif()
 
 # Build the Rust OPAQUE client library
-if(IS_WASM_BUILD)
+# When embedded in a multi-extension build (e.g. boilstream DuckDB fork),
+# set BOILSTREAM_EXTERNAL_RUST_LIB to an imported target that already provides
+# opaque-client symbols (via a shared rust-bridge staticlib that avoids
+# duplicating the Rust std). For standalone builds this is skipped.
+if(BOILSTREAM_EXTERNAL_RUST_LIB)
+    message(STATUS "boilstream: Using external Rust library target '${BOILSTREAM_EXTERNAL_RUST_LIB}'")
+    if(NOT TARGET opaque_client_rust)
+        add_library(opaque_client_rust ALIAS ${BOILSTREAM_EXTERNAL_RUST_LIB})
+    endif()
+elseif(IS_WASM_BUILD)
     # WASM build: Manual cargo (Corrosion doesn't support Emscripten)
     include(ExternalProject)
 
