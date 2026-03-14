@@ -316,6 +316,25 @@ target_include_directories(wasm_lock_ordering_test PRIVATE)
 # This test only uses standard library threading, no DuckDB needed
 target_link_libraries(wasm_lock_ordering_test PRIVATE Catch2::Catch2)
 
+# Session routing test executable (per-connection session isolation)
+add_executable(
+  session_routing_test
+  test_session_routing.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+
+target_include_directories(
+  session_routing_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+
+target_compile_definitions(session_routing_test PRIVATE BOILSTREAM_DEBUG)
+
+target_link_libraries(session_routing_test PRIVATE ${DUCKDB_LIBS}
+                                                    Catch2::Catch2)
+link_rust_dependencies(session_routing_test)
+
 # Input validation test executable (malicious/empty value handling)
 add_executable(
   input_validation_test
@@ -354,3 +373,4 @@ add_test(NAME InputValidationTests COMMAND input_validation_test)
 add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
+add_test(NAME SessionRoutingTests COMMAND session_routing_test)

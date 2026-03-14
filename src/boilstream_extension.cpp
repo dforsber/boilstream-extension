@@ -205,8 +205,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
 
-	// Get active session for authenticated request
-	auto *conn_state = storage->GetSession(nullptr);
+	// Get active session for authenticated request (per-connection routing)
+	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -590,8 +590,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
 
-	// Get active session for authenticated request
-	auto *conn_state = storage->GetSession(nullptr);
+	// Get active session for authenticated request (per-connection routing)
+	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -789,8 +789,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	BOILSTREAM_LOG("CreateDucklake: Making POST request, body_len=" << body.size());
 
-	// Get active session for authenticated request
-	auto *conn_state = storage->GetSession(nullptr);
+	// Get active session for authenticated request (per-connection routing)
+	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}

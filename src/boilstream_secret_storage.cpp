@@ -216,16 +216,12 @@ RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string 
 }
 
 //! Get active session (for secret operations like AllSecrets, LookupSecret)
-//! Uses the active_session_key_ set during login
+//! Routes through per-connection session lookup. Returns nullptr for system
+//! transactions without context (no authenticated session exists without a connection).
 BoilstreamConnectionState *RestApiSecretStorage::GetSession(optional_ptr<CatalogTransaction> transaction) {
-	(void)transaction; // Context not needed - we use active_session_key_
-	lock_guard<mutex> lock(sessions_lock_);
-	if (active_session_key_.empty()) {
-		return nullptr;
-	}
-	auto it = sessions_.find(active_session_key_);
-	if (it != sessions_.end()) {
-		return it->second.get();
+	if (transaction && transaction->HasContext()) {
+		auto &ctx = transaction->GetContext();
+		return GetSessionForConnection(ctx.GetConnectionId());
 	}
 	return nullptr;
 }
@@ -256,16 +252,35 @@ BoilstreamConnectionState *RestApiSecretStorage::GetSessionByKey(const string &s
 	return nullptr;
 }
 
-//! Set the active session key (called after successful login)
-void RestApiSecretStorage::SetActiveSessionKey(const string &session_key) {
+//! Set the active session key for a specific connection (concurrent-safe)
+void RestApiSecretStorage::SetActiveSessionKeyForConnection(idx_t connection_id, const string &session_key) {
 	lock_guard<mutex> lock(sessions_lock_);
-	active_session_key_ = session_key;
+
+	// Prevent unbounded map growth - limit to 10,000 connections
+	// Matches the same limit used by connection_user_map in SetUserContextForConnection
+	const size_t MAX_CONNECTIONS = 10000;
+	if (connection_session_keys_.size() >= MAX_CONNECTIONS) {
+		auto it = connection_session_keys_.begin();
+		size_t to_remove = MAX_CONNECTIONS / 2;
+		while (to_remove-- > 0 && it != connection_session_keys_.end()) {
+			it = connection_session_keys_.erase(it);
+		}
+		BOILSTREAM_LOG("SetActiveSessionKeyForConnection: WARNING - Connection session map exceeded limit, cleared "
+		               << (MAX_CONNECTIONS / 2) << " entries");
+	}
+
+	connection_session_keys_[connection_id] = session_key;
 }
 
-//! Get the active session key
-string RestApiSecretStorage::GetActiveSessionKey() {
+//! Get session by connection ID (returns nullptr if not found)
+BoilstreamConnectionState *RestApiSecretStorage::GetSessionForConnection(idx_t connection_id) {
 	lock_guard<mutex> lock(sessions_lock_);
-	return active_session_key_;
+	auto conn_it = connection_session_keys_.find(connection_id);
+	if (conn_it == connection_session_keys_.end()) {
+		return nullptr;
+	}
+	auto it = sessions_.find(conn_it->second);
+	return (it != sessions_.end()) ? it->second.get() : nullptr;
 }
 
 void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
@@ -274,19 +289,20 @@ void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
 }
 
 void RestApiSecretStorage::ClearSession(ClientContext &context) {
-	(void)context; // Context not needed - we clear the active session
 	lock_guard<mutex> lock(sessions_lock_);
-	if (!active_session_key_.empty()) {
-		auto it = sessions_.find(active_session_key_);
-		if (it != sessions_.end()) {
-			it->second->ClearSession();
-		}
+	auto conn_id = context.GetConnectionId();
+	auto conn_it = connection_session_keys_.find(conn_id);
+	if (conn_it == connection_session_keys_.end()) {
+		return; // No session for this connection
+	}
+	auto it = sessions_.find(conn_it->second);
+	if (it != sessions_.end()) {
+		it->second->ClearSession();
 	}
 }
 
 bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
-	(void)context; // Context not needed - we check the active session
-	auto *session = GetSession(nullptr);
+	auto *session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return false;
 	}
@@ -294,8 +310,7 @@ bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
 }
 
 string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
-	(void)context; // Context not needed - we get from active session
-	auto *session = GetSession(nullptr);
+	auto *session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return "";
 	}
@@ -303,8 +318,7 @@ string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
 }
 
 void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const string &hash) {
-	(void)context; // Context not needed - we set on active session
-	auto *session = GetSession(nullptr);
+	auto *session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return;
 	}
@@ -313,8 +327,7 @@ void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const s
 }
 
 std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt(ClientContext &context) {
-	(void)context; // Context not needed - we get from active session
-	auto *session = GetSession(nullptr);
+	auto *session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return std::chrono::system_clock::time_point::min();
 	}
@@ -598,145 +611,14 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 	}
 }
 
-void RestApiSecretStorage::PerformOpaqueRegistration(ClientContext &context, const string &password,
-                                                     const string &session_key) {
-	BOILSTREAM_LOG("PerformOpaqueRegistration: starting OPAQUE registration");
-	(void)context; // Context not needed - we use session_key
-
-	// Get or create session for this session_key
-	auto &conn_state = GetOrCreateSession(session_key);
-
-	// Build registration URL
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
-
-	if (url.empty()) {
-		throw InvalidInputException("Boilstream endpoint not configured");
-	}
-
-	// Remove trailing /secrets if present (endpoint should be base URL)
-	auto secrets_pos = url.find("/secrets");
-	if (secrets_pos != string::npos) {
-		url = url.substr(0, secrets_pos);
-	}
-
-	// Compute user_id: SHA-256 hash of password (bootstrap_token)
-	// Following spec: user_id = lowercase_hex(SHA256(password))
-	uint8_t password_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t *>(password.c_str()), password.size(), password_hash);
-
-	// Convert hash to lowercase hex string (64 characters)
-	string user_id;
-	user_id.reserve(64);
-	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < 32; i++) {
-		unsigned char byte = static_cast<unsigned char>(password_hash[i]);
-		user_id += hex_chars[(byte >> 4) & 0xF];
-		user_id += hex_chars[byte & 0xF];
-	}
-	BOILSTREAM_LOG("PerformOpaqueRegistration: computed user_id=" << user_id.substr(0, 16) << "...");
-
-	// Step 1: Client starts registration
-	auto reg_start = OpaqueClientWrapper::RegistrationStart(password);
-	BOILSTREAM_LOG("PerformOpaqueRegistration: registration request generated");
-
-	// Step 2: Send RegistrationRequest to server with user_id
-	string reg_url = url + "/auth/api/opaque-registration-start";
-
-	auto doc = yyjson_mut_doc_new(nullptr);
-	auto obj = yyjson_mut_obj(doc);
-	yyjson_mut_doc_set_root(doc, obj);
-	yyjson_mut_obj_add_strcpy(doc, obj, "user_id", user_id.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "registration_request", reg_start.registration_request_base64.c_str());
-
-	string body = SafeJsonSerialize(doc);
-	yyjson_mut_doc_free(doc);
-
-	string response;
-	try {
-		// Mark as exchanging (no auth headers during registration)
-		{
-			lock_guard<mutex> lock(conn_state.session_lock);
-			conn_state.is_exchanging = true;
-		}
-		response = HttpPostWithState(reg_url, body, conn_state);
-	} catch (const std::exception &e) {
-		{
-			lock_guard<mutex> lock(conn_state.session_lock);
-			conn_state.is_exchanging = false;
-		}
-		opaque_free_registration_state(reg_start.state);
-		throw IOException("OPAQUE registration failed (server request): " + string(e.what()));
-	}
-
-	// Parse server response
-	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
-	if (!response_doc) {
-		opaque_free_registration_state(reg_start.state);
-		throw IOException("OPAQUE registration failed: Invalid JSON response from server");
-	}
-
-	auto response_root = yyjson_doc_get_root(response_doc);
-	auto registration_response_val = yyjson_obj_get(response_root, "registration_response");
-	if (!registration_response_val || !yyjson_is_str(registration_response_val)) {
-		yyjson_doc_free(response_doc);
-		opaque_free_registration_state(reg_start.state);
-		throw IOException("OPAQUE registration failed: No registration_response in server response");
-	}
-
-	string registration_response_base64 = SafeGetStr(registration_response_val);
-	yyjson_doc_free(response_doc);
-
-	if (registration_response_base64.empty()) {
-		opaque_free_registration_state(reg_start.state);
-		throw IOException("OPAQUE registration failed: registration_response is empty");
-	}
-
-	// Step 3: Client finishes registration
-	auto reg_finish = OpaqueClientWrapper::RegistrationFinish(reg_start.state, // consumed by this call
-	                                                          registration_response_base64);
-	BOILSTREAM_LOG("PerformOpaqueRegistration: registration upload generated");
-
-	// Step 4: Send RegistrationUpload to server
-	string upload_url = url + "/auth/api/opaque-registration-finish";
-
-	auto upload_doc = yyjson_mut_doc_new(nullptr);
-	auto upload_obj = yyjson_mut_obj(upload_doc);
-	yyjson_mut_doc_set_root(upload_doc, upload_obj);
-	yyjson_mut_obj_add_strcpy(upload_doc, upload_obj, "registration_upload",
-	                          reg_finish.registration_upload_base64.c_str());
-
-	string upload_body = SafeJsonSerialize(upload_doc);
-	yyjson_mut_doc_free(upload_doc);
-
-	try {
-		HttpPostWithState(upload_url, upload_body, conn_state);
-	} catch (const std::exception &e) {
-		{
-			lock_guard<mutex> lock(conn_state.session_lock);
-			conn_state.is_exchanging = false;
-		}
-		throw IOException("OPAQUE registration failed (upload): " + string(e.what()));
-	}
-
-	// Clear exchanging flag on success
-	{
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.is_exchanging = false;
-	}
-
-	BOILSTREAM_LOG("PerformOpaqueRegistration: SUCCESS - registration complete");
-}
-
 void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume,
                                                     const string &session_key) {
 	BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
 	               << ": starting OPAQUE " << (is_resume ? "resume" : "login"));
 
-	(void)context; // Context not needed - we use session_key
+	// context is used by callers (PerformOpaqueLogin/PerformOpaqueResume) after this returns
+	// for SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key)
+	(void)context;
 
 	// Get or create session for this session_key
 	auto &conn_state = GetOrCreateSession(session_key);
@@ -1091,14 +973,12 @@ void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const stri
                                               const string &session_key) {
 	PerformOpaqueLoginCommon(context, password, false, session_key);
 
-	// After successful login, set this as the active session
-	SetActiveSessionKey(session_key);
+	// After successful login, set this as the active session (both global and per-connection)
+	SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key);
 }
 
 void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
 	BOILSTREAM_LOG("PerformOpaqueResume: Loading refresh token from disk");
-
-	(void)context; // Context not needed
 
 	// Create a temporary session state to load refresh token into
 	BoilstreamConnectionState temp_state;
@@ -1173,8 +1053,8 @@ void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
 	try {
 		PerformOpaqueLoginCommon(context, refresh_token_password, true, session_key);
 
-		// After successful resume, set this as the active session
-		SetActiveSessionKey(session_key);
+		// After successful resume, set this as the active session (both global and per-connection)
+		SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key);
 
 		// On successful resume, the old refresh token is now invalid
 		// The new one has been saved by PerformOpaqueLoginCommon
@@ -1243,8 +1123,14 @@ string RestApiSecretStorage::GetUserContextForConnection(idx_t connection_id) {
 }
 
 void RestApiSecretStorage::ClearConnectionMapping(idx_t connection_id) {
-	lock_guard<mutex> lock(connection_lock);
-	connection_user_map.erase(std::to_string(connection_id));
+	{
+		lock_guard<mutex> lock(connection_lock);
+		connection_user_map.erase(std::to_string(connection_id));
+	}
+	{
+		lock_guard<mutex> lock(sessions_lock_);
+		connection_session_keys_.erase(connection_id);
+	}
 }
 
 string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction> transaction) {

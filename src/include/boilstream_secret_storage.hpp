@@ -63,16 +63,11 @@ public:
 	//! Get session by key (returns nullptr if not found)
 	BoilstreamConnectionState *GetSessionByKey(const string &session_key);
 
-	//! Set the active session key for this endpoint (called after successful login)
-	//! This associates the endpoint with the session for subsequent lookups
-	void SetActiveSessionKey(const string &session_key);
+	//! Set the active session key for a specific connection (concurrent-safe)
+	void SetActiveSessionKeyForConnection(idx_t connection_id, const string &session_key);
 
-	//! Get the active session key for this endpoint
-	string GetActiveSessionKey();
-
-	//! Perform OPAQUE registration with password
-	//! session_key is the bootstrap_token_hash, used to store/retrieve session
-	void PerformOpaqueRegistration(ClientContext &context, const string &password, const string &session_key);
+	//! Get session by connection ID (returns nullptr if not found)
+	BoilstreamConnectionState *GetSessionForConnection(idx_t connection_id);
 
 	//! Perform OPAQUE login with password
 	//! session_key is the bootstrap_token_hash, used to store/retrieve session
@@ -388,11 +383,11 @@ private:
 	//! Prevents malicious tenants from hijacking sessions by modifying their refresh token file
 	std::unordered_map<string, string> refresh_to_session_;
 
-	//! Currently active session key for this endpoint
-	//! Set during login, used by GetSession() for lookups
-	string active_session_key_;
+	//! Per-connection session keys: connection_id -> session_key
+	//! Prevents concurrent bootstrap from clobbering each other's sessions
+	std::unordered_map<idx_t, string> connection_session_keys_;
 
-	//! Lock for sessions_ map, refresh_to_session_, and active_session_key_ access
+	//! Lock for sessions_ map, refresh_to_session_, and connection_session_keys_
 	mutex sessions_lock_;
 };
 

@@ -243,11 +243,10 @@ TEST_CASE("Session Management via Storage", "[boilstream][security]") {
 		REQUIRE(ptr != nullptr);
 	}
 
-	SECTION("SetActiveSessionKey and GetSession work together") {
+	SECTION("GetOrCreateSession and GetSessionByKey work together") {
 		fixture.storage->GetOrCreateSession("active_test");
-		fixture.storage->SetActiveSessionKey("active_test");
 
-		auto *session = fixture.storage->GetSession(nullptr);
+		auto *session = fixture.storage->GetSessionByKey("active_test");
 		REQUIRE(session != nullptr);
 	}
 }
