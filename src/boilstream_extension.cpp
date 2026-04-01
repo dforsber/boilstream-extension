@@ -2246,7 +2246,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		BOILSTREAM_LOG("LoadInternal: WARNING - Failed to auto-load httpfs extension. HTTPS may not work.");
 	}
 
-	// Auto-load postgres_scanner extension for postgres secrets
+	// Auto-load postgres_scanner extension for postgres secrets (not available in WASM)
+#ifndef __EMSCRIPTEN__
 	BOILSTREAM_LOG("LoadInternal: Attempting to auto-load postgres_scanner extension for postgres secrets");
 	if (ExtensionHelper::TryAutoLoadExtension(db, "postgres_scanner")) {
 		BOILSTREAM_LOG("LoadInternal: postgres_scanner extension loaded successfully");
@@ -2254,6 +2255,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		BOILSTREAM_LOG(
 		    "LoadInternal: WARNING - Failed to auto-load postgres_scanner extension. Postgres secrets may not work.");
 	}
+#else
+	BOILSTREAM_LOG("LoadInternal: Skipping postgres_scanner auto-load (not available in WASM)");
+#endif
 
 	// Auto-load ducklake extension for ducklake ATTACH support
 	BOILSTREAM_LOG("LoadInternal: Attempting to auto-load ducklake extension for ducklake ATTACH");
