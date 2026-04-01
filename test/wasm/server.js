@@ -38,8 +38,8 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Proxy /auth/* requests to boilstream auth server
-    if (url.startsWith('/auth/')) {
+    // Proxy /auth/* and /secrets/* requests to boilstream auth server
+    if (url.startsWith('/auth/') || url.startsWith('/secrets')) {
       console.log(`Proxying: ${req.method} ${url} -> ${AUTH_SERVER}${url}`);
 
       // Prepare proxy request options
