@@ -79,7 +79,7 @@ static void LoadExtensions(Connection &con) {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Extension Loading", "[boilstream][local]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -108,7 +108,7 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Basic Operations", "[boilstream][local]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -129,7 +129,7 @@ TEST_CASE("Basic Operations", "[boilstream][local]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("OPAQUE Authentication", "[boilstream][server][auth]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -165,7 +165,7 @@ TEST_CASE("OPAQUE Authentication", "[boilstream][server][auth]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Server Operations", "[boilstream][server]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -293,7 +293,7 @@ TEST_CASE("Server Operations", "[boilstream][server]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -329,7 +329,7 @@ TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 
 		// Create a new connection without login
 		DBConfig config2;
-		config2.options.allow_unsigned_extensions = true;
+		config2.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 		DuckDB db2(nullptr, &config2);
 		Connection con2(db2);
 		LoadExtensions(con2);
@@ -355,7 +355,7 @@ TEST_CASE("Error Handling", "[boilstream][server][errors]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Concurrent Operations", "[boilstream][server][concurrent]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -404,7 +404,7 @@ TEST_CASE("Concurrent Operations", "[boilstream][server][concurrent]") {
 //===----------------------------------------------------------------------===//
 TEST_CASE("Session Persistence", "[boilstream][server][session]") {
 	DBConfig config;
-	config.options.allow_unsigned_extensions = true;
+	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 
@@ -502,7 +502,7 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 		std::remove(token_path.c_str());
 
 		DBConfig config;
-		config.options.allow_unsigned_extensions = true;
+		config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 		DuckDB db(nullptr, &config);
 		Connection con(db);
 
@@ -541,7 +541,7 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 		// First, create a session and save refresh token
 		{
 			DBConfig config;
-			config.options.allow_unsigned_extensions = true;
+			config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 			DuckDB db(nullptr, &config);
 			Connection con(db);
 
@@ -578,7 +578,7 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 		// Now create a new database instance (simulating restart)
 		{
 			DBConfig config;
-			config.options.allow_unsigned_extensions = true;
+			config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 			DuckDB db(nullptr, &config);
 			Connection con(db);
 
@@ -615,7 +615,7 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 		out.close();
 
 		DBConfig config;
-		config.options.allow_unsigned_extensions = true;
+		config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 		DuckDB db(nullptr, &config);
 		Connection con(db);
 
@@ -638,7 +638,7 @@ TEST_CASE("Session Resumption", "[boilstream][server][resumption]") {
 		out.close();
 
 		DBConfig config;
-		config.options.allow_unsigned_extensions = true;
+		config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 		DuckDB db(nullptr, &config);
 		Connection con(db);
 

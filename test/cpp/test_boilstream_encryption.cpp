@@ -14,9 +14,31 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/encryption_state.hpp"
+#include "duckdb/common/encryption_types.hpp"
 #include "mbedtls_wrapper.hpp"
+#include <cstring>
 
 using namespace duckdb;
+
+namespace {
+// v1.5 AESStateMBEDTLS API: heap-allocated metadata + EncryptionNonce. Same
+// shim as in test_boilstream_conformance.cpp; production code uses Rust FFI.
+inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata>
+MakeAesGcm256Metadata() {
+	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(
+	    duckdb::EncryptionTypes::CipherType::GCM, 32u,
+	    duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+}
+
+inline duckdb::EncryptionNonce MakeNonce(const std::vector<uint8_t> &raw_nonce) {
+	duckdb::EncryptionNonce n(duckdb::EncryptionTypes::CipherType::GCM,
+	                          duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+	n.SetSize(raw_nonce.size());
+	std::memcpy(n.data(), raw_nonce.data(), raw_nonce.size());
+	return n;
+}
+} // namespace
 
 // Friend class to access private methods for testing
 class BoilstreamEncryptionTestAccess {
@@ -81,13 +103,9 @@ struct EncryptionTestFixture {
 
 	// Helper: Encrypt plaintext using AES-256-GCM AEAD
 	std::string EncryptAes256Gcm(const std::vector<uint8_t> &nonce, const std::string &plaintext) {
-		duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM,
-		                                                            32 // 256-bit key
-		);
-
-		aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(),
-		                                 nullptr, 0 // no AAD
-		);
+		duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(MakeAesGcm256Metadata());
+		auto nonce_obj = MakeNonce(nonce);
+		aes_encrypt.InitializeEncryption(nonce_obj, encryption_key.data(), nullptr, 0);
 
 		std::vector<uint8_t> ciphertext(plaintext.size());
 		aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext.data()), plaintext.size(),

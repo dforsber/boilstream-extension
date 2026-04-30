@@ -46,6 +46,10 @@ endif()
 
 set(DUCKDB_LIBS
     "${EXTENSION_BUILD_DIR}/src/libduckdb_static.a"
+    # v1.5 split ExtensionHelper::LoadAllExtensions out of libduckdb_static.a
+    # into a separate loader library. Link the dummy loader so test executables
+    # that do `DuckDB(":memory:")` resolve the symbol.
+    "${EXTENSION_BUILD_DIR}/extension/libdummy_static_extension_loader.a"
     "${EXTENSION_BUILD_DIR}/extension/boilstream/libboilstream_extension.a"
     "${EXTENSION_BUILD_DIR}/extension/parquet/libparquet_extension.a"
     "${EXTENSION_BUILD_DIR}/extension/core_functions/libcore_functions_extension.a"

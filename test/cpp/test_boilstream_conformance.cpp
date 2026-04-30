@@ -21,6 +21,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/encryption_state.hpp"
+#include "duckdb/common/encryption_types.hpp"
 #include "mbedtls/md.h"
 #include <chrono>
 #include <cstring>
@@ -29,6 +31,30 @@
 #include <sstream>
 
 using namespace duckdb;
+
+namespace {
+// In v1.5, AESStateMBEDTLS no longer takes (CipherType, key_len) and
+// InitializeEncryption no longer takes raw nonce/key buffers. The constructor
+// now takes a heap-allocated EncryptionStateMetadata, and Initialize* takes an
+// EncryptionNonce object. These helpers wrap the new API so each call site
+// reads like the old one. The production code does not use this wrapper
+// (it goes through opaque_client_aes_gcm_decrypt in Rust), so this is a
+// test-side compatibility shim only.
+inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata>
+MakeAesGcm256Metadata() {
+	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(
+	    duckdb::EncryptionTypes::CipherType::GCM, 32u,
+	    duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+}
+
+inline duckdb::EncryptionNonce MakeNonce(const std::vector<uint8_t> &raw_nonce) {
+	duckdb::EncryptionNonce n(duckdb::EncryptionTypes::CipherType::GCM,
+	                          duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+	n.SetSize(raw_nonce.size());
+	std::memcpy(n.data(), raw_nonce.data(), raw_nonce.size());
+	return n;
+}
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // Test Access Friend Class - Allows testing production code private methods
@@ -874,9 +900,9 @@ TEST_CASE("Tier 4: A.10.2 - AES-256-GCM Encryption (PRODUCTION CODE)", "[conform
 	INFO("Encryption key (32 bytes): " << BytesToHex(encryption_key));
 
 	// Encrypt using AES-256-GCM (PRODUCTION mbedTLS wrapper)
-	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
-	                                 0);
+	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(MakeAesGcm256Metadata());
+	auto nonce_obj = MakeNonce(nonce);
+	aes_encrypt.InitializeEncryption(nonce_obj, encryption_key.data(), nullptr, 0);
 
 	// Encrypt plaintext
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
@@ -923,9 +949,9 @@ TEST_CASE("Tier 4: A.10.3 - HMAC over Encrypted Data (PRODUCTION CODE)", "[confo
 	auto encryption_key = fixture.DeriveBoilstreamKey("response-encryption-v1");
 
 	// Re-encrypt to get ciphertext_with_tag (must match A.10.2)
-	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
-	                                 0);
+	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(MakeAesGcm256Metadata());
+	auto nonce_obj = MakeNonce(nonce);
+	aes_encrypt.InitializeEncryption(nonce_obj, encryption_key.data(), nullptr, 0);
 
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
 	aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext_json.data()), plaintext_json.size(),
@@ -983,9 +1009,9 @@ TEST_CASE("Tier 4: A.10.9 - Complete Encryption and Decryption Flow (PRODUCTION 
 	INFO("Step 1: Encrypting plaintext using AES-256-GCM");
 	auto encryption_key = fixture.DeriveBoilstreamKey("response-encryption-v1");
 
-	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
-	                                 0);
+	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(MakeAesGcm256Metadata());
+	auto nonce_obj = MakeNonce(nonce);
+	aes_encrypt.InitializeEncryption(nonce_obj, encryption_key.data(), nullptr, 0);
 
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
 	aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext_json.data()), plaintext_json.size(),
@@ -1078,9 +1104,9 @@ TEST_CASE("Tier 4: A.10.10 - Security Invariants", "[conformance][tier4][encrypt
 	auto integrity_key = fixture.DeriveBoilstreamKey("response-integrity-v1");
 
 	// Encrypt
-	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(duckdb::EncryptionTypes::CipherType::GCM, 32);
-	aes_encrypt.InitializeEncryption(nonce.data(), nonce.size(), encryption_key.data(), encryption_key.size(), nullptr,
-	                                 0);
+	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS aes_encrypt(MakeAesGcm256Metadata());
+	auto nonce_obj = MakeNonce(nonce);
+	aes_encrypt.InitializeEncryption(nonce_obj, encryption_key.data(), nullptr, 0);
 	std::vector<uint8_t> ciphertext(plaintext_json.size());
 	aes_encrypt.Process(reinterpret_cast<duckdb::const_data_ptr_t>(plaintext_json.data()), plaintext_json.size(),
 	                    ciphertext.data(), ciphertext.size());
