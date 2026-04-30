@@ -806,11 +806,13 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	BOILSTREAM_LOG("CreateDucklake: Ducklake created successfully");
 
-	// Fetch all secrets to populate the newly created ducklake secrets
+	// Fetch all secrets to populate the newly created ducklake secrets.
+	// Pass conn_state explicitly so the fetch bypasses the AllSecrets re-entrancy
+	// and cache guards (same reason as in SetRestApiEndpoint).
 	BOILSTREAM_LOG("CreateDucklake: Fetching all secrets to populate new ducklake");
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto secrets = storage->FetchAllSecretsFromServer(transaction);
+		auto secrets = storage->FetchAllSecretsFromServer(transaction, conn_state);
 		BOILSTREAM_LOG("CreateDucklake: Successfully fetched and cached secrets");
 
 		// Note: Auto-attach removed to prevent hanging when backends are not ready
@@ -1009,12 +1011,20 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	SetUserContext(context, user_id);
 
 	// Fetch all secrets and cache them in memory storage for DuckLake
+	// We pass the just-established conn_state explicitly so the fetch bypasses the
+	// re-entrancy/cache guards used by httpfs-driven AllSecrets() callers. Without
+	// this, the GetSession(transaction) lookup can miss the connection-id mapping
+	// that PerformOpaqueLogin set up moments earlier, and the function would
+	// silently early-exit without ever calling /secrets — leaving DuckLake's
+	// hard-coded "memory"/"local_file" GetSecretByName lookup with nothing to find
+	// when ATTACH 'ducklake:...' fans out to its postgres-creds reference.
 	BOILSTREAM_LOG("SetEndpoint: Fetching all secrets to populate memory storage");
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+		auto *bootstrap_conn_state = storage->GetSessionByKey(incoming_token_hash);
 		// Use FetchAllSecretsFromServer to always fetch (AllSecrets returns empty in WASM)
-		auto secrets = storage->FetchAllSecretsFromServer(transaction);
+		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
 
 		// Collect all ducklake secret names for auto-attach
@@ -2122,12 +2132,15 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	string user_id = incoming_token_hash.substr(0, 16);
 	SetUserContext(context, user_id);
 
-	// Fetch all secrets and cache them in memory storage for DuckLake
+	// Fetch all secrets and cache them in memory storage for DuckLake.
+	// Pass conn_state explicitly so the fetch bypasses the AllSecrets re-entrancy
+	// and cache guards (same reason as in SetRestApiEndpoint).
 	BOILSTREAM_LOG("Login: Fetching all secrets to populate memory storage");
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto secrets = storage->FetchAllSecretsFromServer(transaction);
+		auto *bootstrap_conn_state = storage->GetSessionByKey(incoming_token_hash);
+		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("Login: Successfully fetched and cached secrets");
 
 		// Collect all ducklake secret names for auto-attach

@@ -116,7 +116,14 @@ public:
 
 	//! Fetch all secrets from server (always fetches, bypasses WASM AllSecrets guard)
 	//! Use this for bootstrap/login instead of AllSecrets() in WASM
-	vector<SecretEntry> FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction);
+	//! When explicit_conn_state is non-null, the call bypasses session lookup, the
+	//! re-entrancy guards (SecretLookupGuard / in_http_operation) and the AllSecrets
+	//! cache TTL. Bootstrap callers must use this overload: they own a freshly
+	//! established conn_state but the connection-id-to-session mapping may not yet
+	//! be observable through the just-built CatalogTransaction, so GetSession()
+	//! cannot be relied on to find it.
+	vector<SecretEntry> FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
+	                                              BoilstreamConnectionState *explicit_conn_state = nullptr);
 
 	//! Override to lookup secrets from REST API
 	SecretMatch LookupSecret(const string &path, const string &type,

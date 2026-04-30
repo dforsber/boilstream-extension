@@ -3286,16 +3286,23 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 #endif
 }
 
-vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction) {
+vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
+                                                                    BoilstreamConnectionState *explicit_conn_state) {
+	// Bootstrap callers (PRAGMA boilstream_bootstrap_session) must force the HTTP
+	// fetch even when guards/caches that protect re-entrant httpfs callers would
+	// short-circuit it. They pass the just-established conn_state directly so we
+	// don't have to discover it through the CatalogTransaction.
+	const bool force_fetch = explicit_conn_state != nullptr;
+
 	// Get connection state FIRST - needed for recursion guard
-	auto *conn_state = GetSession(transaction);
+	auto *conn_state = force_fetch ? explicit_conn_state : GetSession(transaction);
 
 	// CRITICAL: Use atomic recursion guard to prevent stack overflow
 	// This must happen before ANY other operations that could trigger secret lookups
 	// In WASM, the async event loop can cause re-entrant calls even in single-threaded mode
 	// NOTE: Using optional to avoid heap allocation for stack-constrained WASM
 	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
-	if (conn_state) {
+	if (conn_state && !force_fetch) {
 		guard.emplace(*conn_state);
 		if (!guard->Acquired()) {
 			BOILSTREAM_LOG("AllSecrets EXIT: BLOCKED by atomic recursion guard (already in lookup)");
@@ -3312,11 +3319,12 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	auto ms_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_all_secrets_time).count();
 
 	BOILSTREAM_LOG("AllSecrets ENTER: call_count=" << all_secrets_call_count << ", ms_since_last=" << ms_since_last
-	                                               << ", in_http_op=" << (in_http_operation ? "true" : "false"));
+	                                               << ", in_http_op=" << (in_http_operation ? "true" : "false")
+	                                               << ", force_fetch=" << (force_fetch ? "true" : "false"));
 
 	// Prevent recursive lookups during HTTP operations
 	// This can happen when httpfs looks up credentials while we're making HTTP requests
-	if (in_http_operation) {
+	if (in_http_operation && !force_fetch) {
 		BOILSTREAM_LOG("AllSecrets EXIT: BLOCKED by in_http_operation guard, returning local catalog only");
 		return CatalogSetSecretStorage::AllSecrets(transaction);
 	}
@@ -3328,9 +3336,12 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 
 	last_all_secrets_time = now;
 
-	// Check if we recently fetched all secrets (10 second cache)
-	// Only use cache if last_all_secrets_fetch has been set (not at min/epoch)
-	if (conn_state && conn_state->last_all_secrets_fetch != std::chrono::steady_clock::time_point::min()) {
+	// Check if we recently fetched all secrets (10 second cache).
+	// Bootstrap (force_fetch) bypasses the cache: a fresh user has zero secrets in
+	// "memory" yet, and ducklake's hard-coded memory/local_file lookup runs before
+	// AllSecrets() can refill it on demand.
+	if (!force_fetch && conn_state &&
+	    conn_state->last_all_secrets_fetch != std::chrono::steady_clock::time_point::min()) {
 		auto fetch_now = std::chrono::steady_clock::now();
 		auto seconds_since_fetch =
 		    std::chrono::duration_cast<std::chrono::seconds>(fetch_now - conn_state->last_all_secrets_fetch).count();
