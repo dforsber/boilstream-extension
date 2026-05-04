@@ -42,3 +42,18 @@ D FROM duckdb_secrets();
 │ test_crud    │ s3      │ config   │ true       │ boilstream │ ['s3://', 's3n://'…  │ name=test_crud;type=s3;provider=config;serializable=true;scope=s3://,s3n://,s3a…  │
 └──────────────┴─────────┴──────────┴────────────┴────────────┴──────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Local development: skipping TLS verification
+
+The extension's HTTP client (DuckDB's `HTTPUtil` → libcurl) verifies the server certificate by default. When pointing at a local boilstream auth server with a self-signed cert this fails — and on macOS the standard knobs don't help: DuckDB's libcurl is statically linked against OpenSSL with `CURLSSLOPT_NATIVE_CA`, which silently ignores `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, and the DuckDB `ca_cert_file` setting on Darwin.
+
+For local-dev only, set `BOILSTREAM_INSECURE_TLS=1` in the duckdb process's environment. The extension reads it on every outgoing request and, when set to `1`/`true`/`yes`, flips `HTTPParams.override_verify_ssl=true` and `HTTPParams.verify_ssl=false` — equivalent to `curl --insecure` but scoped to the extension's own calls.
+
+```bash
+BOILSTREAM_INSECURE_TLS=1 duckdb -c "
+LOAD httpfs;
+PRAGMA boilstream_bootstrap_session('https://localhost:443/secrets:<token>');
+"
+```
+
+**Do not set this in production.** It's intentionally undocumented in the help text, intentionally per-process (no SQL knob, no config file), and the right fix on a real deployment is putting the auth server's cert on the host's trust path.
