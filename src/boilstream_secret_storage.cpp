@@ -28,6 +28,7 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <optional>
@@ -134,6 +135,34 @@ EM_JS(void, js_localStorage_removeItem, (const char *key), {
 using namespace duckdb_yyjson;
 
 namespace duckdb {
+
+// Read BOILSTREAM_INSECURE_TLS env var and, when set to "1"/"true"/"yes",
+// disable TLS certificate verification on the supplied HTTPParams.
+//
+// This is *only* for local-dev work where the boilstream auth server is
+// reachable through a self-signed cert that the host's libcurl trust store
+// can't validate (e.g., macOS where SSL_CERT_FILE / CURL_CA_BUNDLE are
+// silently ignored by the statically-linked OpenSSL backend). On any other
+// platform the proper fix is to put the cert on the system trust path —
+// this knob is intentionally undocumented and intentionally per-process so
+// it can't be accidentally toggled on a deployed binary.
+//
+// Setting both `override_verify_ssl = true` *and* `verify_ssl = false` is
+// what HTTPFSCurlUtil (and the httplib counterpart) checks when deciding
+// whether to call `curl_easy_setopt(..., CURLOPT_SSL_VERIFYPEER, 0L)` /
+// `client->enable_server_certificate_verification(false)`.
+static void MaybeDisableTlsVerificationFromEnv(HTTPParams &params) {
+	const char *env = std::getenv("BOILSTREAM_INSECURE_TLS");
+	if (!env || env[0] == '\0') {
+		return;
+	}
+	const std::string val(env);
+	if (val == "1" || val == "true" || val == "TRUE" || val == "yes" || val == "YES") {
+		params.override_verify_ssl = true;
+		params.verify_ssl = false;
+		BOILSTREAM_LOG("BOILSTREAM_INSECURE_TLS=" << val << " — disabling TLS peer verification");
+	}
+}
 
 // Serialize a yyjson mutable doc to string, throwing on allocation failure.
 static string SafeJsonSerialize(yyjson_mut_doc *doc) {
@@ -2289,6 +2318,7 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 		BOILSTREAM_LOG("HttpGetWithState EXIT: InitializeParameters FAILED");
 		return "";
 	}
+	MaybeDisableTlsVerificationFromEnv(*params);
 
 	// Retry configuration: 3 retries with short exponential backoff
 	// Total attempts: 4 (1 initial + 3 retries)
@@ -2508,6 +2538,7 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 		BOILSTREAM_LOG("HttpPostWithState: InitializeParameters FAILED");
 		throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 	}
+	MaybeDisableTlsVerificationFromEnv(*params);
 
 	// Generate idempotency key for safe retries (prevents duplicate secret creation)
 	// Use a hash of the request body - same content always gets same key for idempotency
@@ -2718,6 +2749,7 @@ void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionSta
 	if (!params) {
 		throw IOException("HTTP DELETE failed: Could not initialize HTTP parameters");
 	}
+	MaybeDisableTlsVerificationFromEnv(*params);
 
 	// Retry configuration: 3 retries with short exponential backoff
 	// Total attempts: 4 (1 initial + 3 retries)
