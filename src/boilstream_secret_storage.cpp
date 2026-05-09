@@ -132,6 +132,20 @@ EM_JS(void, js_localStorage_removeItem, (const char *key), {
 #define BOILSTREAM_LOG(msg) ((void)0)
 #endif
 
+// Always-on warn/error logging for production-critical failure paths.
+// These survive release builds (no BOILSTREAM_DEBUG dependency) so silent
+// failures inside catch-all handlers — especially the memory-cache step
+// inside AllSecrets — surface in pod stderr where kubectl logs can capture
+// them. Tracks ingestion-agent-ohhc on staging where BOILSTREAM_LOG was
+// no-op'd and we couldn't see which secret-cache step actually failed.
+//
+// Use sparingly — only at points where (a) the failure is silent
+// otherwise and (b) the failure breaks SECRET resolution downstream.
+// Routine progress events still use BOILSTREAM_LOG.
+#include <iostream>
+#define BOILSTREAM_WARN(msg) std::cerr << "[BOILSTREAM:WARN] " << msg << std::endl
+#define BOILSTREAM_ERROR(msg) std::cerr << "[BOILSTREAM:ERROR] " << msg << std::endl
+
 using namespace duckdb_yyjson;
 
 namespace duckdb {
@@ -3189,9 +3203,12 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	if (conn_state) {
 		guard.emplace(*conn_state);
 		if (!guard->Acquired()) {
-			BOILSTREAM_LOG(
-			    "GetSecretByName EXIT: BLOCKED by atomic recursion guard (already in lookup), returning local for name="
-			    << name);
+			// Always-on: recursion guard blocking GetSecretByName mid-ATTACH is the
+			// primary suspect for the staging "Secret with name X not found" error
+			// when the inner postgres SECRET lookup happens while the outer DuckLake
+			// meta-secret lookup is still active. Surface it.
+			BOILSTREAM_WARN("GetSecretByName: BLOCKED by atomic recursion guard for name='"
+			                << name << "' — falling back to local catalog (will likely return nullptr)");
 			return CatalogSetSecretStorage::GetSecretByName(name, transaction);
 		}
 	}
@@ -3201,7 +3218,10 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	// Prevent recursive lookups during HTTP operations
 	// This can happen when httpfs looks up credentials while we're making HTTP requests
 	if (in_http_operation) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: BLOCKED by in_http_operation guard");
+		// Always-on: same staging-suspect class as above. Without this log we cannot
+		// distinguish "secret never fetched" from "secret fetch silently dropped".
+		BOILSTREAM_WARN("GetSecretByName: BLOCKED by in_http_operation guard for name='"
+		                << name << "' — returning nullptr; downstream SECRET lookup will fail");
 		return nullptr;
 	}
 
@@ -3531,16 +3551,23 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 							BOILSTREAM_LOG("AllSecrets: Registered in memory as '" << registered->secret->GetName()
 							                                                       << "'");
 						} else {
-							BOILSTREAM_LOG("AllSecrets: RegisterSecret returned null for '" << secret_name << "'");
+							// Always-on: registration silently returning null is a primary
+							// suspect for the staging "Secret not found" failure (downstream
+							// SECRET lookups expect this in memory). Surface so kubectl logs
+							// captures it.
+							BOILSTREAM_WARN("AllSecrets: RegisterSecret returned null for '" << secret_name
+							                                                                  << "' — downstream SECRET lookup will miss");
 						}
 					} else {
-						BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null for memory cache of '"
-						               << secret_name << "'");
+						BOILSTREAM_WARN("AllSecrets: DeserializeSecret returned null for memory cache of '"
+						                << secret_name << "' — secret will not be available for downstream lookups");
 					}
 				} catch (const std::exception &e) {
-					BOILSTREAM_LOG("AllSecrets: EXCEPTION caching '" << secret_name << "' in memory: " << e.what());
+					BOILSTREAM_WARN("AllSecrets: EXCEPTION caching '" << secret_name << "' in memory: " << e.what()
+					                                                  << " — downstream SECRET lookup will miss");
 				} catch (...) {
-					BOILSTREAM_LOG("AllSecrets: UNKNOWN EXCEPTION caching '" << secret_name << "' in memory");
+					BOILSTREAM_WARN("AllSecrets: UNKNOWN EXCEPTION caching '" << secret_name
+					                                                          << "' in memory — downstream SECRET lookup will miss");
 				}
 
 				secrets_added++;
@@ -3552,7 +3579,14 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 		}
 	}
 
-	BOILSTREAM_LOG("AllSecrets: Added " << secrets_added << " secrets to catalog");
+	// Always-on summary: number of secrets fetched from server vs how many made it
+	// to memory after registration. If `secrets_added` < server-returned count,
+	// there are silent failures we surfaced at the per-secret BOILSTREAM_WARN
+	// sites above. Track both the fetched count (from server) and the
+	// catalog-resolved count (post-RegisterSecret) so the staging diagnostic
+	// timeline is unambiguous in pod stderr.
+	BOILSTREAM_WARN("AllSecrets: cached " << secrets_added << " secret(s) from server response; "
+	                                       << "force_fetch=" << (force_fetch ? "true" : "false"));
 
 	yyjson_doc_free(doc);
 
@@ -3563,9 +3597,8 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 
 	// Return all secrets from local catalog (now includes REST API secrets)
 	auto final_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
-	BOILSTREAM_LOG("AllSecrets EXIT: success, added "
-	               << secrets_added << " secrets, CatalogSetSecretStorage::AllSecrets returned " << final_secrets.size()
-	               << " secrets");
+	BOILSTREAM_WARN("AllSecrets EXIT: registered " << secrets_added << " in memory; local catalog now has "
+	                                                << final_secrets.size() << " secret(s)");
 	return final_secrets;
 }
 
