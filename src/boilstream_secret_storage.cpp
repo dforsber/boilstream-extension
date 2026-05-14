@@ -2920,12 +2920,19 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 		}
 	}
 
-	// Persist to REST API (need connection state for authentication)
+	// Persist to REST API (need connection state for authentication).
+	// When no boilstream session is active the secret stays in-process only —
+	// mirrors DuckDB's TEMPORARY secret semantics. This is the path that
+	// makes `CREATE SECRET (TYPE quack, TOKEN ..., SCOPE 'quack:host')`
+	// work from a plain DuckDB CLI session that never called
+	// `PRAGMA boilstream_bootstrap_session`. Cross-session persistence
+	// requires a live conn_state; absent one, the secret is session-local.
 	auto *conn_state = GetSession(transaction);
-	if (!conn_state) {
-		throw InvalidInputException("No active boilstream session. Use PRAGMA boilstream_bootstrap_session first.");
+	if (conn_state) {
+		WriteSecretWithState(*secret, on_conflict, *conn_state);
+	} else {
+		BOILSTREAM_LOG("StoreSecret: no conn_state — skipping REST persist, storing in-memory only");
 	}
-	WriteSecretWithState(*secret, on_conflict, *conn_state);
 
 	// Serialize the secret so we can deserialize it for memory storage
 	string secret_json = SerializeSecret(*secret);
@@ -3809,11 +3816,16 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
 		return SecretMatch();
 	}
 
-	// Secret name convention: __quack__<path>. The path is the URL the user
-	// typed in ATTACH (e.g. "quack:my-server:5555"); embedding it in the
-	// secret name lets multiple quack ATTACHes coexist with distinct cached
-	// JWTs, and keeps a stable cache key for StoreExpiration/IsExpired.
-	string secret_name = "__quack__" + path;
+	// Auto-vended quack secrets use a stable name convention `__quack__<path>`
+	// so the cache key for StoreExpiration / IsExpired matches across calls.
+	// User-created `CREATE SECRET ... (TYPE quack)` secrets carry whatever
+	// name the user chose, NEVER our internal prefix.
+	auto auto_vend_secret_name = [](const string &p) { return "__quack__" + p; };
+	auto is_auto_vended_name = [](const string &n) {
+		static const string internal_prefix = "__quack__";
+		return n.compare(0, internal_prefix.size(), internal_prefix) == 0;
+	};
+	const string secret_name = auto_vend_secret_name(path);
 
 	// Check local cache: if we have a non-near-expiry copy, return it.
 	// IsExpired uses a 5-minute buffer (good for long-lived S3 creds) — too
@@ -3821,23 +3833,21 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
 	// against the recorded expires_at and only treat as miss when within 30s.
 	auto local_match = CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
 	if (local_match.HasMatch()) {
-		// USER-SUPPLIED SECRET TAKES PRIORITY.
-		// If the matched secret was created by the user via `CREATE SECRET ...
-		// (TYPE quack, TOKEN ..., SCOPE 'quack:host')` its name will NOT start
-		// with our internal `__quack__` prefix. In that case we MUST return it
-		// as-is and not re-vend from the server — the whole point of CREATE
-		// SECRET is to let the user supply their own token (e.g. for a
-		// non-boilstream Quack server, or for testing).
+		// USER-SUPPLIED SECRET TAKES PRIORITY over auto-vend. A scope-matching
+		// secret whose name doesn't match our internal `__quack__<path>` shape
+		// must have been installed by the user via `CREATE SECRET ... (TYPE
+		// quack, ...)` — the whole point of CREATE SECRET is to let the user
+		// supply their own token (e.g. for a non-boilstream Quack server, or
+		// for testing). Return it unchanged.
 		//
 		// Without this short-circuit the code below would re-fetch from
 		// /auth/api/quack/credentials and INSTALL A SECOND scope-matching
 		// secret under name `__quack__<path>`, causing ATTACH to see an
 		// ambiguous match and silently fail (Phase 4 e2e blocker
-		// ingestion-agent-cxum).
+		// ingestion-agent-cxum, refactor tracked as ingestion-agent-8hnt).
 		auto &matched = local_match.GetSecret();
 		const string matched_name = matched.GetName();
-		const string internal_prefix = "__quack__";
-		if (matched_name.compare(0, internal_prefix.size(), internal_prefix) != 0) {
+		if (!is_auto_vended_name(matched_name)) {
 			BOILSTREAM_LOG("LookupQuackSecret EXIT: returning user-supplied secret name="
 			               << matched_name << " (no auto-vend)");
 			return local_match;

@@ -3,22 +3,24 @@
 //
 // test_quack_attach_red.cpp
 //
-// RED TDD test reproducing the Phase 4 e2e blocker:
-//   ATTACH 'quack:host' AS r (TYPE quack) silently no-ops when boilstream
-//   has been LOAD'ed but no PRAGMA boilstream_bootstrap_session is active.
-//
-// The user-supplied `CREATE SECRET ... (TYPE quack)` should be honoured.
-// Currently the LookupSecret path returns the user's secret correctly when
-// conn_state is null (verified by tracing the code), but the integration
-// run shows the second secret with name "__quack__<path>" gets installed
-// over the top by the bootstrap-session refresh and the resulting ambiguity
-// causes the ATTACH to bind to the wrong (or no) secret.
+// Unit-level guard for the Phase 4 secret-lookup semantics:
+//   - `CREATE SECRET ... (TYPE quack)` from a DuckDB CLI session that
+//     never called `PRAGMA boilstream_bootstrap_session` must result in
+//     `ATTACH 'quack:host' AS r (TYPE quack)` honouring the user's
+//     secret (no auto-vend, no exception).
+//   - When a boilstream session IS active, a user-supplied scope-matching
+//     TYPE quack secret must take priority over the auto-vended one — the
+//     server-vended JWT MUST NOT silently clobber the user's secret.
 //
 // This test stays in the unit lane:
 //   - No live boilstream server.
 //   - No bootstrap_session called.
 //   - We instantiate RestApiSecretStorage directly and inject a
 //     KeyValueSecret of TYPE quack, then assert LookupSecret returns it.
+//
+// Originally written as a RED TDD reproducer for the Phase 4 e2e blocker
+// (ingestion-agent-cxum / ingestion-agent-8hnt); turned green by the
+// StoreSecret-no-conn_state fix and the named auto-vend helper.
 //
 // Build (from extension repo root):
 //   make            # builds duckdb static libs + extension archive
@@ -58,6 +60,10 @@ struct QuackAttachFixture {
 // a live conn_state; absent one, LookupQuackSecret must fall through to the
 // local CatalogSet path and return the user's secret unchanged.
 //===----------------------------------------------------------------------===//
+// Green as of the StoreSecret-no-conn_state fix + named auto-vend helper
+// (closes ingestion-agent-8hnt). The `[red]` tag stays for cross-reference
+// with the Phase 4 incident reports; the test now asserts the expected
+// behaviour rather than reproducing the bug.
 TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_session",
           "[quack][red][phase4]") {
 	QuackAttachFixture f;
@@ -72,9 +78,11 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "smk");
 	secret->secret_map["token"] = Value(user_token);
 
-	// Install through the canonical AddOrUpdateSecretInCatalog path —
-	// same one CREATE SECRET ultimately hits via the secret manager.
-	s.AddOrUpdateSecretInCatalog(std::move(secret), nullptr /* no transaction */);
+	// Install through the public StoreSecret API — same path `CREATE SECRET`
+	// hits via the secret manager. With no conn_state, StoreSecret stores
+	// locally only (no REST persist), matching DuckDB's TEMPORARY semantics.
+	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT,
+	              nullptr /* no transaction */);
 
 	// ─── LookupSecret with no conn_state, type=quack ──────────────────
 	auto match = s.LookupSecret(user_path, "quack", nullptr);
@@ -115,6 +123,12 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend",
 	Connection con(*f.db);
 	s.SetActiveSessionKeyForConnection(con.context->GetConnectionId(), "test-session");
 
+	// Production ATTACH always runs inside an active meta transaction (the
+	// secret manager is invoked from query binding, not from raw API calls).
+	// CatalogSetSecretStorage::LookupSecret eventually touches
+	// `TransactionContext::ActiveTransaction()` so we must open one here.
+	con.BeginTransaction();
+
 	// Set up a path with a non-routable endpoint — so if the code DOES
 	// take the auto-vend HTTP path, it will fail and we'd see an empty
 	// SecretMatch. We want the GREEN path to return the user's secret
@@ -124,7 +138,7 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend",
 	vector<string> scope{user_path};
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "user-quack");
 	secret->secret_map["token"] = Value(user_token);
-	s.AddOrUpdateSecretInCatalog(std::move(secret), nullptr);
+	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
 
 	// Use a CatalogTransaction wired to our connection so GetSession resolves.
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*con.context);

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] - 2026-05-14
 
+### Fixed
+
+- **`CREATE SECRET (TYPE quack)` without `bootstrap_session`**: `RestApiSecretStorage::StoreSecret` previously threw `"No active boilstream session"` when no `conn_state` was attached to the calling transaction, blocking the legitimate workflow of `CREATE SECRET (TYPE quack, TOKEN ..., SCOPE 'quack:host')` from a DuckDB CLI session that never called `PRAGMA boilstream_bootstrap_session`. The path now falls back to in-process storage only (skips REST persist) — mirrors DuckDB's `TEMPORARY` secret semantics. Cross-session persistence still requires a live session.
+- **Auto-vend no longer clobbers user-supplied quack secrets**: `LookupQuackSecret` previously matched its internal cache key (`__quack__<path>`) by inline string-comparison; refactored into a named helper `is_auto_vended_name(...)` that makes the convention explicit. Behaviour is unchanged — a scope-matching `TYPE quack` secret whose name doesn't follow the auto-vend convention is treated as user-supplied and returned as-is, never replaced by the server-vended JWT. Closes ingestion-agent-8hnt.
+
 ### Added
 
 - **Quack remote-protocol bridge**: New `src/quack_bridge.{cpp,hpp}` exposing the scalar functions that DuckDB Quack's `quack_authentication_function` / `quack_authorization_function` GLOBAL settings dispatch to:
