@@ -362,6 +362,27 @@ target_link_libraries(input_validation_test PRIVATE ${DUCKDB_LIBS}
 # Link Rust dependencies
 link_rust_dependencies(input_validation_test)
 
+# Quack ATTACH red test (TDD reproducer for the Phase 4 secret-lookup
+# regression — bridge re-uses RestApiSecretStorage so we link it the same
+# way as session_routing_test / input_validation_test).
+add_executable(
+  quack_attach_red_test
+  test_quack_attach_red.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+
+target_include_directories(
+  quack_attach_red_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+
+target_compile_definitions(quack_attach_red_test PRIVATE BOILSTREAM_DEBUG)
+
+target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
+                                                     Catch2::Catch2)
+link_rust_dependencies(quack_attach_red_test)
+
 # Enable testing
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
@@ -378,3 +399,4 @@ add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
+add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)
