@@ -5,6 +5,27 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-14
+
+### Added
+
+- **Quack remote-protocol bridge**: New `src/quack_bridge.{cpp,hpp}` exposing the scalar functions that DuckDB Quack's `quack_authentication_function` / `quack_authorization_function` GLOBAL settings dispatch to:
+  - `boilstream_quack_authn(token)` — HS256 JWT verifier registered via `boilstream_quack_set_jwt_verifier`; populates the bridge SessionMap on success.
+  - `boilstream_quack_authz(session_id, kind, statement)` — read-only gate (allows `SELECT` / `EXPLAIN` / `PRAGMA`, rejects DDL/DML).
+  - `boilstream_quack_bind_session(session_id, tenant_id, …)` — SessionMap upsert used by the auth path.
+  - `boilstream_quack_session_init(session_id, void* client_context)` — `extern "C"` hook handler `dlsym`-registered with patched Quack via `quack_set_session_init_hook`. On each new per-session Quack `Connection`, looks up the session_id in the SessionMap and stamps the tenant_id onto the freshly-spawned `ClientContext` via the fork's `duckdb_set_tenant_id_on_context` (also `dlsym`'d). On vanilla DuckDB / stock Quack the fork symbols aren't present and the bridge degrades silently — community-extension compatibility preserved.
+- **`LookupQuackSecret` auto-vend** in `boilstream_secret_storage.cpp`: on first ATTACH against a `quack:` URI with no `TYPE quack` secret in cache, fetches one through the existing /secrets bootstrap path.
+- **Tests**: `test/cpp/test_quack_attach_red.cpp` (TDD reproducer for the secret-lookup regression, now wired into CMakeLists and CTest as `QuackAttachRedTests`); SQL tests `test/sql/quack_attach_with_manual_secret.test`, `test/sql/quack_bridge.test`, `test/sql/quack_secret_autovend.test`.
+- **`BOILSTREAM_INSECURE_TLS=1`** local-dev knob: skips certificate verification when set (intended only for `localhost` self-signed cert setups).
+
+### Diagnostics
+
+- **`BOILSTREAM_WARN` for silent catches in AllSecrets memory cache**: surfaces the production-critical failure paths inside `FetchAllSecretsFromServer` that were previously hidden behind `BOILSTREAM_LOG` (no-op without `-DBOILSTREAM_DEBUG`).
+
+### Chore
+
+- Clear all dependabot alerts on default branch.
+
 ## [0.5.1] - 2026-02-06
 
 ### Security
