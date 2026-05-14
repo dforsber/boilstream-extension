@@ -22,9 +22,30 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
-#include <dlfcn.h>
 #include <iostream>
 #include <mutex>
+
+// Portable runtime symbol lookup. The bridge resolves two `extern "C"`
+// symbols that exist only when loaded inside the multi-tenant boilstream
+// DuckDB fork (`quack_set_session_init_hook`, `duckdb_set_tenant_id_on_context`).
+// On vanilla DuckDB the lookups must return null cleanly so the bridge can
+// degrade silently. POSIX uses `dlsym(RTLD_DEFAULT, ...)`; Windows
+// (MSVC + MinGW) uses `GetProcAddress(GetModuleHandle(NULL), ...)`.
+#ifdef _WIN32
+#include <windows.h>
+static inline void *boilstream_lookup_runtime_symbol(const char *name) {
+	HMODULE h = ::GetModuleHandleA(NULL);
+	if (!h) {
+		return nullptr;
+	}
+	return reinterpret_cast<void *>(::GetProcAddress(h, name));
+}
+#else
+#include <dlfcn.h>
+static inline void *boilstream_lookup_runtime_symbol(const char *name) {
+	return ::dlsym(RTLD_DEFAULT, name);
+}
+#endif
 
 // Match the BOILSTREAM_LOG convention used by boilstream_secret_storage.cpp:
 // build with -DBOILSTREAM_DEBUG to enable; otherwise the macro compiles away.
@@ -463,7 +484,7 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	// output to the calling tenant.
 	{
 		auto quack_setter = reinterpret_cast<quack_set_session_init_hook_fn_t>(
-		    dlsym(RTLD_DEFAULT, "quack_set_session_init_hook"));
+		    boilstream_lookup_runtime_symbol("quack_set_session_init_hook"));
 		if (quack_setter) {
 			quack_setter(&boilstream_quack_session_init);
 		}
@@ -539,7 +560,7 @@ extern "C" void boilstream_quack_session_init(const char *session_id_cstr, void 
 		// the symbol is process-stable, so one lookup per process is fine.
 		static duckdb_set_tenant_id_on_context_fn_t fork_setter =
 		    reinterpret_cast<duckdb_set_tenant_id_on_context_fn_t>(
-		        dlsym(RTLD_DEFAULT, "duckdb_set_tenant_id_on_context"));
+		        boilstream_lookup_runtime_symbol("duckdb_set_tenant_id_on_context"));
 		if (fork_setter) {
 			fork_setter(client_context_ptr, tid.c_str());
 		}
