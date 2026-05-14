@@ -1,0 +1,208 @@
+# name: test/sql/quack_bridge.test
+# description: boilstream Quack auth/authz/bind callbacks
+# group: [boilstream]
+
+require boilstream
+
+# Note: we intentionally DO NOT `require quack` here. The bridge is a pure C++
+# shim and must work on its own; Quack only consumes it at runtime via the
+# quack_authentication_function / quack_authorization_function GLOBAL settings.
+
+####################
+# boilstream_quack_authn — Phase 1 parity with quack_check_token
+####################
+
+# Matching tokens => true
+query I
+SELECT boilstream_quack_authn('s1', 'tok', 'tok');
+----
+true
+
+# Mismatched tokens => false
+query I
+SELECT boilstream_quack_authn('s1', 'a', 'b');
+----
+false
+
+# Different lengths => false (memcmp short-circuit)
+query I
+SELECT boilstream_quack_authn('s1', 'short', 'longer-token');
+----
+false
+
+# Empty tokens both sides => false (we conservatively reject empty)
+query I
+SELECT boilstream_quack_authn('s1', '', '');
+----
+false
+
+# session_id is currently ignored — null-but-empty sid still works for matched tokens
+query I
+SELECT boilstream_quack_authn('', 'tok', 'tok');
+----
+true
+
+####################
+# boilstream_quack_authz — read-only first-keyword policy
+####################
+
+query I
+SELECT boilstream_quack_authz('sid', 'SELECT 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'PRAGMA version');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'EXPLAIN SELECT 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'DESCRIBE foo');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'SHOW TABLES');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'WITH cte AS (SELECT 1) SELECT * FROM cte');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'CALL quack_stop(''x'')');
+----
+true
+
+# Leading whitespace + lowercase keyword — must still match
+query I
+SELECT boilstream_quack_authz('sid', '  select 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', E'\t\n  select 1');
+----
+true
+
+# Writes are rejected
+query I
+SELECT boilstream_quack_authz('sid', 'INSERT INTO t VALUES (1)');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'UPDATE t SET x = 1');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'DELETE FROM t');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'CREATE TABLE t(x INT)');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'DROP TABLE t');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'ATTACH ''foo''');
+----
+false
+
+# Word-boundary check: prefix-equal but not the keyword => reject
+query I
+SELECT boilstream_quack_authz('sid', 'SELECTOR foo');
+----
+false
+
+# Empty query => no keyword => reject
+query I
+SELECT boilstream_quack_authz('sid', '');
+----
+false
+
+####################
+# boilstream_quack_bind_session — stash + count
+####################
+
+# Map starts empty (assuming clean process — see comment below)
+# Note: this test asserts a delta rather than an absolute count to be robust
+# against other tests in the same process having bound sessions earlier.
+statement ok
+CREATE TEMP TABLE _qb_before AS SELECT boilstream_quack_debug_session_count() AS n;
+
+# Bind two sessions
+query I
+SELECT boilstream_quack_bind_session('sess-a', 'user-1', 'tenant-1', 'cat1,cat2');
+----
+true
+
+query I
+SELECT boilstream_quack_bind_session('sess-b', 'user-2', 'tenant-2', '');
+----
+true
+
+# Re-binding the same sid is a no-op count-wise (overwrites in place)
+query I
+SELECT boilstream_quack_bind_session('sess-a', 'user-1', 'tenant-1', 'cat3');
+----
+true
+
+# Empty sid is rejected (returns false)
+query I
+SELECT boilstream_quack_bind_session('', 'u', 't', '');
+----
+false
+
+# Two new entries since we started
+query I
+SELECT boilstream_quack_debug_session_count() - (SELECT n FROM _qb_before);
+----
+2
+
+####################
+# Phase-1.5: literal-token fallback when no host-side JWT verifier is
+# registered.
+#
+# The Rust host registers a verifier via `boilstream_quack_set_jwt_verifier()`
+# at server startup. This sqllogictest process never calls that setter, so
+# the slot stays null and the authn function must take the literal-token
+# branch — i.e. exactly the Phase-1 behaviour the assertions at the top
+# of this file already cover.
+#
+# We re-assert the contract here as an explicit fallback section so a
+# future change that accidentally drops the fallback path is caught by a
+# test whose name and comment make the intent obvious.
+####################
+
+# Verifier slot is null → matching tokens still authenticate.
+query I
+SELECT boilstream_quack_authn('s-fb', 'tok', 'tok');
+----
+true
+
+# Verifier slot is null → mismatched tokens still fail.
+query I
+SELECT boilstream_quack_authn('s-fb', 'a', 'b');
+----
+false
+
+# Verifier slot is null → empty token still rejected.
+query I
+SELECT boilstream_quack_authn('s-fb', '', '');
+----
+false

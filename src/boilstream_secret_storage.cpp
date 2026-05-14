@@ -3022,6 +3022,24 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	return CatalogSetSecretStorage::LookupSecret(path, type, transaction);
 #endif
 
+	// ---------- Quack auto-vend dispatch (Phase 2.2) ----------
+	// For TYPE quack lookups (i.e. ATTACH 'quack:host'), bypass the generic /match
+	// endpoint and call the dedicated GET /auth/api/quack/credentials endpoint.
+	// The server returns a JSON envelope { token, expires_at, endpoint } that we
+	// materialise into a KeyValueSecret with token+endpoint fields. Cached secrets
+	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
+	// used by IsExpired, because Quack JWTs are short-lived).
+	if (StringUtil::Lower(type) == "quack") {
+		auto match = LookupQuackSecret(path, transaction);
+		if (match.HasMatch()) {
+			return match;
+		}
+		// Fall through to generic path on miss (keeps behaviour graceful if the
+		// quack endpoint is unreachable: the user still gets a regular SecretMatch()
+		// from the parent at the bottom of the function).
+	}
+	// ---------- end Quack dispatch ----------
+
 	// Get connection state FIRST - needed for recursion guard
 	auto *conn_state = GetSession(transaction);
 
@@ -3752,6 +3770,183 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 	yyjson_doc_free(doc);
 	BOILSTREAM_LOG("FetchCatalogVersions: Fetched " << versions.size() << " catalog versions");
 	return versions;
+}
+
+// ---------------------------------------------------------------------------
+// Quack auto-vend (Phase 2.2)
+//
+// When the user runs `ATTACH 'quack:server-host'` after `LOAD boilstream`,
+// DuckDB's secret manager calls LookupSecret(path="quack:server-host",
+// type="quack"). We intercept that, hit the boilstream server's dedicated
+// quack JWT mint endpoint, and materialise a KeyValueSecret holding the
+// token + (optional) endpoint. The user never types CREATE SECRET.
+//
+// The endpoint is GET /auth/api/quack/credentials (HS256 JWT, signed
+// server-side). The response shape is:
+//
+//   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>"? }
+//
+// We treat the JWT as opaque — server-side bridge verifies it.
+// ---------------------------------------------------------------------------
+SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
+                                                    optional_ptr<CatalogTransaction> transaction) {
+	BOILSTREAM_LOG("LookupQuackSecret ENTER: path=" << path);
+
+	// Need an active session for authenticated GET — quack credentials are gated
+	// behind the same OPAQUE-authenticated REST API as everything else.
+	auto *conn_state = GetSession(transaction);
+	if (!conn_state) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: no connection state");
+		return SecretMatch();
+	}
+
+	// Use the same recursion guard as the main LookupSecret path. Without this,
+	// the inner HttpGetWithState below could re-enter LookupSecret via httpfs.
+	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
+	guard.emplace(*conn_state);
+	if (!guard->Acquired()) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: recursion guard blocked");
+		return SecretMatch();
+	}
+
+	// Secret name convention: __quack__<path>. The path is the URL the user
+	// typed in ATTACH (e.g. "quack:my-server:5555"); embedding it in the
+	// secret name lets multiple quack ATTACHes coexist with distinct cached
+	// JWTs, and keeps a stable cache key for StoreExpiration/IsExpired.
+	string secret_name = "__quack__" + path;
+
+	// Check local cache: if we have a non-near-expiry copy, return it.
+	// IsExpired uses a 5-minute buffer (good for long-lived S3 creds) — too
+	// aggressive for short-lived JWTs. So we do our own 30s window check
+	// against the recorded expires_at and only treat as miss when within 30s.
+	auto local_match = CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
+	if (local_match.HasMatch()) {
+		// USER-SUPPLIED SECRET TAKES PRIORITY.
+		// If the matched secret was created by the user via `CREATE SECRET ...
+		// (TYPE quack, TOKEN ..., SCOPE 'quack:host')` its name will NOT start
+		// with our internal `__quack__` prefix. In that case we MUST return it
+		// as-is and not re-vend from the server — the whole point of CREATE
+		// SECRET is to let the user supply their own token (e.g. for a
+		// non-boilstream Quack server, or for testing).
+		//
+		// Without this short-circuit the code below would re-fetch from
+		// /auth/api/quack/credentials and INSTALL A SECOND scope-matching
+		// secret under name `__quack__<path>`, causing ATTACH to see an
+		// ambiguous match and silently fail (Phase 4 e2e blocker
+		// ingestion-agent-cxum).
+		auto &matched = local_match.GetSecret();
+		const string matched_name = matched.GetName();
+		const string internal_prefix = "__quack__";
+		if (matched_name.compare(0, internal_prefix.size(), internal_prefix) != 0) {
+			BOILSTREAM_LOG("LookupQuackSecret EXIT: returning user-supplied secret name="
+			               << matched_name << " (no auto-vend)");
+			return local_match;
+		}
+
+		std::chrono::system_clock::time_point expires_at;
+		{
+			lock_guard<mutex> lock(conn_state->expiration_lock);
+			auto it = conn_state->secret_expiration.find(secret_name);
+			if (it != conn_state->secret_expiration.end()) {
+				expires_at = it->second;
+			}
+		}
+		// If we have no expiry record, treat as miss (re-vend). Otherwise check
+		// the 30s near-expiry window. Mirrors RefreshCatalogCredentials' force-
+		// expire-by-setting-time semantics, but as a read-side check.
+		if (expires_at != std::chrono::system_clock::time_point()) {
+			auto now = std::chrono::system_clock::now();
+			if (now < expires_at - std::chrono::seconds(30)) {
+				BOILSTREAM_LOG("LookupQuackSecret EXIT: cached, fresh (>30s remaining)");
+				return local_match;
+			}
+			BOILSTREAM_LOG("LookupQuackSecret: cached but near-expiry, re-vending");
+		}
+	}
+
+	// Build URL: replace "/secrets" suffix with "/auth/api/quack/credentials".
+	// endpoint_url is conventionally "https://host/secrets" — same pattern
+	// FetchCatalogVersions uses (~line 3698).
+	string base_url;
+	{
+		lock_guard<mutex> lock(endpoint_lock);
+		base_url = endpoint_url;
+	}
+	if (base_url.empty()) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: no endpoint configured");
+		return SecretMatch();
+	}
+	auto pos = base_url.rfind("/secrets");
+	if (pos == string::npos) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: endpoint_url doesn't end with /secrets");
+		return SecretMatch();
+	}
+	string url = base_url.substr(0, pos) + "/auth/api/quack/credentials";
+	url = AppendPlatformParams(url, transaction);
+
+	// HttpGetWithState handles BuildAuthenticatedHeaders + VerifyAuthenticatedResponse
+	// + decryption. Same path FetchCatalogVersions uses.
+	string response;
+	try {
+		response = HttpGetWithState(url, *conn_state);
+	} catch (const std::exception &e) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure: " << e.what());
+		return SecretMatch();
+	} catch (...) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure (unknown)");
+		return SecretMatch();
+	}
+	if (response.empty() || response == "null" || response == "{}") {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: empty response");
+		return SecretMatch();
+	}
+
+	// Parse { token, expires_at, endpoint } with yyjson (same library
+	// FetchCatalogVersions uses ~line 3716).
+	auto doc = yyjson_read(response.c_str(), response.size(), 0);
+	if (!doc) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: JSON parse failure");
+		return SecretMatch();
+	}
+	auto root = yyjson_doc_get_root(doc);
+	if (!root || !yyjson_is_obj(root)) {
+		yyjson_doc_free(doc);
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: response not an object");
+		return SecretMatch();
+	}
+	string token = SafeGetStr(yyjson_obj_get(root, "token"));
+	string expires_at_str = SafeGetStr(yyjson_obj_get(root, "expires_at"));
+	string endpoint_str = SafeGetStr(yyjson_obj_get(root, "endpoint"));
+	yyjson_doc_free(doc);
+
+	if (token.empty()) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: missing token in response");
+		return SecretMatch();
+	}
+
+	// Materialise a KeyValueSecret. Scope is the path so DuckDB matches
+	// `ATTACH 'quack:...'` against this secret. Provider "config" matches
+	// the SecretType registration in boilstream_extension.cpp.
+	vector<string> scope{path};
+	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
+	secret->secret_map["token"] = Value(token);
+	if (!endpoint_str.empty()) {
+		secret->secret_map["endpoint"] = Value(endpoint_str);
+	}
+	// Mark token as redactable so it doesn't leak through duckdb_secrets().
+	secret->redact_keys.insert("token");
+
+	// Cache expiry via the existing per-conn expiration map (line ~2087).
+	if (!expires_at_str.empty()) {
+		StoreExpiration(secret_name, expires_at_str, *conn_state);
+	}
+
+	// Install into the local catalog via the canonical path (line ~2271) so
+	// CatalogSetSecretStorage::LookupSecret can resolve subsequent calls.
+	AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+
+	BOILSTREAM_LOG("LookupQuackSecret EXIT: success, name=" << secret_name);
+	return CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
 }
 
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,

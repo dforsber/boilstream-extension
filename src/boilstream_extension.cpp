@@ -17,6 +17,7 @@
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
 #include "opaque_client_ffi.hpp"
+#include "quack_bridge.hpp"
 #include "yyjson.hpp"
 #include <ctime>
 #include <chrono>
@@ -2297,6 +2298,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_manager.SetDefaultStorage("boilstream");
 	BOILSTREAM_LOG("LoadInternal: Set boilstream as default persistent storage");
 
+	// Note: the `quack` SecretType is registered by the upstream `quack` extension
+	// itself (RegisterQuackSecretType in quack_extension.cpp). We don't register it
+	// here — duplicate RegisterSecretType throws InternalException. Our Phase 2.2
+	// auto-vend (RestApiSecretStorage::LookupQuackSecret) just builds a
+	// KeyValueSecret of type "quack" and installs it via AddOrUpdateSecretInCatalog;
+	// DuckDB's SecretManager doesn't require the registration to live in *our*
+	// extension for that to work. If the user loads boilstream without the quack
+	// extension, the dispatch still runs but the SecretMatch returned is only
+	// consumed by quack-aware code (ATTACH 'quack:...'), which itself requires
+	// the quack extension — so the missing registration won't surface.
+
 	// Register PRAGMA function with PragmaCall to accept parameters
 	// Use temporary LogicalType objects to avoid ODR violations with static const members
 	vector<LogicalType> endpoint_params;
@@ -2362,6 +2374,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                               BoilstreamSecretsInit);
 	loader.RegisterFunction(secrets_function);
 	BOILSTREAM_LOG("LoadInternal: boilstream_secrets table function registered");
+
+	// Register Quack bridge scalar functions (Phase 1: authn/authz/bind_session)
+	RegisterQuackBridge(loader);
+	BOILSTREAM_LOG("LoadInternal: Quack bridge scalar functions registered");
 
 	BOILSTREAM_LOG("LoadInternal: Extension loaded successfully");
 }

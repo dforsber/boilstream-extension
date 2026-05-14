@@ -339,6 +339,13 @@ private:
 	//! Force refresh credentials for a specific catalog by name (uses connection state)
 	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);
 
+	//! Quack auto-vend (Phase 2.2): fetch a fresh Quack JWT from the boilstream server
+	//! at GET /auth/api/quack/credentials and materialise it as a `quack`-typed
+	//! KeyValueSecret in the local catalog. Returns a SecretMatch on success, or an
+	//! empty SecretMatch on miss / network failure so the caller can fall back.
+	//! Implements 30s near-expiry refresh (tighter than the generic 5min IsExpired buffer).
+	SecretMatch LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction);
+
 	//========================================================================
 	// Shared State (across all connections)
 	//========================================================================
