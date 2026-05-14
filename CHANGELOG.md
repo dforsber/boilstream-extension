@@ -5,6 +5,19 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-05-14
+
+### Added
+
+- **Quack pre-execute SQL-rewriter hook**: new bridge surface for host-registered query-time rewriting.
+  - `boilstream_quack_set_sql_rewriter(fn)` — setter (atomic slot, release-store at boot, acquire-load on the hot path; same lifecycle as the JWT verifier slot).
+  - `boilstream_quack_pre_execute(session_id, sql_in, sql_out_buf, ...)` — `extern "C"` hook handler. Patched Quack calls this between authz and SendQuery; the handler routes through to the host-registered Rust rewriter. Caller owns the output buffer — no allocation crosses the C/Rust boundary.
+  - Registered with patched Quack via `boilstream_lookup_runtime_symbol("quack_set_pre_execute_hook")`, re-using the portable POSIX / Windows shim introduced in v0.6.0. Vanilla DuckDB / stock Quack → no-op.
+
+### Style
+
+- `make format-fix` pass across 12 files — fixes the Code Quality / Format Check in the boilstream-extension distribution pipeline. Clang-format / cmake-format / sqllogic-test trailing-whitespace normalisation; no semantic changes.
+
 ## [0.6.0] - 2026-05-14
 
 ### Fixed

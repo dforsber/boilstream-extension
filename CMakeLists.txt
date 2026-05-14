@@ -221,7 +221,7 @@ if(IS_WASM_BUILD)
             -DEXTENSION=$<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>
             -DPLATFORM_FILE=${CMAKE_BINARY_DIR}/duckdb_platform_out
             -DVERSION_FIELD=v1.5.2
-            -DEXTENSION_VERSION=0.6.0
+            -DEXTENSION_VERSION=0.6.1
             -DNULL_FILE=${CMAKE_CURRENT_SOURCE_DIR}/duckdb/scripts/null.txt
             -P ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/scripts/append_metadata.cmake
         COMMENT "Appending extension metadata for DuckDB compatibility"
