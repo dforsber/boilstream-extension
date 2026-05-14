@@ -24,11 +24,9 @@ using namespace duckdb;
 namespace {
 // v1.5 AESStateMBEDTLS API: heap-allocated metadata + EncryptionNonce. Same
 // shim as in test_boilstream_conformance.cpp; production code uses Rust FFI.
-inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata>
-MakeAesGcm256Metadata() {
-	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(
-	    duckdb::EncryptionTypes::CipherType::GCM, 32u,
-	    duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata> MakeAesGcm256Metadata() {
+	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(duckdb::EncryptionTypes::CipherType::GCM, 32u,
+	                                                          duckdb::EncryptionTypes::EncryptionVersion::V0_1);
 }
 
 inline duckdb::EncryptionNonce MakeNonce(const std::vector<uint8_t> &raw_nonce) {

@@ -407,8 +407,8 @@ TEST_CASE("Concurrent Session Routing", "[boilstream][session-routing][threading
 			s.GetOrCreateSession("ck-" + std::to_string(i));
 		}
 
-		std::atomic<bool> go{false};
-		std::atomic<int> errors{0};
+		std::atomic<bool> go {false};
+		std::atomic<int> errors {0};
 		std::vector<std::thread> threads;
 
 		for (int i = 0; i < N; i++) {
@@ -438,8 +438,8 @@ TEST_CASE("Concurrent Session Routing", "[boilstream][session-routing][threading
 		const int THREADS = 10;
 		const int CYCLES = 50;
 
-		std::atomic<bool> go{false};
-		std::atomic<int> errors{0};
+		std::atomic<bool> go {false};
+		std::atomic<int> errors {0};
 		std::vector<std::thread> threads;
 
 		for (int t = 0; t < THREADS; t++) {
@@ -491,7 +491,7 @@ TEST_CASE("Concurrent Session Routing", "[boilstream][session-routing][threading
 			shared->access_token = "conc-token-pad0123456789abcdef0123456789abcdef0123456789abcde";
 		}
 
-		std::atomic<bool> go{false};
+		std::atomic<bool> go {false};
 		std::vector<std::thread> threads;
 
 		for (int i = 0; i < N; i++) {

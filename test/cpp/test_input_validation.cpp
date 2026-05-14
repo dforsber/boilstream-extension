@@ -727,7 +727,6 @@ TEST_CASE_METHOD(InputValidationTestFixture, "SignRequest handles various URL fo
 
 TEST_CASE_METHOD(InputValidationTestFixture, "Size limits prevent DoS attacks",
                  "[input_validation][security][size_limits]") {
-
 	SECTION("DecryptResponse rejects oversized response") {
 		// Create a response larger than MAX_ENCRYPTED_RESPONSE_SIZE (10MB)
 		std::string oversized_response(11 * 1024 * 1024, 'a'); // 11MB

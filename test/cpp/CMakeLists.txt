@@ -336,7 +336,7 @@ target_include_directories(
 target_compile_definitions(session_routing_test PRIVATE BOILSTREAM_DEBUG)
 
 target_link_libraries(session_routing_test PRIVATE ${DUCKDB_LIBS}
-                                                    Catch2::Catch2)
+                                                   Catch2::Catch2)
 link_rust_dependencies(session_routing_test)
 
 # Input validation test executable (malicious/empty value handling)
@@ -362,9 +362,9 @@ target_link_libraries(input_validation_test PRIVATE ${DUCKDB_LIBS}
 # Link Rust dependencies
 link_rust_dependencies(input_validation_test)
 
-# Quack ATTACH red test (TDD reproducer for the Phase 4 secret-lookup
-# regression — bridge re-uses RestApiSecretStorage so we link it the same
-# way as session_routing_test / input_validation_test).
+# Quack ATTACH red test (TDD reproducer for the Phase 4 secret-lookup regression
+# — bridge re-uses RestApiSecretStorage so we link it the same way as
+# session_routing_test / input_validation_test).
 add_executable(
   quack_attach_red_test
   test_quack_attach_red.cpp ../../src/boilstream_secret_storage.cpp
@@ -380,7 +380,7 @@ target_include_directories(
 target_compile_definitions(quack_attach_red_test PRIVATE BOILSTREAM_DEBUG)
 
 target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
-                                                     Catch2::Catch2)
+                                                    Catch2::Catch2)
 link_rust_dependencies(quack_attach_red_test)
 
 # Enable testing

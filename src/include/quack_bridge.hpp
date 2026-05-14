@@ -63,9 +63,8 @@ extern "C" {
 //! Truncation (any output that does not fit including the NUL terminator)
 //! must be treated as failure by the implementation, returning 0.
 typedef int (*boilstream_quack_jwt_verifier_fn)(const char *jwt, size_t jwt_len, char *user_id_out,
-                                                size_t user_id_capacity, char *tenant_id_out,
-                                                size_t tenant_id_capacity, char *catalogs_csv_out,
-                                                size_t catalogs_capacity);
+                                                size_t user_id_capacity, char *tenant_id_out, size_t tenant_id_capacity,
+                                                char *catalogs_csv_out, size_t catalogs_capacity);
 
 //! Register the verifier (or clear it by passing NULL). Intended to be
 //! called exactly once during host startup, before the Quack listener
@@ -73,6 +72,31 @@ typedef int (*boilstream_quack_jwt_verifier_fn)(const char *jwt, size_t jwt_len,
 //! acquire-load against an atomic, so a single late-registration would be
 //! observed eventually — but the intended usage is one-shot at boot.
 void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn);
+
+//===----------------------------------------------------------------------===//
+// Host-registered SQL rewriter (Phase 2 of Quack adoption — write routing)
+//
+// The patched Quack server fires a pre-execute hook between authz and
+// SendQuery. Our bridge wires that hook to a C++ handler that looks up the
+// session's SessionCtx, then calls into this Rust-side rewriter to give
+// it a chance to substitute the SQL. Used to route INSERT/UPDATE/DELETE
+// against DuckLake catalogs through the same Airport-loopback path PGWire
+// uses for streaming writes.
+//
+// Tenant_id and catalogs_csv are pre-resolved by the C++ handler so the
+// Rust side doesn't have to make a back-callback to look them up.
+//
+// Returns:
+//    1   — rewrote (sql_out_buf is NUL-terminated rewritten SQL)
+//    0   — no rewrite (server executes sql_in verbatim)
+//   <0   — rewriter error (treated as no-rewrite; the rewriter logs)
+//===----------------------------------------------------------------------===//
+typedef int (*boilstream_quack_sql_rewriter_fn)(const char *session_id, const char *tenant_id, const char *catalogs_csv,
+                                                const char *sql_in, char *sql_out_buf, size_t sql_out_size);
+
+//! Register the rewriter (or clear with NULL). One-shot at boot, like the
+//! JWT verifier above.
+void boilstream_quack_set_sql_rewriter(boilstream_quack_sql_rewriter_fn fn);
 
 } // extern "C"
 

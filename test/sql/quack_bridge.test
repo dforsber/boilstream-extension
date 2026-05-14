@@ -1,6 +1,6 @@
 # name: test/sql/quack_bridge.test
 # description: boilstream Quack auth/authz/bind callbacks
-# group: [boilstream]
+# group: [sql]
 
 require boilstream
 
@@ -92,22 +92,53 @@ SELECT boilstream_quack_authz('sid', E'\t\n  select 1');
 ----
 true
 
-# Writes are rejected
+# Phase-2 admit list: DML is allowed (writes route through the central
+# ingestion pipeline via the pre-execute rewriter). Catalog allow-list +
+# tenant isolation still gate which catalogs the writes can target.
+#
+# Note: these queries reference unqualified table names (no `cat.schema.t`
+# 3-part ref), so the catalog allow-list gate has nothing to reject —
+# they pass at the authz layer. The downstream DuckDB execution will
+# fail with "table does not exist" for the unbound `sid` (no claims),
+# but that's not an authz concern.
 query I
 SELECT boilstream_quack_authz('sid', 'INSERT INTO t VALUES (1)');
 ----
-false
+true
 
 query I
 SELECT boilstream_quack_authz('sid', 'UPDATE t SET x = 1');
 ----
-false
+true
 
 query I
 SELECT boilstream_quack_authz('sid', 'DELETE FROM t');
 ----
-false
+true
 
+query I
+SELECT boilstream_quack_authz('sid', 'MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET x = s.x');
+----
+true
+
+# Transaction control is admitted so multi-statement writes work.
+query I
+SELECT boilstream_quack_authz('sid', 'BEGIN');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'COMMIT');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('sid', 'ROLLBACK');
+----
+true
+
+# DDL is still rejected — DuckLake DDL must go through the catalog-master
+# leader RPC (via PGWire), not directly via Quack.
 query I
 SELECT boilstream_quack_authz('sid', 'CREATE TABLE t(x INT)');
 ----
@@ -118,6 +149,38 @@ SELECT boilstream_quack_authz('sid', 'DROP TABLE t');
 ----
 false
 
+query I
+SELECT boilstream_quack_authz('sid', 'ALTER TABLE t ADD COLUMN y INT');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'TRUNCATE t');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'GRANT SELECT ON t TO public');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('sid', 'REVOKE SELECT ON t FROM public');
+----
+false
+
+# COPY FROM 'file' would bypass our ingestion pipeline, so reject. (We
+# don't try to distinguish COPY ... TO 'file' here — Phase-1 keyword
+# match is sufficient defense; the path is rare enough that operators
+# can route through PGWire.)
+query I
+SELECT boilstream_quack_authz('sid', 'COPY t FROM ''/tmp/data.csv''');
+----
+false
+
+# ATTACH is still rejected — operators don't want unbounded local
+# attaches over Quack. Quack-spawned Connections come pre-attached
+# during ATTACH discovery; the user shouldn't add more.
 query I
 SELECT boilstream_quack_authz('sid', 'ATTACH ''foo''');
 ----
@@ -204,5 +267,168 @@ false
 # Verifier slot is null → empty token still rejected.
 query I
 SELECT boilstream_quack_authn('s-fb', '', '');
+----
+false
+
+####################
+# Phase-2 catalog allow-list enforcement (defense-in-depth on top of the
+# multi-tenant fork's ActiveTenantRegistry isolation).
+#
+# Sessions with a bound `catalogs` list MUST be limited to those catalogs.
+# Sessions without a bound entry fall through to keyword-only authz
+# (Phase-1 literal-token flow).
+####################
+
+# Bind a session that owns just `cat1` and the shared `shared_a` catalog.
+statement ok
+SELECT boilstream_quack_bind_session('s-allowlist', 'u', 't', 'cat1,shared_a');
+
+# Unqualified queries (no `catalog.schema.table` ref) — allowed by the
+# allow-list gate; tenant-isolation handles them downstream.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM t');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM schema.t');
+----
+true
+
+# 3-part ref naming an allowed catalog — pass.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM cat1.public.t');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM shared_a.public.t');
+----
+true
+
+# Case-insensitive match: DuckDB folds unquoted idents to lowercase.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM CAT1.public.t');
+----
+true
+
+# 3-part ref naming a catalog NOT in the allow-list — REJECT.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM other_cat.public.t');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM evil.public.users');
+----
+false
+
+# Mixed: one allowed, one not — REJECT (any disallowed ref fails the query).
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM cat1.public.t JOIN other_cat.public.u USING(id)');
+----
+false
+
+# System catalogs (information_schema / pg_catalog / memory / system / temp)
+# are always allowed — discovery queries must keep working.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM information_schema.tables.x');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM pg_catalog.pg_class.x');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM memory.main.t');
+----
+true
+
+# Catalog name inside a string literal — NOT treated as a 3-part ref.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT ''other_cat.public.t'' AS s');
+----
+true
+
+# Catalog name inside a quoted identifier ("...") — still parsed as a ref
+# because DuckDB does resolve those. We reject when the unquoted form is
+# not allowed (case-folded for the comparison).
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'SELECT * FROM "other_cat".public.t');
+----
+false
+
+# Session with EMPTY allowlist (e.g. fresh user, no catalogs yet) — any
+# 3-part ref is rejected. System catalogs still pass.
+statement ok
+SELECT boilstream_quack_bind_session('s-noclaims', 'u2', 't2', '');
+
+query I
+SELECT boilstream_quack_authz('s-noclaims', 'SELECT 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-noclaims', 'SELECT * FROM any_cat.public.t');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('s-noclaims', 'SELECT * FROM information_schema.tables.x');
+----
+true
+
+# Sessions with no bound ctx (sid not in SessionMap) fall through to
+# keyword-only authz — Phase-1 literal-token flow stays intact.
+query I
+SELECT boilstream_quack_authz('s-nonexistent', 'SELECT * FROM whatever.public.t');
+----
+true
+
+####################
+# Phase-2: DML interacts with catalog allow-list the same way SELECT does.
+# INSERT into an allowed catalog → pass. INSERT into a disallowed catalog
+# → REJECT (defense-in-depth).
+####################
+
+# INSERT into the allowed `cat1` catalog passes both keyword + allow-list.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'INSERT INTO cat1.public.t VALUES (1)');
+----
+true
+
+# UPDATE / DELETE / MERGE against allowed catalog all pass.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'UPDATE cat1.public.t SET x = 1 WHERE id = 1');
+----
+true
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'DELETE FROM cat1.public.t WHERE id = 1');
+----
+true
+
+# INSERT against a disallowed catalog is rejected by the allow-list gate.
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'INSERT INTO other_cat.public.t VALUES (1)');
+----
+false
+
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'DELETE FROM other_cat.public.t WHERE id = 1');
+----
+false
+
+# An UPDATE that joins allowed and disallowed catalogs → reject (any
+# disallowed ref fails).
+query I
+SELECT boilstream_quack_authz('s-allowlist', 'UPDATE cat1.public.t SET x = (SELECT v FROM other_cat.public.s WHERE id = 1)');
 ----
 false

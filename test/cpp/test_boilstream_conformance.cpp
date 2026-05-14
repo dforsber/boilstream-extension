@@ -40,11 +40,9 @@ namespace {
 // reads like the old one. The production code does not use this wrapper
 // (it goes through opaque_client_aes_gcm_decrypt in Rust), so this is a
 // test-side compatibility shim only.
-inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata>
-MakeAesGcm256Metadata() {
-	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(
-	    duckdb::EncryptionTypes::CipherType::GCM, 32u,
-	    duckdb::EncryptionTypes::EncryptionVersion::V0_1);
+inline duckdb::unique_ptr<duckdb::EncryptionStateMetadata> MakeAesGcm256Metadata() {
+	return duckdb::make_uniq<duckdb::EncryptionStateMetadata>(duckdb::EncryptionTypes::CipherType::GCM, 32u,
+	                                                          duckdb::EncryptionTypes::EncryptionVersion::V0_1);
 }
 
 inline duckdb::EncryptionNonce MakeNonce(const std::vector<uint8_t> &raw_nonce) {

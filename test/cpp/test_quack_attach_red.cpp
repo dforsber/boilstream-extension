@@ -64,8 +64,7 @@ struct QuackAttachFixture {
 // (closes ingestion-agent-8hnt). The `[red]` tag stays for cross-reference
 // with the Phase 4 incident reports; the test now asserts the expected
 // behaviour rather than reproducing the bug.
-TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_session",
-          "[quack][red][phase4]") {
+TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_session", "[quack][red][phase4]") {
 	QuackAttachFixture f;
 	auto &s = *f.storage;
 
@@ -74,15 +73,14 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	// TOKEN '<jwt>', SCOPE 'quack:127.0.0.1:9494')` produces.
 	const string user_path = "quack:127.0.0.1:9494";
 	const string user_token = "user-supplied-token";
-	vector<string> scope{user_path};
+	vector<string> scope {user_path};
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "smk");
 	secret->secret_map["token"] = Value(user_token);
 
 	// Install through the public StoreSecret API — same path `CREATE SECRET`
 	// hits via the secret manager. With no conn_state, StoreSecret stores
 	// locally only (no REST persist), matching DuckDB's TEMPORARY semantics.
-	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT,
-	              nullptr /* no transaction */);
+	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr /* no transaction */);
 
 	// ─── LookupSecret with no conn_state, type=quack ──────────────────
 	auto match = s.LookupSecret(user_path, "quack", nullptr);
@@ -113,8 +111,7 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 // boilstream server. Otherwise CREATE SECRET (TYPE quack) is pointless —
 // the user's token is silently replaced on every ATTACH.
 //===----------------------------------------------------------------------===//
-TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend",
-          "[quack][red][phase4]") {
+TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend", "[quack][red][phase4]") {
 	QuackAttachFixture f;
 	auto &s = *f.storage;
 
@@ -135,7 +132,7 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend",
 	// without touching HTTP at all.
 	const string user_path = "quack:non-routable.invalid:1";
 	const string user_token = "user-token-must-be-honoured";
-	vector<string> scope{user_path};
+	vector<string> scope {user_path};
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "user-quack");
 	secret->secret_map["token"] = Value(user_token);
 	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);

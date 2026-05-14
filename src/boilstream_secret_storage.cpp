@@ -143,7 +143,7 @@ EM_JS(void, js_localStorage_removeItem, (const char *key), {
 // otherwise and (b) the failure breaks SECRET resolution downstream.
 // Routine progress events still use BOILSTREAM_LOG.
 #include <iostream>
-#define BOILSTREAM_WARN(msg) std::cerr << "[BOILSTREAM:WARN] " << msg << std::endl
+#define BOILSTREAM_WARN(msg)  std::cerr << "[BOILSTREAM:WARN] " << msg << std::endl
 #define BOILSTREAM_ERROR(msg) std::cerr << "[BOILSTREAM:ERROR] " << msg << std::endl
 
 using namespace duckdb_yyjson;
@@ -3580,8 +3580,8 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 							// suspect for the staging "Secret not found" failure (downstream
 							// SECRET lookups expect this in memory). Surface so kubectl logs
 							// captures it.
-							BOILSTREAM_WARN("AllSecrets: RegisterSecret returned null for '" << secret_name
-							                                                                  << "' — downstream SECRET lookup will miss");
+							BOILSTREAM_WARN("AllSecrets: RegisterSecret returned null for '"
+							                << secret_name << "' — downstream SECRET lookup will miss");
 						}
 					} else {
 						BOILSTREAM_WARN("AllSecrets: DeserializeSecret returned null for memory cache of '"
@@ -3591,8 +3591,8 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 					BOILSTREAM_WARN("AllSecrets: EXCEPTION caching '" << secret_name << "' in memory: " << e.what()
 					                                                  << " — downstream SECRET lookup will miss");
 				} catch (...) {
-					BOILSTREAM_WARN("AllSecrets: UNKNOWN EXCEPTION caching '" << secret_name
-					                                                          << "' in memory — downstream SECRET lookup will miss");
+					BOILSTREAM_WARN("AllSecrets: UNKNOWN EXCEPTION caching '"
+					                << secret_name << "' in memory — downstream SECRET lookup will miss");
 				}
 
 				secrets_added++;
@@ -3611,7 +3611,7 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	// catalog-resolved count (post-RegisterSecret) so the staging diagnostic
 	// timeline is unambiguous in pod stderr.
 	BOILSTREAM_WARN("AllSecrets: cached " << secrets_added << " secret(s) from server response; "
-	                                       << "force_fetch=" << (force_fetch ? "true" : "false"));
+	                                      << "force_fetch=" << (force_fetch ? "true" : "false"));
 
 	yyjson_doc_free(doc);
 
@@ -3623,7 +3623,7 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	// Return all secrets from local catalog (now includes REST API secrets)
 	auto final_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
 	BOILSTREAM_WARN("AllSecrets EXIT: registered " << secrets_added << " in memory; local catalog now has "
-	                                                << final_secrets.size() << " secret(s)");
+	                                               << final_secrets.size() << " secret(s)");
 	return final_secrets;
 }
 
@@ -3795,8 +3795,7 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 //
 // We treat the JWT as opaque — server-side bridge verifies it.
 // ---------------------------------------------------------------------------
-SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
-                                                    optional_ptr<CatalogTransaction> transaction) {
+SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction) {
 	BOILSTREAM_LOG("LookupQuackSecret ENTER: path=" << path);
 
 	// Need an active session for authenticated GET — quack credentials are gated
@@ -3820,7 +3819,9 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
 	// so the cache key for StoreExpiration / IsExpired matches across calls.
 	// User-created `CREATE SECRET ... (TYPE quack)` secrets carry whatever
 	// name the user chose, NEVER our internal prefix.
-	auto auto_vend_secret_name = [](const string &p) { return "__quack__" + p; };
+	auto auto_vend_secret_name = [](const string &p) {
+		return "__quack__" + p;
+	};
 	auto is_auto_vended_name = [](const string &n) {
 		static const string internal_prefix = "__quack__";
 		return n.compare(0, internal_prefix.size(), internal_prefix) == 0;
@@ -3848,8 +3849,8 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
 		auto &matched = local_match.GetSecret();
 		const string matched_name = matched.GetName();
 		if (!is_auto_vended_name(matched_name)) {
-			BOILSTREAM_LOG("LookupQuackSecret EXIT: returning user-supplied secret name="
-			               << matched_name << " (no auto-vend)");
+			BOILSTREAM_LOG("LookupQuackSecret EXIT: returning user-supplied secret name=" << matched_name
+			                                                                              << " (no auto-vend)");
 			return local_match;
 		}
 
@@ -3937,7 +3938,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path,
 	// Materialise a KeyValueSecret. Scope is the path so DuckDB matches
 	// `ATTACH 'quack:...'` against this secret. Provider "config" matches
 	// the SecretType registration in boilstream_extension.cpp.
-	vector<string> scope{path};
+	vector<string> scope {path};
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
 	secret->secret_map["token"] = Value(token);
 	if (!endpoint_str.empty()) {

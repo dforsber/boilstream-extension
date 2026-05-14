@@ -24,6 +24,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <unordered_set>
 
 // Portable runtime symbol lookup. The bridge resolves two `extern "C"`
 // symbols that exist only when loaded inside the multi-tenant boilstream
@@ -68,7 +69,15 @@ namespace {
 //! the extension is loaded into a remote client DuckDB), authn falls back
 //! to literal-token comparison, preserving Phase 1 behaviour.
 std::atomic<boilstream_quack_jwt_verifier_fn> &QuackJwtVerifierSlot() {
-	static std::atomic<boilstream_quack_jwt_verifier_fn> slot{nullptr};
+	static std::atomic<boilstream_quack_jwt_verifier_fn> slot {nullptr};
+	return slot;
+}
+
+//! Single global slot holding the host-registered SQL rewriter (or null).
+//! Same lifecycle as the JWT verifier slot above — set once at boot, read
+//! on the hot pre-execute path with acquire/release.
+std::atomic<boilstream_quack_sql_rewriter_fn> &QuackSqlRewriterSlot() {
+	static std::atomic<boilstream_quack_sql_rewriter_fn> slot {nullptr};
 	return slot;
 }
 
@@ -80,6 +89,11 @@ extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_
 	// an acquire-load before calling through the pointer. This is overkill
 	// for typical one-shot startup registration but cheap and correct.
 	QuackJwtVerifierSlot().store(fn, std::memory_order_release);
+}
+
+extern "C" void boilstream_quack_set_sql_rewriter(boilstream_quack_sql_rewriter_fn fn) {
+	// Same release-store semantics as the JWT setter above.
+	QuackSqlRewriterSlot().store(fn, std::memory_order_release);
 }
 
 // Forward declarations for the two hook seams between the bridge,
@@ -107,6 +121,12 @@ extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_
 // runtime via `dlsym(RTLD_DEFAULT, ...)` from its hook-registration site.
 extern "C" void boilstream_quack_session_init(const char *session_id, void *client_context);
 
+// Forward declaration of the Quack pre-execute hook handler defined at
+// the bottom of this TU. Called by patched Quack between authz and
+// SendQuery; routes through to the host-registered Rust rewriter.
+extern "C" int boilstream_quack_pre_execute(const char *session_id, const char *sql_in, char *sql_out_buf,
+                                            size_t sql_out_size);
+
 // Function-pointer typedefs for the two cross-extension hooks we resolve
 // at runtime. We use `dlsym(RTLD_DEFAULT, name)` rather than weak-linked
 // `extern` declarations because:
@@ -122,6 +142,13 @@ extern "C" void boilstream_quack_session_init(const char *session_id, void *clie
 //       coupling, and resolves at extension-load time — exactly when we
 //       need to know whether the host provides these hooks.
 typedef void (*quack_set_session_init_hook_fn_t)(void (*hook)(const char *, void *));
+
+// The patched Quack server (`server-write-routing-hook.patch`) exposes a
+// SQL rewrite hook setter with this signature. dlsym'd at runtime — the
+// symbol is absent on vanilla Quack builds, in which case we silently
+// skip wiring.
+typedef void (*quack_set_pre_execute_hook_fn_t)(int (*hook)(const char *session_id, const char *sql_in,
+                                                            char *sql_out_buf, size_t sql_out_size));
 typedef bool (*duckdb_set_tenant_id_on_context_fn_t)(void *, const char *);
 
 namespace duckdb {
@@ -207,6 +234,201 @@ bool IsReadOnlyKeyword(const std::string &kw) {
 	       kw == "CALL";
 }
 
+//! Phase-2 admit-list: keywords this server is willing to execute.
+//! Adds INSERT / UPDATE / DELETE / MERGE on top of the read-only set.
+//! Writes are safe because:
+//!   1. The pre-execute SQL rewriter routes INSERTs against DuckLake
+//!      catalogs through the Airport loopback (central ingestion path).
+//!   2. The catalog allow-list rejects writes against catalogs outside
+//!      the session's claims.
+//!   3. The multi-tenant fork's ActiveTenantRegistry isolates by tenant.
+//!   4. Writes against the user's own non-DuckLake attached catalogs
+//!      (local memory:, etc.) execute directly — that's the documented
+//!      behaviour. Transaction control (BEGIN/COMMIT/ROLLBACK) is also
+//!      admitted so multi-statement writes work.
+//!
+//! DDL (CREATE / DROP / ALTER / TRUNCATE / GRANT / REVOKE / COPY FROM)
+//! is still rejected — DuckLake DDL must go through the catalog-master
+//! leader RPC (via PGWire) for cluster-wide visibility.
+bool IsAllowedKeyword(const std::string &kw) {
+	if (IsReadOnlyKeyword(kw)) {
+		return true;
+	}
+	return kw == "INSERT" || kw == "UPDATE" || kw == "DELETE" || kw == "MERGE" || kw == "BEGIN" ||
+	       kw == "START" /* START TRANSACTION */ || kw == "COMMIT" || kw == "ROLLBACK" || kw == "END";
+}
+
+//! "System" catalog names that are always allowed even when not in the
+//! JWT's `catalogs` claim. These are either:
+//!   - DuckDB built-ins (memory, system, temp)
+//!   - SQL standard discovery views (information_schema)
+//!   - Postgres-compat helpers (pg_catalog)
+//! The Quack-spawned `Connection` legitimately needs to query these
+//! during ATTACH discovery and the user's regular session work.
+bool IsSystemCatalog(const std::string &lower) {
+	return lower == "memory" || lower == "system" || lower == "temp" || lower == "information_schema" ||
+	       lower == "pg_catalog";
+}
+
+//! Lower-case ASCII helper. DuckDB folds unquoted identifiers to lower
+//! case during parsing; we mirror that for the comparison.
+std::string LowerAscii(const std::string &s) {
+	std::string out;
+	out.reserve(s.size());
+	for (unsigned char c : s) {
+		out.push_back(static_cast<char>(std::tolower(c)));
+	}
+	return out;
+}
+
+//! Heuristic catalog extraction for the authz allow-list check.
+//!
+//! Scans `q` for `<ident>.<ident>.<ident>` 3-part references and returns
+//! the lowercased catalog identifier (the first part) for each one. Both
+//! bare (`cat.schema.t`) and quoted (`"cat".schema.t`) first-parts are
+//! recognised. Single-quoted string literals are skipped so e.g.
+//! `SELECT '"a"."b"."c"'` is treated as a literal, not a 3-part ref.
+//!
+//! This is intentionally NOT a full SQL parser. It exists purely to add
+//! defense-in-depth on top of the multi-tenant DuckDB fork's catalog
+//! isolation. False positives (catalog refs found in places where DuckDB
+//! wouldn't actually resolve them) are acceptable — they just fail the
+//! query, which the caller can fix by quoting the literal. False
+//! negatives (missed catalog refs) fall through to the tenant-isolation
+//! layer, which is the authoritative check.
+//!
+//! Returns the set of *unique* candidate catalog names (lowercase). An
+//! empty set means the query has no qualified catalog references; it's
+//! safe to allow (subject only to the read-only keyword gate).
+std::unordered_set<std::string> ExtractCatalogRefs(const std::string &q) {
+	std::unordered_set<std::string> out;
+	auto is_ident_start = [](char c) {
+		return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+	};
+	auto is_ident_cont = [](char c) {
+		return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+	};
+
+	// Parse an identifier starting at `i`. Returns (parsed_value, success).
+	// Advances `i` past the identifier (including closing quote when quoted).
+	// `out_ident` is filled with the inner text (without surrounding quotes).
+	auto parse_ident = [&](size_t &i, std::string &out_ident) -> bool {
+		const size_t n = q.size();
+		if (i >= n) {
+			return false;
+		}
+		if (q[i] == '"') {
+			i++;
+			std::string buf;
+			while (i < n) {
+				if (q[i] == '"') {
+					if (i + 1 < n && q[i + 1] == '"') {
+						buf.push_back('"');
+						i += 2;
+						continue;
+					}
+					i++;
+					out_ident = std::move(buf);
+					return true;
+				}
+				buf.push_back(q[i]);
+				i++;
+			}
+			// Unterminated quoted ident
+			return false;
+		}
+		if (!is_ident_start(q[i])) {
+			return false;
+		}
+		size_t start = i;
+		while (i < n && is_ident_cont(q[i])) {
+			i++;
+		}
+		out_ident = q.substr(start, i - start);
+		return true;
+	};
+
+	size_t i = 0;
+	const size_t n = q.size();
+	while (i < n) {
+		char c = q[i];
+		// Skip single-quoted string literals so we don't mis-parse a `.` inside one.
+		if (c == '\'') {
+			i++;
+			while (i < n) {
+				if (q[i] == '\'') {
+					if (i + 1 < n && q[i + 1] == '\'') {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Look for a 3-part identifier ref starting here. Try bare-or-quoted.
+		size_t save = i;
+		std::string ident1;
+		if (!parse_ident(i, ident1)) {
+			i = save + 1;
+			continue;
+		}
+		// Must be followed by `.<ident>.<ident>` (bare or quoted), no
+		// intervening whitespace, to count as a catalog-qualified ref.
+		if (i >= n || q[i] != '.') {
+			continue;
+		}
+		i++;
+		std::string ident2;
+		if (!parse_ident(i, ident2)) {
+			continue;
+		}
+		if (i >= n || q[i] != '.') {
+			continue;
+		}
+		i++;
+		std::string ident3;
+		if (!parse_ident(i, ident3)) {
+			continue;
+		}
+		// 3-part confirmed. Record the catalog (first) part.
+		out.insert(LowerAscii(ident1));
+	}
+	return out;
+}
+
+//! Decide whether the query's catalog references are all within the
+//! session's allow-list (claims.catalogs) or the system-catalog list.
+//! Returns true if every parsed catalog ref is allowed; false if any
+//! ref names a catalog the session has no claim to.
+//!
+//! An empty ref set (no qualified catalog refs in the query) is allowed.
+//! Schema-qualified or unqualified refs (`SELECT * FROM t`, `SELECT *
+//! FROM schema.t`) skip this gate and rely on DuckDB's catalog resolver
+//! which is gated by the multi-tenant fork's ActiveTenantRegistry.
+bool CatalogRefsAreAllowed(const std::vector<std::string> &claims_catalogs, const std::string &query) {
+	auto refs = ExtractCatalogRefs(query);
+	if (refs.empty()) {
+		return true;
+	}
+	std::unordered_set<std::string> allowed;
+	allowed.reserve(claims_catalogs.size());
+	for (const auto &c : claims_catalogs) {
+		allowed.insert(LowerAscii(c));
+	}
+	for (const auto &r : refs) {
+		if (IsSystemCatalog(r)) {
+			continue;
+		}
+		if (allowed.find(r) == allowed.end()) {
+			return false;
+		}
+	}
+	return true;
+}
+
 //! Phase-1.5 authn:
 //!   * If the host (Rust) has registered a JWT verifier, dispatch to it,
 //!     treat `client_auth` as a signed JWT, and on success bind the
@@ -251,10 +473,10 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &state, Vecto
 				                      tenant_id_buf, sizeof(tenant_id_buf), catalogs_buf, sizeof(catalogs_buf));
 				    BOILSTREAM_LOG("quack-bridge authn verifier rc="
 				                   << rc << " sid='" << std::string(sid.GetData(), sid.GetSize()) << "' user='"
-				                   << user_id_buf << "' tenant='" << tenant_id_buf << "' catalogs='"
-				                   << catalogs_buf << "'");
+				                   << user_id_buf << "' tenant='" << tenant_id_buf << "' catalogs='" << catalogs_buf
+				                   << "'");
 				    if (rc != 1) {
-				        return false;
+					    return false;
 				    }
 
 				    // Defence-in-depth: ensure NUL termination even if the verifier
@@ -266,8 +488,8 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &state, Vecto
 
 				    std::string sid_str(sid.GetData(), sid.GetSize());
 				    if (sid_str.empty()) {
-				        // Empty session id is rejected by bind_session; reject here too.
-				        return false;
+					    // Empty session id is rejected by bind_session; reject here too.
+					    return false;
 				    }
 
 				    // Drive the existing session-bind path so authn and the
@@ -278,30 +500,30 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &state, Vecto
 				    ctx.user_id.assign(user_id_buf);
 				    ctx.tenant_id.assign(tenant_id_buf);
 				    {
-				        // Same split logic the bind scalar function uses.
-				        std::string csv(catalogs_buf);
-				        std::string cur;
-				        cur.reserve(32);
-				        auto flush = [&]() {
-				            auto begin = cur.find_first_not_of(" \t\r\n");
-				            auto end = cur.find_last_not_of(" \t\r\n");
-				            if (begin != std::string::npos) {
-				                ctx.catalogs.emplace_back(cur.substr(begin, end - begin + 1));
-				            }
-				            cur.clear();
-				        };
-				        for (char c : csv) {
-				            if (c == ',') {
-				                flush();
-				            } else {
-				                cur.push_back(c);
-				            }
-				        }
-				        flush();
+					    // Same split logic the bind scalar function uses.
+					    std::string csv(catalogs_buf);
+					    std::string cur;
+					    cur.reserve(32);
+					    auto flush = [&]() {
+						    auto begin = cur.find_first_not_of(" \t\r\n");
+						    auto end = cur.find_last_not_of(" \t\r\n");
+						    if (begin != std::string::npos) {
+							    ctx.catalogs.emplace_back(cur.substr(begin, end - begin + 1));
+						    }
+						    cur.clear();
+					    };
+					    for (char c : csv) {
+						    if (c == ',') {
+							    flush();
+						    } else {
+							    cur.push_back(c);
+						    }
+					    }
+					    flush();
 				    }
 				    {
-				        std::lock_guard<std::mutex> lock(SessionMapMutex());
-				        SessionMap()[sid_str] = std::move(ctx);
+					    std::lock_guard<std::mutex> lock(SessionMapMutex());
+					    SessionMap()[sid_str] = std::move(ctx);
 				    }
 				    return true;
 			    }
@@ -337,7 +559,7 @@ void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &state, Vecto
 		    try {
 			    std::string q = ToStd(query);
 			    std::string kw = FirstKeywordUpper(q);
-			    bool allow = IsReadOnlyKeyword(kw);
+			    bool kw_allow = IsAllowedKeyword(kw);
 
 			    // Stamp the per-thread sid so the host's tenant-resolver hook
 			    // (a weak extern "C" symbol, defined below in this TU) can
@@ -348,10 +570,34 @@ void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &state, Vecto
 			    // stale value here is harmless.
 			    QuackAuthzCurrentSid().assign(sid.GetData(), sid.GetSize());
 
-			    BOILSTREAM_LOG("quack-bridge authz kw='" << kw << "' allow=" << (allow ? 1 : 0)
-			                                             << " sid='" << QuackAuthzCurrentSid()
-			                                             << "' query=" << q.substr(0, 200));
-			    return allow;
+			    if (!kw_allow) {
+				    BOILSTREAM_LOG("quack-bridge authz REJECT(keyword) kw='"
+				                   << kw << "' sid='" << QuackAuthzCurrentSid() << "' query=" << q.substr(0, 200));
+				    return false;
+			    }
+
+			    // Defense-in-depth: even though the multi-tenant DuckDB fork
+			    // gates catalog visibility via ActiveTenantRegistry, also
+			    // reject queries that name a 3-part catalog reference
+			    // outside the session's claims allowlist. Catches regressions
+			    // in tenant isolation and any future code path that bypasses
+			    // it. Missing session ctx => fall through to the keyword
+			    // gate only (Phase-1 literal-token authn flow).
+			    std::string sid_str(sid.GetData(), sid.GetSize());
+			    auto sess = duckdb::GetQuackSessionCtx(sid_str);
+			    if (sess.second) {
+				    bool cat_allow = CatalogRefsAreAllowed(sess.first.catalogs, q);
+				    if (!cat_allow) {
+					    BOILSTREAM_LOG("quack-bridge authz REJECT(catalog-allowlist) sid='"
+					                   << sid_str << "' user='" << sess.first.user_id << "' tenant='"
+					                   << sess.first.tenant_id << "' query=" << q.substr(0, 200));
+					    return false;
+				    }
+			    }
+
+			    BOILSTREAM_LOG("quack-bridge authz ALLOW kw='" << kw << "' sid='" << QuackAuthzCurrentSid()
+			                                                   << "' query=" << q.substr(0, 200));
+			    return true;
 		    } catch (...) {
 			    return false;
 		    }
@@ -431,7 +677,7 @@ std::pair<SessionCtx, bool> GetQuackSessionCtx(const std::string &session_id) {
 	auto &m = SessionMap();
 	auto it = m.find(session_id);
 	if (it == m.end()) {
-		return {SessionCtx{}, false};
+		return {SessionCtx {}, false};
 	}
 	return {it->second, true};
 }
@@ -439,9 +685,8 @@ std::pair<SessionCtx, bool> GetQuackSessionCtx(const std::string &session_id) {
 void RegisterQuackBridge(ExtensionLoader &loader) {
 	// boilstream_quack_authn(VARCHAR, VARCHAR, VARCHAR) -> BOOLEAN
 	{
-		ScalarFunction fn("boilstream_quack_authn",
-		                  {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BOOLEAN,
-		                  BoilstreamQuackAuthnFunction);
+		ScalarFunction fn("boilstream_quack_authn", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+		                  LogicalType::BOOLEAN, BoilstreamQuackAuthnFunction);
 		loader.RegisterFunction(fn);
 	}
 
@@ -455,10 +700,9 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	// boilstream_quack_bind_session(VARCHAR sid, VARCHAR user, VARCHAR tenant,
 	//                               VARCHAR catalog_csv) -> BOOLEAN
 	{
-		ScalarFunction fn(
-		    "boilstream_quack_bind_session",
-		    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-		    LogicalType::BOOLEAN, BoilstreamQuackBindSessionFunction);
+		ScalarFunction fn("boilstream_quack_bind_session",
+		                  {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+		                  LogicalType::BOOLEAN, BoilstreamQuackBindSessionFunction);
 		loader.RegisterFunction(fn);
 	}
 
@@ -487,6 +731,18 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 		    boilstream_lookup_runtime_symbol("quack_set_session_init_hook"));
 		if (quack_setter) {
 			quack_setter(&boilstream_quack_session_init);
+		}
+	}
+
+	// Wire the pre-execute SQL rewriter hook (Phase 2 write routing). Same
+	// dlsym pattern as the session-init hook — symbol is absent on vanilla
+	// Quack builds, in which case writes simply fall through to the keyword
+	// authz gate (which rejects them in Phase 1) or to direct execution.
+	{
+		auto quack_setter = reinterpret_cast<quack_set_pre_execute_hook_fn_t>(
+		    boilstream_lookup_runtime_symbol("quack_set_pre_execute_hook"));
+		if (quack_setter) {
+			quack_setter(&boilstream_quack_pre_execute);
 		}
 	}
 }
@@ -537,6 +793,49 @@ std::string &QuackAuthzCurrentSid() {
 //     bridge is community-compatible and gracefully degrades.
 //   * SetTenantId throws (e.g. invalid chars) → caught by fork's setter,
 //     returns false; we ignore and proceed without tenant.
+// Quack-provided pre-execute SQL rewriter hook handler. Patched Quack calls
+// this between authz and SendQuery, giving us a chance to substitute the
+// SQL string. We:
+//   1. Look up the SessionCtx by session_id (populated at authn time).
+//   2. Build a comma-joined catalog list.
+//   3. Hand off to the host-registered Rust rewriter (atomic slot).
+//
+// If no rewriter is registered (vanilla DuckDB load), or the session has
+// no bound ctx, we return 0 — the server then executes sql_in verbatim,
+// preserving Phase 1 semantics. Catches any exception and returns 0.
+extern "C" int boilstream_quack_pre_execute(const char *session_id_cstr, const char *sql_in, char *sql_out_buf,
+                                            size_t sql_out_size) {
+	try {
+		if (session_id_cstr == nullptr || sql_in == nullptr || sql_out_buf == nullptr || sql_out_size == 0) {
+			return 0;
+		}
+		auto rewriter = QuackSqlRewriterSlot().load(std::memory_order_acquire);
+		if (rewriter == nullptr) {
+			return 0;
+		}
+		std::string sid(session_id_cstr);
+		auto found = duckdb::GetQuackSessionCtx(sid);
+		if (!found.second) {
+			return 0;
+		}
+		// Build comma-joined catalog CSV. The Rust rewriter uses this to
+		// gate which catalogs the rewriter is willing to route through the
+		// Airport loopback (only DuckLake-registered catalogs).
+		std::string catalogs_csv;
+		for (size_t i = 0; i < found.first.catalogs.size(); ++i) {
+			if (i > 0) {
+				catalogs_csv.push_back(',');
+			}
+			catalogs_csv.append(found.first.catalogs[i]);
+		}
+		return rewriter(session_id_cstr, found.first.tenant_id.c_str(), catalogs_csv.c_str(), sql_in, sql_out_buf,
+		                sql_out_size);
+	} catch (...) {
+		// Never throw across the Quack hook boundary.
+		return 0;
+	}
+}
+
 extern "C" void boilstream_quack_session_init(const char *session_id_cstr, void *client_context_ptr) {
 	try {
 		if (session_id_cstr == nullptr || client_context_ptr == nullptr) {
