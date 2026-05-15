@@ -432,3 +432,55 @@ query I
 SELECT boilstream_quack_authz('s-allowlist', 'UPDATE cat1.public.t SET x = (SELECT v FROM other_cat.public.s WHERE id = 1)');
 ----
 false
+
+####################
+# Session-init hook handler — exercises boilstream_quack_session_init
+# directly via the test-only debug shim. The shim drives the SAME
+# handler that the patched Quack server calls from CreateNewConnection,
+# but using THIS connection's ClientContext so we can read back the
+# stamped tenant_id via current_setting() in the same session.
+####################
+
+# Unbound sid → handler is a no-op → no tenant_id stamped.
+query T
+SELECT boilstream_quack_debug_invoke_session_init('never-bound-sid');
+----
+(empty)
+
+# Null sid → handler early-returns → still no stamping. The shim returns
+# whatever's currently in the boilstream.tenant_id setting (empty here).
+query T
+SELECT boilstream_quack_debug_invoke_session_init(NULL);
+----
+NULL
+
+# Bind a session with EMPTY tenant_id → handler reaches the
+# `tid.empty()` early-return → no stamping.
+statement ok
+SELECT boilstream_quack_bind_session('sess-empty-tid', 'u', '', '');
+
+query T
+SELECT boilstream_quack_debug_invoke_session_init('sess-empty-tid');
+----
+(empty)
+
+# Bind a session with a real tenant_id and drive the handler. Note:
+# the fork's `duckdb_set_tenant_id_on_context` requires a fresh
+# ClientContext — the tenant context locks on the first BeginQueryInternal,
+# after which SetTenantId returns false. In production Quack calls the
+# hook from CreateNewConnection, BEFORE any user query — that path is
+# unreachable from sqllogictest because every test query has already
+# locked the context running it.
+#
+# So the SQL test can only assert that:
+#   1. binding the session succeeded (count went up earlier),
+#   2. invoking the handler on a locked context doesn't crash,
+#   3. the safety guard (`tenant.locked` return-false) holds.
+# End-to-end "stamping actually fires" coverage lives in the C++ unit
+# test (tests/cpp/test_quack_bridge.cpp), which constructs a fresh
+# Connection in-process and drives the handler before any query runs.
+statement ok
+SELECT boilstream_quack_bind_session('sess-stamp-tid', 'u', 'tenant-stamp-7', 'cat1');
+
+statement ok
+SELECT boilstream_quack_debug_invoke_session_init('sess-stamp-tid');

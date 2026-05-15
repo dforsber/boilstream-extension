@@ -652,6 +652,47 @@ void BoilstreamQuackBindSessionFunction(DataChunk &args, ExpressionState &state,
 	}
 }
 
+//! Test-only debug helper: drives the Quack session-init hook handler
+//! against THIS connection's ClientContext, so the SQL test can then
+//! assert `current_setting('boilstream.tenant_id')` reflects the bound
+//! tenant. The real production firing site is QuackServer::CreateNew-
+//! Connection inside the listen thread — unreachable from sqllogictest.
+//! This shim lets the test exercise the exact same handler with the
+//! same inputs.
+//!
+//! Returns the tenant_id stamped on the context (empty string if no
+//! stamping happened — unbound sid, empty tenant, fork symbol absent).
+void BoilstreamQuackDebugInvokeSessionInitFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	D_ASSERT(args.ColumnCount() == 1);
+	args.data[0].Flatten(args.size());
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto sid_data = FlatVector::GetData<string_t>(args.data[0]);
+	auto &sid_validity = FlatVector::Validity(args.data[0]);
+	auto &out_validity = FlatVector::Validity(result);
+
+	auto &context = state.GetContext();
+	for (idx_t i = 0; i < args.size(); i++) {
+		if (!sid_validity.RowIsValid(i)) {
+			out_validity.SetInvalid(i);
+			continue;
+		}
+		std::string sid = ToStd(sid_data[i]);
+		// Drive the production handler directly. The handler internally
+		// dlsym's `duckdb_set_tenant_id_on_context` — present in the
+		// boilstream fork, absent in vanilla DuckDB (in which case the
+		// stamping is a silent no-op and the returned tenant_id stays
+		// empty for that environment).
+		boilstream_quack_session_init(sid.c_str(), &context);
+		// Read back what's currently stamped on the context.
+		std::string stamped;
+		Value setting_val;
+		if (context.TryGetCurrentSetting("boilstream.tenant_id", setting_val) && !setting_val.IsNull()) {
+			stamped = setting_val.ToString();
+		}
+		result.SetValue(i, Value(stamped));
+	}
+}
+
 //! Test-only debug helper: returns the size of the session map as INTEGER.
 //! Marked "test-only" by comment — DuckDB scalar functions do not expose a
 //! hidden flag in this API surface. The name carries the convention.
@@ -710,6 +751,13 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	{
 		ScalarFunction fn("boilstream_quack_debug_session_count", {}, LogicalType::INTEGER,
 		                  BoilstreamQuackDebugSessionCountFunction);
+		loader.RegisterFunction(fn);
+	}
+
+	// boilstream_quack_debug_invoke_session_init(VARCHAR sid) -> VARCHAR  [test-only]
+	{
+		ScalarFunction fn("boilstream_quack_debug_invoke_session_init", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+		                  BoilstreamQuackDebugInvokeSessionInitFunction);
 		loader.RegisterFunction(fn);
 	}
 
