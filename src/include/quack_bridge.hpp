@@ -98,6 +98,25 @@ typedef int (*boilstream_quack_sql_rewriter_fn)(const char *session_id, const ch
 //! JWT verifier above.
 void boilstream_quack_set_sql_rewriter(boilstream_quack_sql_rewriter_fn fn);
 
+//===----------------------------------------------------------------------===//
+// Host-registered post-success hook (DuckLake catalog durability)
+//
+// Patched Quack calls the bridge after a PREPARE_REQUEST statement has
+// successfully executed. The bridge supplies the bound session context and the
+// original/executed SQL to Rust so BoilStream can force a durable catalog
+// backup before Quack returns success to the client.
+//
+// Returns:
+//    0   — success / no-op
+//   <0   — durability failure; error_out_buf contains a client-visible error
+//===----------------------------------------------------------------------===//
+typedef int (*boilstream_quack_post_execute_fn)(
+    const char *session_id, const char *user_id, const char *tenant_id, const char *catalogs_csv,
+    const char *sql_original, const char *sql_executed, char *error_out_buf, size_t error_out_size);
+
+//! Register the post-success hook (or clear with NULL). One-shot at boot.
+void boilstream_quack_set_post_execute_hook(boilstream_quack_post_execute_fn fn);
+
 } // extern "C"
 
 namespace duckdb {

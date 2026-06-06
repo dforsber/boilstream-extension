@@ -81,6 +81,14 @@ std::atomic<boilstream_quack_sql_rewriter_fn> &QuackSqlRewriterSlot() {
 	return slot;
 }
 
+//! Single global slot holding the host-registered post-success hook (or
+//! null). Called after Quack successfully executes SQL so the host can
+//! force durability work before the client sees success.
+std::atomic<boilstream_quack_post_execute_fn> &QuackPostExecuteSlot() {
+	static std::atomic<boilstream_quack_post_execute_fn> slot {nullptr};
+	return slot;
+}
+
 } // anonymous namespace
 
 extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn) {
@@ -94,6 +102,11 @@ extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_
 extern "C" void boilstream_quack_set_sql_rewriter(boilstream_quack_sql_rewriter_fn fn) {
 	// Same release-store semantics as the JWT setter above.
 	QuackSqlRewriterSlot().store(fn, std::memory_order_release);
+}
+
+extern "C" void boilstream_quack_set_post_execute_hook(boilstream_quack_post_execute_fn fn) {
+	// Same release-store semantics as the JWT setter above.
+	QuackPostExecuteSlot().store(fn, std::memory_order_release);
 }
 
 // Forward declarations for the two hook seams between the bridge,
@@ -127,6 +140,12 @@ extern "C" void boilstream_quack_session_init(const char *session_id, void *clie
 extern "C" int boilstream_quack_pre_execute(const char *session_id, const char *sql_in, char *sql_out_buf,
                                             size_t sql_out_size);
 
+// Forward declaration of the Quack post-execute hook handler defined at
+// the bottom of this TU. Called by patched Quack after successful
+// SendQuery so the host can run durability work before success is returned.
+extern "C" int boilstream_quack_post_execute(const char *session_id, const char *sql_original,
+                                             const char *sql_executed, char *error_out_buf, size_t error_out_size);
+
 // Function-pointer typedefs for the two cross-extension hooks we resolve
 // at runtime. We use `dlsym(RTLD_DEFAULT, name)` rather than weak-linked
 // `extern` declarations because:
@@ -149,6 +168,9 @@ typedef void (*quack_set_session_init_hook_fn_t)(void (*hook)(const char *, void
 // skip wiring.
 typedef void (*quack_set_pre_execute_hook_fn_t)(int (*hook)(const char *session_id, const char *sql_in,
                                                             char *sql_out_buf, size_t sql_out_size));
+typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *session_id, const char *sql_original,
+                                                             const char *sql_executed, char *error_out_buf,
+                                                             size_t error_out_size));
 typedef bool (*duckdb_set_tenant_id_on_context_fn_t)(void *, const char *);
 
 namespace duckdb {
@@ -793,6 +815,17 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 			quack_setter(&boilstream_quack_pre_execute);
 		}
 	}
+
+	// Wire the post-success hook used for DuckLake catalog durability.
+	// Absent on vanilla Quack builds; present in the boilstream-patched
+	// Quack server.
+	{
+		auto quack_setter = reinterpret_cast<quack_set_post_execute_hook_fn_t>(
+		    boilstream_lookup_runtime_symbol("quack_set_post_execute_hook"));
+		if (quack_setter) {
+			quack_setter(&boilstream_quack_post_execute);
+		}
+	}
 }
 
 // Thread-local backing storage for the active Quack authz `session_id`.
@@ -881,6 +914,41 @@ extern "C" int boilstream_quack_pre_execute(const char *session_id_cstr, const c
 	} catch (...) {
 		// Never throw across the Quack hook boundary.
 		return 0;
+	}
+}
+
+extern "C" int boilstream_quack_post_execute(const char *session_id_cstr, const char *sql_original,
+                                             const char *sql_executed, char *error_out_buf, size_t error_out_size) {
+	try {
+		if (session_id_cstr == nullptr || sql_original == nullptr || sql_executed == nullptr || error_out_buf == nullptr ||
+		    error_out_size == 0) {
+			return 0;
+		}
+		auto hook = QuackPostExecuteSlot().load(std::memory_order_acquire);
+		if (hook == nullptr) {
+			return 0;
+		}
+		std::string sid(session_id_cstr);
+		auto found = duckdb::GetQuackSessionCtx(sid);
+		if (!found.second) {
+			return 0;
+		}
+		std::string catalogs_csv;
+		for (size_t i = 0; i < found.first.catalogs.size(); ++i) {
+			if (i > 0) {
+				catalogs_csv.push_back(',');
+			}
+			catalogs_csv.append(found.first.catalogs[i]);
+		}
+		return hook(session_id_cstr, found.first.user_id.c_str(), found.first.tenant_id.c_str(), catalogs_csv.c_str(),
+		            sql_original, sql_executed, error_out_buf, error_out_size);
+	} catch (...) {
+		if (error_out_buf != nullptr && error_out_size > 0) {
+			const char *msg = "Quack post-execute hook failed";
+			std::strncpy(error_out_buf, msg, error_out_size - 1);
+			error_out_buf[error_out_size - 1] = '\0';
+		}
+		return -1;
 	}
 }
 
