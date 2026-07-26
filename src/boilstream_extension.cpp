@@ -2375,7 +2375,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(secrets_function);
 	BOILSTREAM_LOG("LoadInternal: boilstream_secrets table function registered");
 
-	// Register Quack bridge scalar functions (Phase 1: authn/authz/bind_session)
+	// Register the Quack session and typed catalog-capability bridge.
 	RegisterQuackBridge(loader);
 	BOILSTREAM_LOG("LoadInternal: Quack bridge scalar functions registered");
 
