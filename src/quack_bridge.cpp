@@ -74,7 +74,8 @@ extern "C" void boilstream_quack_set_post_execute_hook(boilstream_quack_post_exe
 typedef void (*quack_set_catalog_admission_hooks_fn_t)(
     int (*planner)(const char *, const char *, const char *, uint32_t *, char *, size_t, char *, size_t, char *,
                    size_t),
-    int (*authorizer)(const char *, uint32_t, const char *, char *, size_t), void (*session_close)(const char *));
+    int (*authorizer)(const char *, uint32_t, const char *, uint32_t *, char *, size_t),
+    void (*session_close)(const char *));
 typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint32_t, const char *, char *, size_t));
 
 namespace duckdb {
@@ -220,9 +221,13 @@ extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char 
 }
 
 extern "C" int boilstream_quack_catalog_authorize(const char *session_id, uint32_t operation, const char *catalog_id,
-                                                  char *error_out_buf, size_t error_out_size) {
+                                                  uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
+                                                  size_t error_out_size) {
 	try {
-		if (!session_id || !catalog_id || !error_out_buf || error_out_size == 0) {
+		if (storage_owner_tenant_id_out) {
+			*storage_owner_tenant_id_out = 0;
+		}
+		if (!session_id || !catalog_id || !storage_owner_tenant_id_out || !error_out_buf || error_out_size == 0) {
 			WriteError(error_out_buf, error_out_size, "Catalog authorizer received invalid buffers");
 			return -1;
 		}
@@ -236,9 +241,16 @@ extern "C" int boilstream_quack_catalog_authorize(const char *session_id, uint32
 			WriteError(error_out_buf, error_out_size, "Quack session capability bundle is missing");
 			return -1;
 		}
-		return authorizer(session.first.capability_bundle.c_str(), operation, catalog_id, error_out_buf,
-		                  error_out_size);
+		const auto rc = authorizer(session.first.capability_bundle.c_str(), operation, catalog_id,
+		                           storage_owner_tenant_id_out, error_out_buf, error_out_size);
+		if (rc != 0) {
+			*storage_owner_tenant_id_out = 0;
+		}
+		return rc;
 	} catch (...) {
+		if (storage_owner_tenant_id_out) {
+			*storage_owner_tenant_id_out = 0;
+		}
 		WriteError(error_out_buf, error_out_size, "Catalog authorizer bridge failed");
 		return -1;
 	}
