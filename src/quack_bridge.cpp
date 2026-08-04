@@ -53,6 +53,23 @@ void WriteError(char *buf, size_t size, const char *message) {
 	buf[size - 1] = '\0';
 }
 
+void ClearBuffer(char *buf, size_t size) noexcept {
+	if (buf && size > 0) {
+		buf[0] = '\0';
+	}
+}
+
+void ClearCatalogPlanDataOutputs(uint32_t *operation_out, char *catalog_id_out, size_t catalog_id_out_size,
+                                 char *execution_catalog_alias_out, size_t execution_catalog_alias_out_size,
+                                 char *sql_out_buf, size_t sql_out_size) noexcept {
+	if (operation_out) {
+		*operation_out = 0;
+	}
+	ClearBuffer(catalog_id_out, catalog_id_out_size);
+	ClearBuffer(execution_catalog_alias_out, execution_catalog_alias_out_size);
+	ClearBuffer(sql_out_buf, sql_out_size);
+}
+
 } // namespace
 
 extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn) {
@@ -71,11 +88,12 @@ extern "C" void boilstream_quack_set_post_execute_hook(boilstream_quack_post_exe
 	PostExecuteSlot().store(fn, std::memory_order_release);
 }
 
-typedef void (*quack_set_catalog_admission_hooks_fn_t)(
-    int (*planner)(const char *, const char *, const char *, uint32_t *, char *, size_t, char *, size_t, char *,
-                   size_t),
-    int (*authorizer)(const char *, uint32_t, const char *, uint32_t *, char *, size_t),
-    void (*session_close)(const char *));
+typedef void (*quack_set_catalog_admission_hooks_fn_t)(int (*planner)(const char *, const char *, const char *,
+                                                                      uint32_t *, char *, size_t, char *, size_t,
+                                                                      char *, size_t, char *, size_t),
+                                                       int (*authorizer)(const char *, uint32_t, const char *,
+                                                                         uint32_t *, char *, size_t),
+                                                       void (*session_close)(const char *));
 typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint32_t, const char *, char *, size_t));
 
 namespace duckdb {
@@ -194,11 +212,16 @@ extern "C" void boilstream_quack_catalog_session_close(const char *session_id) {
 
 extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char *declared_catalog_id,
                                              const char *sql_in, uint32_t *operation_out, char *catalog_id_out,
-                                             size_t catalog_id_out_size, char *sql_out_buf, size_t sql_out_size,
-                                             char *error_out_buf, size_t error_out_size) {
+                                             size_t catalog_id_out_size, char *execution_catalog_alias_out,
+                                             size_t execution_catalog_alias_out_size, char *sql_out_buf,
+                                             size_t sql_out_size, char *error_out_buf, size_t error_out_size) {
+	ClearCatalogPlanDataOutputs(operation_out, catalog_id_out, catalog_id_out_size, execution_catalog_alias_out,
+	                            execution_catalog_alias_out_size, sql_out_buf, sql_out_size);
+	ClearBuffer(error_out_buf, error_out_size);
 	try {
 		if (!session_id || !declared_catalog_id || !sql_in || !operation_out || !catalog_id_out ||
-		    catalog_id_out_size == 0 || !sql_out_buf || sql_out_size == 0 || !error_out_buf || error_out_size == 0) {
+		    catalog_id_out_size == 0 || !execution_catalog_alias_out || execution_catalog_alias_out_size == 0 ||
+		    !sql_out_buf || sql_out_size == 0 || !error_out_buf || error_out_size == 0) {
 			WriteError(error_out_buf, error_out_size, "Catalog planner received invalid buffers");
 			return -1;
 		}
@@ -212,9 +235,23 @@ extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char 
 			WriteError(error_out_buf, error_out_size, "Quack session capability bundle is missing");
 			return -1;
 		}
-		return planner(session.first.capability_bundle.c_str(), declared_catalog_id, sql_in, operation_out,
-		               catalog_id_out, catalog_id_out_size, sql_out_buf, sql_out_size, error_out_buf, error_out_size);
+		const auto rc =
+		    planner(session.first.capability_bundle.c_str(), declared_catalog_id, sql_in, operation_out, catalog_id_out,
+		            catalog_id_out_size, execution_catalog_alias_out, execution_catalog_alias_out_size, sql_out_buf,
+		            sql_out_size, error_out_buf, error_out_size);
+		if (rc == 0 || rc == 1) {
+			return rc;
+		}
+		ClearCatalogPlanDataOutputs(operation_out, catalog_id_out, catalog_id_out_size, execution_catalog_alias_out,
+		                            execution_catalog_alias_out_size, sql_out_buf, sql_out_size);
+		if (error_out_buf[0] == '\0') {
+			WriteError(error_out_buf, error_out_size,
+			           rc < 0 ? "Catalog planner denied operation" : "Catalog planner returned invalid status");
+		}
+		return rc < 0 ? rc : -1;
 	} catch (...) {
+		ClearCatalogPlanDataOutputs(operation_out, catalog_id_out, catalog_id_out_size, execution_catalog_alias_out,
+		                            execution_catalog_alias_out_size, sql_out_buf, sql_out_size);
 		WriteError(error_out_buf, error_out_size, "Catalog planner bridge failed");
 		return -1;
 	}

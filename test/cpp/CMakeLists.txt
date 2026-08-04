@@ -383,6 +383,20 @@ target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
                                                     Catch2::Catch2)
 link_rust_dependencies(quack_attach_red_test)
 
+# Quack planner bridge ABI tests exercise the statically linked extension's
+# public C callbacks, including opaque execution-target forwarding and
+# fail-closed output handling.
+add_executable(quack_bridge_test test_quack_bridge.cpp)
+
+target_include_directories(
+  quack_bridge_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include)
+
+target_link_libraries(quack_bridge_test PRIVATE ${DUCKDB_LIBS}
+                                                Catch2::Catch2)
+link_rust_dependencies(quack_bridge_test)
+
 # Enable testing
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
@@ -400,3 +414,4 @@ add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
 add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)
+add_test(NAME QuackBridgeTests COMMAND quack_bridge_test)
