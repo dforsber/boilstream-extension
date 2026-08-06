@@ -39,13 +39,14 @@ typedef int (*boilstream_quack_catalog_planner_fn)(const char *capability_bundle
                                                    size_t sql_out_size, char *error_out_buf, size_t error_out_size);
 void boilstream_quack_set_catalog_planner(boilstream_quack_catalog_planner_fn fn);
 
-//! Typed data-plane authorizer. SQL and display names are deliberately absent.
+//! Typed data-plane authorizer. The execution alias is an opaque target selected
+//! by the trusted planner; request SQL and display names are deliberately absent.
 //! Catalog operations return the authoritative storage-owner tenant for
 //! physical routing. Returns 0 on allow and nonzero on hard denial.
 typedef int (*boilstream_quack_catalog_authorizer_fn)(const char *capability_bundle, uint32_t operation,
-                                                      const char *catalog_id,
-                                                      uint32_t *storage_owner_tenant_id_out,
-                                                      char *error_out_buf, size_t error_out_size);
+                                                      const char *catalog_id, const char *execution_catalog_alias,
+                                                      uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
+                                                      size_t error_out_size);
 void boilstream_quack_set_catalog_authorizer(boilstream_quack_catalog_authorizer_fn fn);
 
 //! Post-success durability hook addressed by canonical UUID and typed
@@ -60,8 +61,8 @@ int boilstream_quack_catalog_plan(const char *session_id, const char *declared_c
                                   char *execution_catalog_alias_out, size_t execution_catalog_alias_out_size,
                                   char *sql_out_buf, size_t sql_out_size, char *error_out_buf, size_t error_out_size);
 int boilstream_quack_catalog_authorize(const char *session_id, uint32_t operation, const char *catalog_id,
-                                       uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
-                                       size_t error_out_size);
+                                       const char *execution_catalog_alias, uint32_t *storage_owner_tenant_id_out,
+                                       char *error_out_buf, size_t error_out_size);
 int boilstream_quack_catalog_post_execute(const char *session_id, uint32_t operation, const char *catalog_id,
                                           char *error_out_buf, size_t error_out_size);
 void boilstream_quack_catalog_session_close(const char *session_id);

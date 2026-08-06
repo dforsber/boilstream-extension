@@ -92,7 +92,7 @@ typedef void (*quack_set_catalog_admission_hooks_fn_t)(int (*planner)(const char
                                                                       uint32_t *, char *, size_t, char *, size_t,
                                                                       char *, size_t, char *, size_t),
                                                        int (*authorizer)(const char *, uint32_t, const char *,
-                                                                         uint32_t *, char *, size_t),
+                                                                         const char *, uint32_t *, char *, size_t),
                                                        void (*session_close)(const char *));
 typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint32_t, const char *, char *, size_t));
 
@@ -258,16 +258,19 @@ extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char 
 }
 
 extern "C" int boilstream_quack_catalog_authorize(const char *session_id, uint32_t operation, const char *catalog_id,
+                                                  const char *execution_catalog_alias,
                                                   uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
                                                   size_t error_out_size) {
 	try {
 		if (storage_owner_tenant_id_out) {
 			*storage_owner_tenant_id_out = 0;
 		}
-		if (!session_id || !catalog_id || !storage_owner_tenant_id_out || !error_out_buf || error_out_size == 0) {
+		if (!session_id || !catalog_id || !execution_catalog_alias || !storage_owner_tenant_id_out || !error_out_buf ||
+		    error_out_size == 0) {
 			WriteError(error_out_buf, error_out_size, "Catalog authorizer received invalid buffers");
 			return -1;
 		}
+		ClearBuffer(error_out_buf, error_out_size);
 		auto authorizer = CatalogAuthorizerSlot().load(std::memory_order_acquire);
 		if (!authorizer) {
 			WriteError(error_out_buf, error_out_size, "Catalog authorizer is not registered");
@@ -279,7 +282,7 @@ extern "C" int boilstream_quack_catalog_authorize(const char *session_id, uint32
 			return -1;
 		}
 		const auto rc = authorizer(session.first.capability_bundle.c_str(), operation, catalog_id,
-		                           storage_owner_tenant_id_out, error_out_buf, error_out_size);
+		                           execution_catalog_alias, storage_owner_tenant_id_out, error_out_buf, error_out_size);
 		if (rc != 0) {
 			*storage_owner_tenant_id_out = 0;
 		}

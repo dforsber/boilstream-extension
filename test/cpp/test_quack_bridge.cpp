@@ -25,15 +25,21 @@ namespace {
 
 using ExpectedPlannerAdapter = int (*)(const char *, const char *, const char *, uint32_t *, char *, size_t, char *,
                                        size_t, char *, size_t, char *, size_t);
+using ExpectedAuthorizerAdapter = int (*)(const char *, uint32_t, const char *, const char *, uint32_t *, char *,
+                                          size_t);
 static_assert(std::is_same<boilstream_quack_catalog_planner_fn, ExpectedPlannerAdapter>::value,
               "Boilstream host planner ABI changed");
 static_assert(std::is_same<decltype(&boilstream_quack_catalog_plan), ExpectedPlannerAdapter>::value,
               "Quack planner adapter ABI changed");
+static_assert(std::is_same<boilstream_quack_catalog_authorizer_fn, ExpectedAuthorizerAdapter>::value,
+              "Boilstream host authorizer ABI changed");
+static_assert(std::is_same<decltype(&boilstream_quack_catalog_authorize), ExpectedAuthorizerAdapter>::value,
+              "Quack authorizer adapter ABI changed");
 
 constexpr const char *SESSION_ID = "bridge-test-session";
 constexpr const char *CAPABILITY = "opaque-signed-capability";
 constexpr const char *CATALOG_ID = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
-constexpr const char *EXECUTION_ALIAS = "__ducklake_metadata_9a927d1b_30f5_48da_91eb_af1492bf31c0__stream";
+constexpr const char *EXECUTION_ALIAS = "__BS_u6001__alpha__stream";
 constexpr const char *SQL_IN = "INSERT INTO incoming VALUES (42)";
 constexpr const char *SQL_OUT = "INSERT INTO __stream.incoming VALUES (42)";
 
@@ -43,6 +49,10 @@ bool planner_inputs_were_clear = false;
 std::string seen_capability;
 std::string seen_declared_catalog;
 std::string seen_sql;
+std::string seen_authorizer_capability;
+std::string seen_authorizer_catalog;
+std::string seen_authorizer_alias;
+uint32_t seen_authorizer_operation = 0;
 
 bool CopyOutput(char *out, size_t capacity, const char *value) {
 	const auto length = std::strlen(value);
@@ -113,6 +123,29 @@ int PlanThrows(const char *, const char *, const char *, uint32_t *operation_out
 	throw std::runtime_error("planner exception must not cross C ABI");
 }
 
+int AuthorizeSuccess(const char *capability, uint32_t operation, const char *catalog_id,
+                     const char *execution_catalog_alias, uint32_t *storage_owner_tenant_id_out, char *, size_t) {
+	seen_authorizer_capability = capability ? capability : "";
+	seen_authorizer_operation = operation;
+	seen_authorizer_catalog = catalog_id ? catalog_id : "";
+	seen_authorizer_alias = execution_catalog_alias ? execution_catalog_alias : "";
+	*storage_owner_tenant_id_out = 6001;
+	return 0;
+}
+
+int AuthorizeDenial(const char *, uint32_t, const char *, const char *, uint32_t *storage_owner_tenant_id_out,
+                    char *error_out_buf, size_t error_out_size) {
+	*storage_owner_tenant_id_out = 9999;
+	CopyOutput(error_out_buf, error_out_size, "authorizer denied exactly");
+	return -7;
+}
+
+int AuthorizeThrows(const char *, uint32_t, const char *, const char *, uint32_t *storage_owner_tenant_id_out, char *,
+                    size_t) {
+	*storage_owner_tenant_id_out = 9999;
+	throw std::runtime_error("authorizer exception must not cross C ABI");
+}
+
 struct PlanOutputs {
 	uint32_t operation = 99;
 	char catalog[128] = "stale-catalog";
@@ -145,6 +178,7 @@ struct BridgeFixture {
 		planner_execution_alias = EXECUTION_ALIAS;
 		boilstream_quack_set_jwt_verifier(&VerifyJwt);
 		boilstream_quack_set_catalog_planner(nullptr);
+		boilstream_quack_set_catalog_authorizer(nullptr);
 		auto result =
 		    connection.Query("SELECT boilstream_quack_authn('" + std::string(SESSION_ID) + "', 'test-jwt', '')");
 		const auto query_error = result->HasError() ? result->GetError() : "";
@@ -156,6 +190,7 @@ struct BridgeFixture {
 	~BridgeFixture() {
 		boilstream_quack_catalog_session_close(SESSION_ID);
 		boilstream_quack_set_catalog_planner(nullptr);
+		boilstream_quack_set_catalog_authorizer(nullptr);
 		boilstream_quack_set_jwt_verifier(nullptr);
 	}
 };
@@ -357,5 +392,100 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge fails closed without planner or 
 		REQUIRE(outputs.Call() == -1);
 		outputs.RequireDataCleared();
 		REQUIRE(std::string(outputs.error) == "Quack session capability bundle is missing");
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge forwards the planner-selected execution alias",
+                 "[quack][bridge][abi]") {
+	boilstream_quack_set_catalog_authorizer(&AuthorizeSuccess);
+	for (const auto alias : {EXECUTION_ALIAS, ""}) {
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, alias, &storage_owner, error,
+		                                           sizeof(error)) == 0);
+		REQUIRE(storage_owner == 6001);
+		REQUIRE(error[0] == '\0');
+		REQUIRE(seen_authorizer_capability == CAPABILITY);
+		REQUIRE(seen_authorizer_operation == 4);
+		REQUIRE(seen_authorizer_catalog == CATALOG_ID);
+		REQUIRE(seen_authorizer_alias == alias);
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner output", "[quack][bridge][failure]") {
+	SECTION("host denial") {
+		boilstream_quack_set_catalog_authorizer(&AuthorizeDenial);
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
+		                                           sizeof(error)) == -7);
+		REQUIRE(storage_owner == 0);
+		REQUIRE(std::string(error) == "authorizer denied exactly");
+	}
+
+	SECTION("missing authorizer") {
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
+		                                           sizeof(error)) == -1);
+		REQUIRE(storage_owner == 0);
+		REQUIRE(std::string(error) == "Catalog authorizer is not registered");
+	}
+
+	SECTION("missing session") {
+		boilstream_quack_set_catalog_authorizer(&AuthorizeSuccess);
+		boilstream_quack_catalog_session_close(SESSION_ID);
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
+		                                           sizeof(error)) == -1);
+		REQUIRE(storage_owner == 0);
+		REQUIRE(std::string(error) == "Quack session capability bundle is missing");
+	}
+
+	SECTION("host exception") {
+		boilstream_quack_set_catalog_authorizer(&AuthorizeThrows);
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		int rc = 0;
+		REQUIRE_NOTHROW(rc = boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS,
+		                                                        &storage_owner, error, sizeof(error)));
+		REQUIRE(rc == -1);
+		REQUIRE(storage_owner == 0);
+		REQUIRE(std::string(error) == "Catalog authorizer bridge failed");
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge rejects every invalid required input", "[quack][bridge][failure]") {
+	boilstream_quack_set_catalog_authorizer(&AuthorizeSuccess);
+	for (size_t null_index = 0; null_index < 4; ++null_index) {
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		const char *session_id = null_index == 0 ? nullptr : SESSION_ID;
+		const char *catalog_id = null_index == 1 ? nullptr : CATALOG_ID;
+		const char *execution_alias = null_index == 2 ? nullptr : EXECUTION_ALIAS;
+		auto owner_out = null_index == 3 ? nullptr : &storage_owner;
+		INFO("null authorizer input index " << null_index);
+		REQUIRE(boilstream_quack_catalog_authorize(session_id, 4, catalog_id, execution_alias, owner_out, error,
+		                                           sizeof(error)) == -1);
+		if (owner_out) {
+			REQUIRE(storage_owner == 0);
+		}
+		REQUIRE(std::string(error) == "Catalog authorizer received invalid buffers");
+	}
+
+	SECTION("null error buffer") {
+		uint32_t storage_owner = 9999;
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, nullptr,
+		                                           128) == -1);
+		REQUIRE(storage_owner == 0);
+	}
+
+	SECTION("zero error capacity") {
+		uint32_t storage_owner = 9999;
+		char error[128] = "stale-error";
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
+		                                           0) == -1);
+		REQUIRE(storage_owner == 0);
 	}
 }
