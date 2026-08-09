@@ -166,16 +166,36 @@ struct PlanOutputs {
 	}
 };
 
-struct BridgeFixture {
+struct BridgeDatabase {
 	DuckDB db {nullptr};
-	Connection connection {db};
 
-	BridgeFixture() {
+	BridgeDatabase() {
 		ExtensionInfo extension_info {};
 		ExtensionActiveLoad load_info {*db.instance, extension_info, "boilstream_bridge_test"};
 		ExtensionLoader loader {load_info};
 		RegisterQuackBridge(loader);
+	}
+};
+
+BridgeDatabase &SharedBridgeDatabase() {
+	static BridgeDatabase database;
+	return database;
+}
+
+struct BridgeFixture {
+	Connection connection {SharedBridgeDatabase().db};
+
+	BridgeFixture() {
+		planner_result = 0;
 		planner_execution_alias = EXECUTION_ALIAS;
+		planner_inputs_were_clear = false;
+		seen_capability.clear();
+		seen_declared_catalog.clear();
+		seen_sql.clear();
+		seen_authorizer_capability.clear();
+		seen_authorizer_catalog.clear();
+		seen_authorizer_alias.clear();
+		seen_authorizer_operation = 0;
 		boilstream_quack_set_jwt_verifier(&VerifyJwt);
 		boilstream_quack_set_catalog_planner(nullptr);
 		boilstream_quack_set_catalog_authorizer(nullptr);

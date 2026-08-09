@@ -393,8 +393,7 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
           ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include)
 
-target_link_libraries(quack_bridge_test PRIVATE ${DUCKDB_LIBS}
-                                                Catch2::Catch2)
+target_link_libraries(quack_bridge_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 link_rust_dependencies(quack_bridge_test)
 
 # Enable testing
