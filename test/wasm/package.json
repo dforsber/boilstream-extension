@@ -15,7 +15,7 @@
     "tar": "^7.5.13",
     "cacache": "^20.0.4",
     "minimatch": "^10.2.5",
-    "brace-expansion": "^5.0.5",
+    "brace-expansion": "^5.0.6",
     "@tootallnate/once": "^3.0.1"
   }
 }
