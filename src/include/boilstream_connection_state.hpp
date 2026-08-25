@@ -20,6 +20,21 @@
 
 namespace duckdb {
 
+//! Complete server-owned credential for one managed catalog. Kept in the
+//! authenticated connection state so concurrent tenants can never overwrite
+//! each other's token or mTLS identity in DuckDB's catalog-global secret set.
+struct ManagedCatalogCredentialEnvelope {
+	string token;
+	string expires_at;
+	string endpoint;
+	string catalog_id;
+	uint32_t storage_owner_tenant_id = 0;
+	string catalog_group;
+	string client_certificate_pem;
+	string client_private_key_pem;
+	string server_ca_pem;
+};
+
 //! Per-connection authentication state for boilstream extension.
 //! Stored in ClientContext via RegisteredStateManager with key "boilstream_auth".
 //! Each connection has independent OPAQUE session credentials for multi-tenant isolation.
@@ -85,6 +100,11 @@ public:
 	//! Secret expiration timestamps (name -> expiration time)
 	case_insensitive_map_t<std::chrono::system_clock::time_point> secret_expiration;
 
+	//! Managed catalog credentials keyed by exact catalog-qualified Quack
+	//! scope. This cache is connection-local by design; the DuckDB catalog
+	//! secret set is shared by all connections and is not a safe auth cache.
+	case_insensitive_map_t<ManagedCatalogCredentialEnvelope> managed_catalog_credentials;
+
 	//! Catalog version tracking (catalog_id UUID -> version info)
 	case_insensitive_map_t<CatalogVersionInfo> catalog_versions;
 
@@ -137,6 +157,9 @@ public:
 
 	//! Lock for secret expiration map
 	mutex expiration_lock;
+
+	//! Lock for the connection-local managed catalog credential cache.
+	mutex managed_catalog_credentials_lock;
 
 	//! Lock for catalog versions map
 	mutex version_lock;
@@ -192,19 +215,58 @@ public:
 
 	//! Clear session state (on error or logout)
 	void ClearSession() {
-		lock_guard<mutex> lock(session_lock);
-		// Secure memory wiping using volatile to prevent compiler optimization
-		SecureZeroString(access_token);
-		access_token.clear();
-		SecureZeroVector(session_key);
-		session_key.clear();
-		SecureZeroVector(refresh_token);
-		refresh_token.clear();
-		client_sequence = 0;
-		region.clear();
-		token_expires_at = std::chrono::system_clock::time_point::min();
-		is_exchanging = false;
-		bootstrap_token_hash.clear();
+		{
+			lock_guard<mutex> lock(session_lock);
+			// Secure memory wiping using volatile to prevent compiler optimization
+			SecureZeroString(access_token);
+			access_token.clear();
+			SecureZeroVector(session_key);
+			session_key.clear();
+			SecureZeroVector(refresh_token);
+			refresh_token.clear();
+			client_sequence = 0;
+			region.clear();
+			token_expires_at = std::chrono::system_clock::time_point::min();
+			is_exchanging = false;
+			bootstrap_token_hash.clear();
+		}
+		ClearManagedCatalogCredentials();
+	}
+
+	//! Cache one exact managed credential for this authenticated connection.
+	void StoreManagedCatalogCredential(const string &scope, const ManagedCatalogCredentialEnvelope &credential) {
+		lock_guard<mutex> lock(managed_catalog_credentials_lock);
+		static constexpr idx_t MAX_MANAGED_CATALOG_CREDENTIALS = 10000;
+		if (managed_catalog_credentials.size() >= MAX_MANAGED_CATALOG_CREDENTIALS &&
+		    managed_catalog_credentials.find(scope) == managed_catalog_credentials.end()) {
+			SecureClearManagedCatalogCredentials();
+		}
+		auto entry = managed_catalog_credentials.find(scope);
+		if (entry == managed_catalog_credentials.end()) {
+			managed_catalog_credentials.emplace(scope, credential);
+		} else {
+			SecureZeroManagedCatalogCredential(entry->second);
+			entry->second = credential;
+		}
+	}
+
+	//! Copy one cached credential while holding the per-connection lock.
+	bool TryGetManagedCatalogCredential(const string &scope, ManagedCatalogCredentialEnvelope &credential) {
+		lock_guard<mutex> lock(managed_catalog_credentials_lock);
+		auto entry = managed_catalog_credentials.find(scope);
+		if (entry == managed_catalog_credentials.end()) {
+			SecureZeroManagedCatalogCredential(credential);
+			credential = ManagedCatalogCredentialEnvelope {};
+			return false;
+		}
+		credential = entry->second;
+		return true;
+	}
+
+	//! Remove all managed credentials on logout/session reset.
+	void ClearManagedCatalogCredentials() {
+		lock_guard<mutex> lock(managed_catalog_credentials_lock);
+		SecureClearManagedCatalogCredentials();
 	}
 
 	//! Get stored bootstrap token hash (for reuse detection)
@@ -225,6 +287,20 @@ public:
 		return token_expires_at;
 	}
 
+private:
+	static void SecureZeroManagedCatalogCredential(ManagedCatalogCredentialEnvelope &credential) {
+		SecureZeroString(credential.token);
+		SecureZeroString(credential.client_private_key_pem);
+	}
+
+	void SecureClearManagedCatalogCredentials() {
+		for (auto &entry : managed_catalog_credentials) {
+			SecureZeroManagedCatalogCredential(entry.second);
+		}
+		managed_catalog_credentials.clear();
+	}
+
+public:
 	//========================================================================
 	// Secret Expiration Methods
 	//========================================================================

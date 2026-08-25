@@ -28,6 +28,18 @@ namespace duckdb {
 class DatabaseInstance;
 class SecretManager;
 
+//! Strictly parse the managed catalog credential response. Returns false for
+//! missing, malformed, or partial transport identities so callers fail closed.
+bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCredentialEnvelope &out);
+
+//! Catalog-qualified lookup key shared by the BoilStream and Quack extensions.
+//! It is a secret scope only; the network URI remains `quack:<endpoint>`.
+string ManagedCatalogSecretScope(const string &endpoint, const string &catalog_id);
+
+//! Build the credential-free ATTACH statement returned by the managed-catalog
+//! PRAGMA. Authorization and placement fields come only from the vended bundle.
+string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &credential, const string &alias);
+
 //! REST API-based secret storage that communicates with an external service
 //! for multi-tenant secret management
 class RestApiSecretStorage : public CatalogSetSecretStorage {
@@ -163,6 +175,12 @@ public:
 	//! Get expiration timestamp for a secret from connection state (for table functions)
 	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name,
 	                                                          optional_ptr<CatalogTransaction> transaction);
+
+	//! Fetch and cache one exact managed-catalog credential. The canonical
+	//! catalog UUID selects both authorization and secret scope; display names
+	//! and ATTACH aliases are never authority inputs.
+	ManagedCatalogCredentialEnvelope VendManagedCatalogCredential(const string &catalog_id,
+	                                                              optional_ptr<CatalogTransaction> transaction);
 
 	//! Get the endpoint URL (for constructing API URLs in table functions)
 	string GetEndpointUrl();
@@ -345,6 +363,21 @@ private:
 	//! empty SecretMatch on miss / network failure so the caller can fall back.
 	//! Implements 30s near-expiry refresh (tighter than the generic 5min IsExpired buffer).
 	SecretMatch LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction);
+
+	//! Fetch a server-owned credential for one canonical catalog UUID.
+	ManagedCatalogCredentialEnvelope FetchManagedCatalogCredential(const string &catalog_id,
+	                                                               BoilstreamConnectionState &conn_state,
+	                                                               optional_ptr<CatalogTransaction> transaction);
+
+	//! Install a complete credential bundle under its catalog-qualified Quack
+	//! secret scope and record its short-lived expiry.
+	void CacheManagedCatalogCredential(const string &scope_path, const ManagedCatalogCredentialEnvelope &credential,
+	                                   BoilstreamConnectionState &conn_state);
+
+	//! Materialize a connection-local credential as a SecretMatch without
+	//! publishing it into DuckDB's catalog-global secret set.
+	SecretMatch BuildManagedCatalogSecretMatch(const string &scope_path,
+	                                           const ManagedCatalogCredentialEnvelope &credential);
 
 	//========================================================================
 	// Shared State (across all connections)

@@ -10,8 +10,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(RUST_LIB_FOUND FALSE)
 set(RUST_LIB_PATH "")
 
-# Use DuckDB libraries from the extension build (not system DuckDB)
-set(EXTENSION_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build/release")
+# Use DuckDB libraries from the extension build (not system DuckDB). Honour
+# the workspace's direnv-managed external build when configured, while keeping
+# the repository-local path as the standalone fallback.
+if(DEFINED ENV{DUCKDB_BUILD_DIR} AND NOT "$ENV{DUCKDB_BUILD_DIR}" STREQUAL "")
+  set(EXTENSION_BUILD_DIR "$ENV{DUCKDB_BUILD_DIR}")
+else()
+  set(EXTENSION_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build/release")
+endif()
+if(DEFINED ENV{DUCKDB_SOURCE_DIR} AND NOT "$ENV{DUCKDB_SOURCE_DIR}" STREQUAL "")
+  set(DUCKDB_SOURCE_DIR "$ENV{DUCKDB_SOURCE_DIR}")
+else()
+  set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
+endif()
 
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
 file(GLOB_RECURSE RUST_LIB_CANDIDATES
@@ -373,9 +384,9 @@ add_executable(
 target_include_directories(
   quack_attach_red_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 target_compile_definitions(quack_attach_red_test PRIVATE BOILSTREAM_DEBUG)
 

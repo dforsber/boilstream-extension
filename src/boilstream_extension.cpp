@@ -816,9 +816,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, conn_state);
 		BOILSTREAM_LOG("CreateDucklake: Successfully fetched and cached secrets");
 
-		// Note: Auto-attach removed to prevent hanging when backends are not ready
-		// Users should manually run: ATTACH 'ducklake:catalog_name' AS catalog_name;
-		BOILSTREAM_LOG("CreateDucklake: Ducklake created, secrets cached. Use ATTACH to mount when ready.");
+		BOILSTREAM_LOG("CreateDucklake: Ducklake created; list its UUID and attach it through the managed pragma.");
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("CreateDucklake: Warning - Failed to fetch secrets: " << e.what());
 		// Continue - ducklake was created, just failed to fetch secrets
@@ -827,6 +825,30 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	// Return success message
 	return "SELECT 'Ducklake created successfully' as status, '" + EscapeSqlLiteral(catalog_name) +
 	       "' as catalog_name;";
+}
+
+//===--------------------------------------------------------------------===//
+// PRAGMA: Attach one managed DuckLake through Quack
+//===--------------------------------------------------------------------===//
+
+static string AttachManagedDucklake(ClientContext &context, const FunctionParameters &params) {
+	if constexpr (RestApiSecretStorage::IsWasmMode()) {
+		throw NotImplementedException(
+		    "boilstream_attach_ducklake requires native DuckDB client mTLS and is not available in DuckDB-WASM");
+	}
+	if (params.values.size() != 2 || params.values[0].IsNull() || params.values[1].IsNull()) {
+		throw InvalidInputException("boilstream_attach_ducklake requires catalog_id and alias");
+	}
+	const string catalog_id = params.values[0].ToString();
+	const string alias = params.values[1].ToString();
+	auto storage = GetStorageFromContext(context);
+	if (!storage) {
+		throw InvalidInputException(
+		    "boilstream_attach_ducklake: No active session. Call PRAGMA boilstream_bootstrap_session first.");
+	}
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto credential = storage->VendManagedCatalogCredential(catalog_id, &transaction);
+	return BuildManagedCatalogAttachSql(credential, alias);
 }
 
 //! PRAGMA function to set the REST API endpoint URL
@@ -1016,9 +1038,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	// re-entrancy/cache guards used by httpfs-driven AllSecrets() callers. Without
 	// this, the GetSession(transaction) lookup can miss the connection-id mapping
 	// that PerformOpaqueLogin set up moments earlier, and the function would
-	// silently early-exit without ever calling /secrets — leaving DuckLake's
-	// hard-coded "memory"/"local_file" GetSecretByName lookup with nothing to find
-	// when ATTACH 'ducklake:...' fans out to its postgres-creds reference.
+	// silently early-exit without ever calling /secrets, leaving ordinary
+	// user-managed secret lookups without their authenticated cache.
 	BOILSTREAM_LOG("SetEndpoint: Fetching all secrets to populate memory storage");
 	vector<string> ducklake_names;
 	try {
@@ -1028,7 +1049,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
 
-		// Collect all ducklake secret names for auto-attach
+		// Collect legacy DuckLake secret names for the login summary only.
 		for (const auto &entry : secrets) {
 			if (entry.secret) {
 				BOILSTREAM_LOG("SetEndpoint: Secret '" << entry.secret->GetName() << "' type='"
@@ -1068,8 +1089,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	}
 	BOILSTREAM_LOG("SetEndpoint: Available ducklakes: " << ducklakes_list);
 
-	// Return status with available ducklakes (user can attach manually)
-	// Example: ATTACH 'ducklake:name' AS name;
+	// Return status with available legacy DuckLake secret names. Managed catalog
+	// attachment is selected separately by canonical UUID.
 	string result_sql = "SELECT 'Session established' as status, TIMESTAMP '" + string(expires_str) +
 	                    "' as expires_at, " + std::to_string(ducklake_names.size()) + " as ducklakes_available, '" +
 	                    ducklakes_list + "' as available_ducklakes;";
@@ -2144,7 +2165,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("Login: Successfully fetched and cached secrets");
 
-		// Collect all ducklake secret names for auto-attach
+		// Collect legacy DuckLake secret names for the login summary only.
 		for (const auto &entry : secrets) {
 			if (entry.secret && entry.secret->GetType() == "ducklake") {
 				ducklake_names.push_back(entry.secret->GetName());
@@ -2171,12 +2192,14 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Build multi-statement SQL: ATTACH statements + final SELECT
 	string result_sql = "";
 
-	// Skip auto-attach - user can manually run: ATTACH 'ducklake:name' AS name;
-	BOILSTREAM_LOG("Login: Skipping auto-attach (user can manually attach)");
+	// Skip auto-attach. Catalog selection is explicit and UUID-authoritative.
+	BOILSTREAM_LOG("Login: Skipping auto-attach; use the managed UUID attach pragma");
 
 	// Add final SELECT statement showing status
-	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at, " +
-	              std::to_string(ducklake_names.size()) + " as ducklakes_attached;";
+	// Preserve the existing public result schema while reporting the accurate
+	// explicit-attach state. Catalog discovery remains `boilstream_ducklakes()`.
+	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) +
+	              "' as expires_at, 0 as ducklakes_attached;";
 
 	BOILSTREAM_LOG("Login: Returning multi-statement SQL with " << ducklake_names.size() << " ATTACH command(s)");
 
@@ -2213,14 +2236,14 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_login(url_with_email, password, mfa_code)',\n";
 	result_sql += "  '  - Login with email/password/MFA. Establishes OPAQUE session.',\n";
-	result_sql += "  '  - Auto-fetches all secrets and ATTACHes all ducklakes.',\n";
+	result_sql += "  '  - Fetches catalog metadata; attachment is explicit by catalog UUID.',\n";
 	result_sql += "  '  - SECURE ALTERNATIVE: Use Web Auth GUI for login instead.',\n";
 	result_sql +=
 	    "  '  PRAGMA boilstream_login(''https://localhost/email@example.com'', ''password123'', ''123456'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_bootstrap_session(url_with_token)',\n";
 	result_sql += "  '  - Login with bootstrap token. Establishes OPAQUE session.',\n";
-	result_sql += "  '  - Auto-fetches all secrets and ATTACHes all ducklakes.',\n";
+	result_sql += "  '  - Fetches catalog metadata; attachment is explicit by catalog UUID.',\n";
 	result_sql += "  '  PRAGMA boilstream_bootstrap_session(''https://localhost/secrets/:token'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_create_ducklake(name, [description], [s3_bucket_name])',\n";
@@ -2228,6 +2251,10 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '  - s3_bucket_name: Optional bucket from boilstream_buckets() for multi-bucket users.',\n";
 	result_sql += "  '  PRAGMA boilstream_create_ducklake(''my_lake'', ''Optional description'');',\n";
 	result_sql += "  '  PRAGMA boilstream_create_ducklake(''my_lake'', '''', ''my-bucket-name'');',\n";
+	result_sql += "  '',\n";
+	result_sql += "  'PRAGMA boilstream_attach_ducklake(catalog_id, alias)',\n";
+	result_sql += "  '  - Attach one authorized managed catalog by canonical UUID (native DuckDB).',\n";
+	result_sql += "  '  PRAGMA boilstream_attach_ducklake(''<catalog-uuid>'', ''my_lake'');',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'SELECT * FROM boilstream_ducklakes()',\n";
 	result_sql += "  '  - List all ducklakes. Requires active session.',\n";
@@ -2301,8 +2328,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Note: the `quack` SecretType is registered by the upstream `quack` extension
 	// itself (RegisterQuackSecretType in quack_extension.cpp). We don't register it
 	// here — duplicate RegisterSecretType throws InternalException. Our Phase 2.2
-	// auto-vend (RestApiSecretStorage::LookupQuackSecret) just builds a
-	// KeyValueSecret of type "quack" and installs it via AddOrUpdateSecretInCatalog;
+	// managed lookup (RestApiSecretStorage::LookupQuackSecret) materializes a
+	// connection-local KeyValueSecret of type "quack" as a SecretMatch; it never
+	// publishes authentication material into DuckDB's catalog-global secret set.
 	// DuckDB's SecretManager doesn't require the registration to live in *our*
 	// extension for that to work. If the user loads boilstream without the quack
 	// extension, the dispatch still runs but the SecretMatch returned is only
@@ -2326,6 +2354,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                  LogicalType(LogicalTypeId::VARCHAR));
 	loader.RegisterFunction(create_ducklake);
 	BOILSTREAM_LOG("LoadInternal: boilstream_create_ducklake PRAGMA registered");
+
+	vector<LogicalType> attach_ducklake_params {LogicalType(LogicalTypeId::VARCHAR),
+	                                            LogicalType(LogicalTypeId::VARCHAR)};
+	auto attach_ducklake =
+	    PragmaFunction::PragmaCall("boilstream_attach_ducklake", AttachManagedDucklake, attach_ducklake_params);
+	loader.RegisterFunction(attach_ducklake);
+	BOILSTREAM_LOG("LoadInternal: boilstream_attach_ducklake PRAGMA registered");
 
 	// Register PRAGMA function for user registration (email + password)
 	vector<LogicalType> register_params;

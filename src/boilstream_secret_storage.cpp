@@ -22,6 +22,7 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "yyjson.hpp"
@@ -234,6 +235,116 @@ static inline string SafeGetStr(yyjson_val *val) {
 	}
 	const char *str = yyjson_get_str(val);
 	return str ? string(str) : "";
+}
+
+static bool IsManagedCatalogEndpoint(const string &endpoint) {
+	const auto separator = endpoint.rfind(':');
+	if (separator == string::npos || separator == 0 || separator + 1 >= endpoint.size()) {
+		return false;
+	}
+	const auto host = endpoint.substr(0, separator);
+	if (host.find(':') != string::npos && (host.front() != '[' || host.back() != ']')) {
+		return false;
+	}
+	if (endpoint.find_first_of("/\\'\"?#@ \t\r\n") != string::npos) {
+		return false;
+	}
+	uint32_t port = 0;
+	for (idx_t index = separator + 1; index < endpoint.size(); index++) {
+		const auto c = endpoint[index];
+		if (c < '0' || c > '9') {
+			return false;
+		}
+		port = port * 10 + static_cast<uint32_t>(c - '0');
+		if (port > 65535) {
+			return false;
+		}
+	}
+	return port != 0;
+}
+
+bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCredentialEnvelope &out) {
+	out = ManagedCatalogCredentialEnvelope {};
+	if (json.empty() || json.size() > MAX_JSON_RESPONSE_SIZE) {
+		return false;
+	}
+	auto doc = yyjson_read(json.c_str(), json.size(), 0);
+	if (!doc) {
+		return false;
+	}
+	auto root = yyjson_doc_get_root(doc);
+	if (!root || !yyjson_is_obj(root)) {
+		yyjson_doc_free(doc);
+		return false;
+	}
+	out.token = SafeGetStr(yyjson_obj_get(root, "token"));
+	out.expires_at = SafeGetStr(yyjson_obj_get(root, "expires_at"));
+	out.endpoint = SafeGetStr(yyjson_obj_get(root, "endpoint"));
+	out.catalog_id = SafeGetStr(yyjson_obj_get(root, "catalog_id"));
+	auto owner = yyjson_obj_get(root, "storage_owner_tenant_id");
+	if (owner && yyjson_is_uint(owner) && yyjson_get_uint(owner) <= std::numeric_limits<uint32_t>::max()) {
+		out.storage_owner_tenant_id = static_cast<uint32_t>(yyjson_get_uint(owner));
+	}
+	out.catalog_group = SafeGetStr(yyjson_obj_get(root, "catalog_group"));
+	auto identity = yyjson_obj_get(root, "transport_identity");
+	if (identity && yyjson_is_obj(identity)) {
+		out.client_certificate_pem = SafeGetStr(yyjson_obj_get(identity, "client_certificate_pem"));
+		out.client_private_key_pem = SafeGetStr(yyjson_obj_get(identity, "client_private_key_pem"));
+		out.server_ca_pem = SafeGetStr(yyjson_obj_get(identity, "server_ca_pem"));
+	}
+	yyjson_doc_free(doc);
+	hugeint_t parsed_catalog_id;
+	const bool canonical_catalog_id = UUID::FromString(out.catalog_id, parsed_catalog_id, true) &&
+	                                  UUID::ToString(parsed_catalog_id) == out.catalog_id;
+	const bool complete = !out.token.empty() && !out.expires_at.empty() && IsManagedCatalogEndpoint(out.endpoint) &&
+	                      canonical_catalog_id && out.storage_owner_tenant_id != 0 && !out.catalog_group.empty() &&
+	                      out.client_certificate_pem.find("-----BEGIN CERTIFICATE-----") != string::npos &&
+	                      (out.client_private_key_pem.find("-----BEGIN PRIVATE KEY-----") != string::npos ||
+	                       out.client_private_key_pem.find("-----BEGIN EC PRIVATE KEY-----") != string::npos ||
+	                       out.client_private_key_pem.find("-----BEGIN RSA PRIVATE KEY-----") != string::npos) &&
+	                      out.server_ca_pem.find("-----BEGIN CERTIFICATE-----") != string::npos;
+	if (!complete) {
+		out = ManagedCatalogCredentialEnvelope {};
+	}
+	return complete;
+}
+
+string ManagedCatalogSecretScope(const string &endpoint, const string &catalog_id) {
+	return "quack:" + endpoint + "/catalog/" + catalog_id;
+}
+
+static string EscapeManagedAttachLiteral(const string &value) {
+	string escaped;
+	escaped.reserve(value.size());
+	for (const auto c : value) {
+		escaped += c == '\'' ? "''" : string(1, c);
+	}
+	return escaped;
+}
+
+static string QuoteManagedAttachIdentifier(const string &value) {
+	if (value.empty() || value.find('\0') != string::npos) {
+		throw InvalidInputException("Managed DuckDB ATTACH alias must be non-empty and contain no NUL bytes");
+	}
+	string quoted = "\"";
+	quoted.reserve(value.size() + 2);
+	for (const auto c : value) {
+		quoted += c == '\"' ? "\"\"" : string(1, c);
+	}
+	quoted += "\"";
+	return quoted;
+}
+
+string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &credential, const string &alias) {
+	if (credential.endpoint.empty() || credential.catalog_id.empty() || credential.storage_owner_tenant_id == 0 ||
+	    credential.catalog_group.empty()) {
+		throw InvalidInputException("Managed DuckDB ATTACH requires a complete authoritative catalog scope");
+	}
+	return "ATTACH 'quack:" + EscapeManagedAttachLiteral(credential.endpoint) + "' AS " +
+	       QuoteManagedAttachIdentifier(alias) + " (TYPE quack, CATALOG_ID '" +
+	       EscapeManagedAttachLiteral(credential.catalog_id) + "', TENANT_ID '" +
+	       std::to_string(credential.storage_owner_tenant_id) + "', CATALOG_GROUP '" +
+	       EscapeManagedAttachLiteral(credential.catalog_group) + "', DISABLE_SSL false)";
 }
 
 //! Safe string extraction with required validation - throws if NULL or empty
@@ -3030,20 +3141,22 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 #endif
 
 	// ---------- Quack auto-vend dispatch (Phase 2.2) ----------
-	// For TYPE quack lookups (i.e. ATTACH 'quack:host'), bypass the generic /match
-	// endpoint and call the dedicated GET /auth/api/quack/credentials endpoint.
-	// The server returns a JSON envelope { token, expires_at, endpoint } that we
-	// materialise into a KeyValueSecret with token+endpoint fields. Cached secrets
+	// For catalog-qualified TYPE quack lookups, bypass the generic /match endpoint
+	// and call the dedicated GET /auth/api/quack/credentials endpoint.
+	// The server returns a structured credential plus dedicated client-only mTLS
+	// identity that we materialise into one KeyValueSecret. Cached secrets
 	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
 	// used by IsExpired, because Quack JWTs are short-lived).
 	if (StringUtil::Lower(type) == "quack") {
+		const bool managed_scope_candidate = path.find("/catalog/") != string::npos;
 		auto match = LookupQuackSecret(path, transaction);
-		if (match.HasMatch()) {
+		if (match.HasMatch() || managed_scope_candidate) {
 			return match;
 		}
-		// Fall through to generic path on miss (keeps behaviour graceful if the
-		// quack endpoint is unreachable: the user still gets a regular SecretMatch()
-		// from the parent at the bottom of the function).
+		// Only an unqualified endpoint may fall through to an explicitly
+		// user-managed secret. A catalog-qualified managed lookup always fails
+		// closed: expiry, revocation, malformed scope, or vending failure must
+		// never broaden authority to an endpoint-scoped credential.
 	}
 	// ---------- end Quack dispatch ----------
 
@@ -3783,18 +3896,123 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 // Quack auto-vend (Phase 2.2)
 //
 // When the user runs `ATTACH 'quack:server-host'` after `LOAD boilstream`,
-// DuckDB's secret manager calls LookupSecret(path="quack:server-host",
-// type="quack"). We intercept that, hit the boilstream server's dedicated
-// quack JWT mint endpoint, and materialise a KeyValueSecret holding the
-// token + (optional) endpoint. The user never types CREATE SECRET.
+// DuckDB's secret manager calls LookupSecret with a catalog-qualified managed
+// scope. We intercept that, hit the BoilStream server's dedicated credential
+// endpoint, and materialise a KeyValueSecret holding the
+// token, endpoint, canonical scope, and client-only mTLS bundle. The user never
+// types CREATE SECRET or handles the transport identity directly.
 //
 // The endpoint is GET /auth/api/quack/credentials (HS256 JWT, signed
 // server-side). The response shape is:
 //
-//   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>"? }
+//   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>",
+//     "catalog_id": "<uuid>", "storage_owner_tenant_id": <u32>,
+//     "catalog_group": "<group>",
+//     "transport_identity": { "client_certificate_pem": "...",
+//       "client_private_key_pem": "...", "server_ca_pem": "..." } }
 //
 // We treat the JWT as opaque — server-side bridge verifies it.
 // ---------------------------------------------------------------------------
+static bool ParseManagedCatalogSecretScope(const string &path, string &catalog_id) {
+	static const string marker = "/catalog/";
+	auto marker_pos = path.rfind(marker);
+	if (marker_pos == string::npos || marker_pos + marker.size() >= path.size()) {
+		return false;
+	}
+	const auto endpoint_scope = path.substr(0, marker_pos);
+	catalog_id = path.substr(marker_pos + marker.size());
+	if (endpoint_scope.compare(0, 6, "quack:") != 0 || endpoint_scope.size() == 6 ||
+	    endpoint_scope.find('/', 6) != string::npos || catalog_id.find('/') != string::npos) {
+		return false;
+	}
+	hugeint_t parsed_catalog_id;
+	return UUID::FromString(catalog_id, parsed_catalog_id, true) && UUID::ToString(parsed_catalog_id) == catalog_id;
+}
+
+ManagedCatalogCredentialEnvelope
+RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, BoilstreamConnectionState &conn_state,
+                                                    optional_ptr<CatalogTransaction> transaction) {
+	string base_url;
+	{
+		lock_guard<mutex> lock(endpoint_lock);
+		base_url = endpoint_url;
+	}
+	if (base_url.empty()) {
+		throw IOException("Managed DuckDB credential vending requires an active Boilstream endpoint");
+	}
+	auto pos = base_url.rfind("/secrets");
+	if (pos == string::npos || pos + string("/secrets").size() != base_url.size()) {
+		throw IOException("Managed DuckDB credential vending requires the canonical /secrets endpoint");
+	}
+	string url =
+	    base_url.substr(0, pos) + "/auth/api/quack/credentials?catalog_id=" + StringUtil::URLEncode(catalog_id);
+	url = AppendPlatformParams(url, transaction);
+	const auto response = HttpGetWithState(url, conn_state);
+	ManagedCatalogCredentialEnvelope credential;
+	if (!ParseManagedCatalogCredentialEnvelope(response, credential)) {
+		throw IOException("Managed DuckDB credential response is incomplete or malformed");
+	}
+	if (credential.catalog_id != catalog_id) {
+		throw IOException("Managed DuckDB credential response catalog does not match the requested catalog");
+	}
+	if (ParseExpiresAt(credential.expires_at) <= std::chrono::system_clock::now() + std::chrono::seconds(30)) {
+		throw IOException("Managed DuckDB credential response is expired or too close to expiry");
+	}
+	return credential;
+}
+
+void RestApiSecretStorage::CacheManagedCatalogCredential(const string &scope_path,
+                                                         const ManagedCatalogCredentialEnvelope &credential,
+                                                         BoilstreamConnectionState &conn_state) {
+	const string secret_name = "__quack__" + scope_path;
+	conn_state.StoreManagedCatalogCredential(scope_path, credential);
+	StoreExpiration(secret_name, credential.expires_at, conn_state);
+}
+
+SecretMatch RestApiSecretStorage::BuildManagedCatalogSecretMatch(const string &scope_path,
+                                                                 const ManagedCatalogCredentialEnvelope &credential) {
+	const string secret_name = "__quack__" + scope_path;
+	vector<string> scope {scope_path};
+	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
+	secret->secret_map["token"] = Value(credential.token);
+	secret->secret_map["endpoint"] = Value(credential.endpoint);
+	secret->secret_map["catalog_id"] = Value(credential.catalog_id);
+	secret->secret_map["storage_owner_tenant_id"] = Value::UINTEGER(credential.storage_owner_tenant_id);
+	secret->secret_map["catalog_group"] = Value(credential.catalog_group);
+	secret->secret_map["client_certificate_pem"] = Value(credential.client_certificate_pem);
+	secret->secret_map["client_private_key_pem"] = Value(credential.client_private_key_pem);
+	secret->secret_map["server_ca_pem"] = Value(credential.server_ca_pem);
+	secret->redact_keys.insert("token");
+	secret->redact_keys.insert("client_certificate_pem");
+	secret->redact_keys.insert("client_private_key_pem");
+	secret->redact_keys.insert("server_ca_pem");
+	unique_ptr<const BaseSecret> immutable_secret = std::move(secret);
+	SecretEntry entry(std::move(immutable_secret));
+	auto best_match = SecretMatch();
+	return SelectBestMatch(entry, scope_path, tie_break_offset, best_match);
+}
+
+ManagedCatalogCredentialEnvelope
+RestApiSecretStorage::VendManagedCatalogCredential(const string &catalog_id,
+                                                   optional_ptr<CatalogTransaction> transaction) {
+	hugeint_t parsed_catalog_id;
+	if (!UUID::FromString(catalog_id, parsed_catalog_id, true) || UUID::ToString(parsed_catalog_id) != catalog_id) {
+		throw InvalidInputException("Managed DuckDB catalog_id must be a canonical UUID");
+	}
+	auto *conn_state = GetSession(transaction);
+	if (!conn_state) {
+		throw IOException("Managed DuckDB credential vending requires an active Boilstream session");
+	}
+	BoilstreamConnectionState::SecretLookupGuard guard(*conn_state);
+	if (!guard.Acquired()) {
+		throw IOException("Managed DuckDB credential vending was blocked by a recursive secret lookup");
+	}
+	auto credential = FetchManagedCatalogCredential(catalog_id, *conn_state, transaction);
+	const string scope_path = ManagedCatalogSecretScope(credential.endpoint, catalog_id);
+	CacheManagedCatalogCredential(scope_path, credential, *conn_state);
+	return credential;
+}
+
 SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction) {
 	BOILSTREAM_LOG("LookupQuackSecret ENTER: path=" << path);
 
@@ -3815,45 +4033,26 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 		return SecretMatch();
 	}
 
-	// Auto-vended quack secrets use a stable name convention `__quack__<path>`
-	// so the cache key for StoreExpiration / IsExpired matches across calls.
-	// User-created `CREATE SECRET ... (TYPE quack)` secrets carry whatever
-	// name the user chose, NEVER our internal prefix.
-	auto auto_vend_secret_name = [](const string &p) {
-		return "__quack__" + p;
-	};
-	auto is_auto_vended_name = [](const string &n) {
-		static const string internal_prefix = "__quack__";
-		return n.compare(0, internal_prefix.size(), internal_prefix) == 0;
-	};
-	const string secret_name = auto_vend_secret_name(path);
+	// Only the catalog-qualified path is eligible for managed auto-vend. A
+	// plain endpoint remains available to an explicitly user-supplied Quack
+	// secret but cannot accidentally obtain an unscoped product credential.
+	string catalog_id;
+	if (!ParseManagedCatalogSecretScope(path, catalog_id)) {
+		BOILSTREAM_LOG("LookupQuackSecret EXIT: missing canonical catalog scope");
+		return CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
+	}
+
+	// Managed credentials are cached in the authenticated connection state,
+	// never DuckDB's catalog-global secret set. This prevents two tenants in
+	// one process from replacing each other's token or mTLS identity.
+	const string secret_name = "__quack__" + path;
 
 	// Check local cache: if we have a non-near-expiry copy, return it.
 	// IsExpired uses a 5-minute buffer (good for long-lived S3 creds) — too
 	// aggressive for short-lived JWTs. So we do our own 30s window check
 	// against the recorded expires_at and only treat as miss when within 30s.
-	auto local_match = CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
-	if (local_match.HasMatch()) {
-		// USER-SUPPLIED SECRET TAKES PRIORITY over auto-vend. A scope-matching
-		// secret whose name doesn't match our internal `__quack__<path>` shape
-		// must have been installed by the user via `CREATE SECRET ... (TYPE
-		// quack, ...)` — the whole point of CREATE SECRET is to let the user
-		// supply their own token (e.g. for a non-boilstream Quack server, or
-		// for testing). Return it unchanged.
-		//
-		// Without this short-circuit the code below would re-fetch from
-		// /auth/api/quack/credentials and INSTALL A SECOND scope-matching
-		// secret under name `__quack__<path>`, causing ATTACH to see an
-		// ambiguous match and silently fail (Phase 4 e2e blocker
-		// ingestion-agent-cxum, refactor tracked as ingestion-agent-8hnt).
-		auto &matched = local_match.GetSecret();
-		const string matched_name = matched.GetName();
-		if (!is_auto_vended_name(matched_name)) {
-			BOILSTREAM_LOG("LookupQuackSecret EXIT: returning user-supplied secret name=" << matched_name
-			                                                                              << " (no auto-vend)");
-			return local_match;
-		}
-
+	ManagedCatalogCredentialEnvelope credential;
+	if (conn_state->TryGetManagedCatalogCredential(path, credential)) {
 		std::chrono::system_clock::time_point expires_at;
 		{
 			lock_guard<mutex> lock(conn_state->expiration_lock);
@@ -3869,37 +4068,14 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 			auto now = std::chrono::system_clock::now();
 			if (now < expires_at - std::chrono::seconds(30)) {
 				BOILSTREAM_LOG("LookupQuackSecret EXIT: cached, fresh (>30s remaining)");
-				return local_match;
+				return BuildManagedCatalogSecretMatch(path, credential);
 			}
 			BOILSTREAM_LOG("LookupQuackSecret: cached but near-expiry, re-vending");
 		}
 	}
 
-	// Build URL: replace "/secrets" suffix with "/auth/api/quack/credentials".
-	// endpoint_url is conventionally "https://host/secrets" — same pattern
-	// FetchCatalogVersions uses (~line 3698).
-	string base_url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		base_url = endpoint_url;
-	}
-	if (base_url.empty()) {
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: no endpoint configured");
-		return SecretMatch();
-	}
-	auto pos = base_url.rfind("/secrets");
-	if (pos == string::npos) {
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: endpoint_url doesn't end with /secrets");
-		return SecretMatch();
-	}
-	string url = base_url.substr(0, pos) + "/auth/api/quack/credentials";
-	url = AppendPlatformParams(url, transaction);
-
-	// HttpGetWithState handles BuildAuthenticatedHeaders + VerifyAuthenticatedResponse
-	// + decryption. Same path FetchCatalogVersions uses.
-	string response;
 	try {
-		response = HttpGetWithState(url, *conn_state);
+		credential = FetchManagedCatalogCredential(catalog_id, *conn_state, transaction);
 	} catch (const std::exception &e) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure: " << e.what());
 		return SecretMatch();
@@ -3907,57 +4083,10 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure (unknown)");
 		return SecretMatch();
 	}
-	if (response.empty() || response == "null" || response == "{}") {
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: empty response");
-		return SecretMatch();
-	}
-
-	// Parse { token, expires_at, endpoint } with yyjson (same library
-	// FetchCatalogVersions uses ~line 3716).
-	auto doc = yyjson_read(response.c_str(), response.size(), 0);
-	if (!doc) {
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: JSON parse failure");
-		return SecretMatch();
-	}
-	auto root = yyjson_doc_get_root(doc);
-	if (!root || !yyjson_is_obj(root)) {
-		yyjson_doc_free(doc);
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: response not an object");
-		return SecretMatch();
-	}
-	string token = SafeGetStr(yyjson_obj_get(root, "token"));
-	string expires_at_str = SafeGetStr(yyjson_obj_get(root, "expires_at"));
-	string endpoint_str = SafeGetStr(yyjson_obj_get(root, "endpoint"));
-	yyjson_doc_free(doc);
-
-	if (token.empty()) {
-		BOILSTREAM_LOG("LookupQuackSecret EXIT: missing token in response");
-		return SecretMatch();
-	}
-
-	// Materialise a KeyValueSecret. Scope is the path so DuckDB matches
-	// `ATTACH 'quack:...'` against this secret. Provider "config" matches
-	// the SecretType registration in boilstream_extension.cpp.
-	vector<string> scope {path};
-	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
-	secret->secret_map["token"] = Value(token);
-	if (!endpoint_str.empty()) {
-		secret->secret_map["endpoint"] = Value(endpoint_str);
-	}
-	// Mark token as redactable so it doesn't leak through duckdb_secrets().
-	secret->redact_keys.insert("token");
-
-	// Cache expiry via the existing per-conn expiration map (line ~2087).
-	if (!expires_at_str.empty()) {
-		StoreExpiration(secret_name, expires_at_str, *conn_state);
-	}
-
-	// Install into the local catalog via the canonical path (line ~2271) so
-	// CatalogSetSecretStorage::LookupSecret can resolve subsequent calls.
-	AddOrUpdateSecretInCatalog(std::move(secret), transaction);
+	CacheManagedCatalogCredential(path, credential, *conn_state);
 
 	BOILSTREAM_LOG("LookupQuackSecret EXIT: success, name=" << secret_name);
-	return CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
+	return BuildManagedCatalogSecretMatch(path, credential);
 }
 
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,

@@ -54,6 +54,182 @@ struct QuackAttachFixture {
 	}
 };
 
+TEST_CASE("Managed catalog credential envelope requires the complete mTLS bundle", "[quack][credentials][mtls]") {
+	const string valid = R"json({
+        "token":"signed-capability",
+        "expires_at":"2030-01-01T00:05:00Z",
+        "endpoint":"pod.example.test:9494",
+		"catalog_id":"9a927d1b-30f5-48da-91eb-af1492bf31c0",
+		"storage_owner_tenant_id":42,
+		"catalog_group":"9a927d1b_30f5_48da_91eb_af1492bf31c0",
+        "transport_identity":{
+          "client_certificate_pem":"-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n",
+          "client_private_key_pem":"-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
+          "server_ca_pem":"-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n"
+        }
+      })json";
+	ManagedCatalogCredentialEnvelope parsed;
+	REQUIRE(ParseManagedCatalogCredentialEnvelope(valid, parsed));
+	REQUIRE(parsed.token == "signed-capability");
+	REQUIRE(parsed.endpoint == "pod.example.test:9494");
+	REQUIRE(parsed.catalog_id == "9a927d1b-30f5-48da-91eb-af1492bf31c0");
+	REQUIRE(parsed.storage_owner_tenant_id == 42);
+	REQUIRE(parsed.client_private_key_pem.find("BEGIN PRIVATE KEY") != string::npos);
+
+	for (
+	    const auto &partial :
+	    {string(R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e"})json"),
+	     string(
+	         R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e","transport_identity":{"client_certificate_pem":"-----BEGIN CERTIFICATE-----","client_private_key_pem":"-----BEGIN PRIVATE KEY-----"}})json"),
+	     string(
+	         R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e","transport_identity":{"client_certificate_pem":"not-pem","client_private_key_pem":"-----BEGIN PRIVATE KEY-----","server_ca_pem":"-----BEGIN CERTIFICATE-----"}})json")}) {
+		parsed.token = "must-be-cleared";
+		REQUIRE_FALSE(ParseManagedCatalogCredentialEnvelope(partial, parsed));
+		REQUIRE(parsed.token.empty());
+		REQUIRE(parsed.client_private_key_pem.empty());
+	}
+
+	auto replace_once = [](string input, const string &from, const string &to) {
+		auto position = input.find(from);
+		REQUIRE(position != string::npos);
+		input.replace(position, from.size(), to);
+		return input;
+	};
+	for (const auto &invalid :
+	     {replace_once(valid, "9a927d1b-30f5-48da-91eb-af1492bf31c0", "9A927D1B-30F5-48DA-91EB-AF1492BF31C0"),
+	      replace_once(valid, "pod.example.test:9494", "https://pod.example.test:9494"),
+	      replace_once(valid, "pod.example.test:9494", "pod.example.test:0"),
+	      replace_once(valid, "pod.example.test:9494", "pod.example.test:65536"),
+	      replace_once(valid, "pod.example.test:9494", "pod.example.test:9494' INJECT"),
+	      replace_once(valid, "\"storage_owner_tenant_id\":42", "\"storage_owner_tenant_id\":0"),
+	      replace_once(valid, "\"catalog_group\":\"9a927d1b_30f5_48da_91eb_af1492bf31c0\"",
+	                   "\"catalog_group\":\"\"")}) {
+		REQUIRE_FALSE(ParseManagedCatalogCredentialEnvelope(invalid, parsed));
+		REQUIRE(parsed.catalog_id.empty());
+		REQUIRE(parsed.storage_owner_tenant_id == 0);
+	}
+}
+
+TEST_CASE("Managed catalog attach uses canonical scope and escapes only the presentation alias",
+          "[quack][credentials][scope]") {
+	ManagedCatalogCredentialEnvelope credential;
+	credential.endpoint = "pod.example.test:9494";
+	credential.catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	credential.storage_owner_tenant_id = 42;
+	credential.catalog_group = "9a927d1b_30f5_48da_91eb_af1492bf31c0";
+	credential.token = "must-not-enter-sql";
+	credential.client_private_key_pem = "must-not-enter-sql-private-key";
+	REQUIRE(ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id) ==
+	        "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0");
+	const auto attach_sql = BuildManagedCatalogAttachSql(credential, "shared \"duckie\"");
+	REQUIRE(attach_sql == "ATTACH 'quack:pod.example.test:9494' AS \"shared \"\"duckie\"\"\" (TYPE quack, "
+	                      "CATALOG_ID '9a927d1b-30f5-48da-91eb-af1492bf31c0', TENANT_ID '42', "
+	                      "CATALOG_GROUP '9a927d1b_30f5_48da_91eb_af1492bf31c0', DISABLE_SSL false)");
+	REQUIRE(attach_sql.find(credential.token) == string::npos);
+	REQUIRE(attach_sql.find(credential.client_private_key_pem) == string::npos);
+	REQUIRE_THROWS_AS(BuildManagedCatalogAttachSql(credential, ""), InvalidInputException);
+}
+
+TEST_CASE("Managed catalog credentials are isolated per authenticated connection",
+          "[quack][credentials][multitenant]") {
+	const string scope = "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	ManagedCatalogCredentialEnvelope owner;
+	owner.token = "owner-token";
+	owner.client_private_key_pem = "owner-key";
+	ManagedCatalogCredentialEnvelope member = owner;
+	member.token = "member-token";
+	member.client_private_key_pem = "member-key";
+
+	BoilstreamConnectionState owner_state;
+	BoilstreamConnectionState member_state;
+	owner_state.StoreManagedCatalogCredential(scope, owner);
+	member_state.StoreManagedCatalogCredential(scope, member);
+
+	ManagedCatalogCredentialEnvelope loaded;
+	REQUIRE(owner_state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == "owner-token");
+	REQUIRE(loaded.client_private_key_pem == "owner-key");
+	REQUIRE(member_state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == "member-token");
+	REQUIRE(loaded.client_private_key_pem == "member-key");
+
+	owner.token = "rotated-owner-token";
+	owner_state.StoreManagedCatalogCredential(scope, owner);
+	REQUIRE(member_state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == "member-token");
+
+	owner_state.ClearSession();
+	REQUIRE_FALSE(owner_state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(member_state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == "member-token");
+}
+
+TEST_CASE("Catalog-qualified managed credential wins over a broader user secret",
+          "[quack][credentials][scope][multitenant]") {
+	QuackAttachFixture fixture;
+	auto &storage = *fixture.storage;
+	auto &session = storage.GetOrCreateSession("managed-session");
+	Connection connection(*fixture.db);
+	storage.SetActiveSessionKeyForConnection(connection.context->GetConnectionId(), "managed-session");
+	connection.BeginTransaction();
+
+	const string endpoint_scope = "quack:non-routable.invalid:1";
+	const string catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	const string catalog_scope = ManagedCatalogSecretScope("non-routable.invalid:1", catalog_id);
+	vector<string> broad_scope {endpoint_scope};
+	auto broad = make_uniq<KeyValueSecret>(broad_scope, "quack", "config", "broad-user-secret");
+	broad->secret_map["token"] = Value("broad-user-token");
+	storage.StoreSecret(std::move(broad), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
+
+	ManagedCatalogCredentialEnvelope managed;
+	managed.token = "managed-catalog-token";
+	managed.expires_at = "2030-01-01T00:05:00Z";
+	managed.endpoint = "non-routable.invalid:1";
+	managed.catalog_id = catalog_id;
+	managed.storage_owner_tenant_id = 42;
+	managed.catalog_group = "9a927d1b_30f5_48da_91eb_af1492bf31c0";
+	managed.client_certificate_pem = "-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n";
+	managed.client_private_key_pem = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n";
+	managed.server_ca_pem = "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n";
+	session.StoreManagedCatalogCredential(catalog_scope, managed);
+	{
+		lock_guard<mutex> lock(session.expiration_lock);
+		session.secret_expiration["__quack__" + catalog_scope] =
+		    std::chrono::system_clock::now() + std::chrono::minutes(5);
+	}
+
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*connection.context);
+	auto match = storage.LookupSecret(catalog_scope, "quack", &transaction);
+	REQUIRE(match.HasMatch());
+	REQUIRE(match.GetSecret().GetName() == "__quack__" + catalog_scope);
+	auto &kv = dynamic_cast<const KeyValueSecret &>(match.GetSecret());
+	REQUIRE(kv.secret_map.at("token").ToString() == "managed-catalog-token");
+	REQUIRE(kv.secret_map.at("catalog_id").ToString() == catalog_id);
+}
+
+TEST_CASE("Catalog-qualified managed lookup never falls back to a broader user secret",
+          "[quack][credentials][scope][fail-closed]") {
+	QuackAttachFixture fixture;
+	auto &storage = *fixture.storage;
+	const string endpoint_scope = "quack:non-routable.invalid:1";
+	const string catalog_scope =
+	    ManagedCatalogSecretScope("non-routable.invalid:1", "9a927d1b-30f5-48da-91eb-af1492bf31c0");
+	vector<string> broad_scope {endpoint_scope};
+	auto broad = make_uniq<KeyValueSecret>(broad_scope, "quack", "config", "broad-user-secret");
+	broad->secret_map["token"] = Value("must-not-be-selected");
+	storage.StoreSecret(std::move(broad), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
+
+	// No authenticated session means managed vending cannot run. The exact
+	// catalog scope must return no match instead of broadening to the endpoint
+	// secret. Plain endpoint lookup remains the explicit manual interface.
+	REQUIRE_FALSE(storage.LookupSecret(catalog_scope, "quack", nullptr).HasMatch());
+	auto manual = storage.LookupSecret(endpoint_scope, "quack", nullptr);
+	REQUIRE(manual.HasMatch());
+	REQUIRE(manual.GetSecret().GetName() == "broad-user-secret");
+
+	REQUIRE_FALSE(storage.LookupSecret(endpoint_scope + "/catalog/not-a-uuid", "quack", nullptr).HasMatch());
+}
+
 //===----------------------------------------------------------------------===//
 // RED: a user-created TYPE quack secret MUST be returned by LookupSecret
 // when there is no active boilstream session. The auto-vend path requires
