@@ -318,8 +318,11 @@ private:
 	//! Deserialize secret from JSON string
 	unique_ptr<BaseSecret> DeserializeSecret(const string &json_data, SecretManager &manager);
 
-	//! Parse ISO 8601 UTC timestamp to system_clock time_point
+	//! Parse an RFC3339 timestamp to system_clock time_point
 	std::chrono::system_clock::time_point ParseExpiresAt(const string &expires_at_str);
+	//! Check the authoritative expiry without applying the cache refresh window
+	bool IsManagedCatalogCredentialExpiredAt(const string &expires_at_str,
+	                                         std::chrono::system_clock::time_point now);
 
 	//! Check if a secret has expired (uses connection state)
 	bool IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state);

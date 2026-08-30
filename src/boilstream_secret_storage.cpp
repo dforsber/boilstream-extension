@@ -2202,6 +2202,11 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 	    std::chrono::duration_cast<clock_duration>(std::chrono::microseconds(parsed.value)));
 }
 
+bool RestApiSecretStorage::IsManagedCatalogCredentialExpiredAt(const string &expires_at_str,
+                                                               std::chrono::system_clock::time_point now) {
+	return ParseExpiresAt(expires_at_str) <= now;
+}
+
 bool RestApiSecretStorage::IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state) {
 	lock_guard<mutex> lock(conn_state.expiration_lock);
 
@@ -3975,8 +3980,11 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	if (credential.catalog_id != catalog_id) {
 		throw IOException("Managed DuckDB credential response catalog does not match the requested catalog");
 	}
-	if (ParseExpiresAt(credential.expires_at) <= std::chrono::system_clock::now() + std::chrono::seconds(30)) {
-		throw IOException("Managed DuckDB credential response is expired or too close to expiry");
+	// A capability may intentionally expire in less than the cache's 30-second
+	// refresh window. A freshly vended credential remains usable until its
+	// authoritative expiry; Quack enforces that same boundary during execution.
+	if (IsManagedCatalogCredentialExpiredAt(credential.expires_at, std::chrono::system_clock::now())) {
+		throw IOException("Managed DuckDB credential response is expired");
 	}
 	return credential;
 }

@@ -48,6 +48,12 @@ public:
 	                                                            const std::string &expires_at_str) {
 		return storage.ParseExpiresAt(expires_at_str);
 	}
+
+	static bool IsManagedCatalogCredentialExpiredAt(RestApiSecretStorage &storage,
+	                                                const std::string &expires_at_str,
+	                                                std::chrono::system_clock::time_point now) {
+		return storage.IsManagedCatalogCredentialExpiredAt(expires_at_str, now);
+	}
 };
 
 struct QuackAttachFixture {
@@ -78,6 +84,14 @@ TEST_CASE_METHOD(QuackAttachFixture, "Managed credential expiry accepts RFC3339 
 	REQUIRE(positive_offset == zulu);
 	REQUIRE(negative_offset == zulu);
 	REQUIRE(std::chrono::duration_cast<std::chrono::microseconds>(fractional - zulu).count() == 123456);
+	REQUIRE_FALSE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
+	    *storage, "2030-06-15T14:30:00+00:00", zulu - std::chrono::seconds(15)));
+	REQUIRE_FALSE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
+	    *storage, "2030-06-15T14:30:00+00:00", zulu - std::chrono::milliseconds(1)));
+	REQUIRE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
+	    *storage, "2030-06-15T14:30:00+00:00", zulu));
+	REQUIRE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
+	    *storage, "not-rfc3339", zulu - std::chrono::seconds(15)));
 
 	const vector<string> invalid_expirations {
 	    "",                                  "2030-06-15T14:30:00",         "2030-06-15 14:30:00Z",
