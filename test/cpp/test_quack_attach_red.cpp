@@ -130,6 +130,22 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 	REQUIRE_THROWS_AS(BuildManagedCatalogAttachSql(credential, ""), InvalidInputException);
 }
 
+TEST_CASE("Managed catalog credential vending stays inside the OPAQUE secrets boundary",
+          "[quack][credentials][opaque]") {
+	const string catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	REQUIRE(ManagedCatalogCredentialUrl("https://host/secrets", catalog_id) ==
+	        "https://host/secrets/quack/credentials?catalog_id=" + catalog_id);
+	REQUIRE(ManagedCatalogCredentialUrl("https://host:8443/v1/secrets", catalog_id) ==
+	        "https://host:8443/v1/secrets/quack/credentials?catalog_id=" + catalog_id);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/auth", catalog_id), InvalidInputException);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets/trailing", catalog_id),
+	                  InvalidInputException);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets", "not-a-uuid"),
+	                  InvalidInputException);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets", "9A927D1B-30F5-48DA-91EB-AF1492BF31C0"),
+	                  InvalidInputException);
+}
+
 TEST_CASE("Managed catalog credentials are isolated per authenticated connection",
           "[quack][credentials][multitenant]") {
 	const string scope = "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0";

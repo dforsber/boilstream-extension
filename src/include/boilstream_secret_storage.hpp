@@ -36,6 +36,10 @@ bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCre
 //! It is a secret scope only; the network URI remains `quack:<endpoint>`.
 string ManagedCatalogSecretScope(const string &endpoint, const string &catalog_id);
 
+//! Build the signed OPAQUE secrets-API URL used to vend one managed catalog
+//! credential. Rejects non-canonical secrets endpoints and catalog UUIDs.
+string ManagedCatalogCredentialUrl(const string &secrets_endpoint, const string &catalog_id);
+
 //! Build the credential-free ATTACH statement returned by the managed-catalog
 //! PRAGMA. Authorization and placement fields come only from the vended bundle.
 string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &credential, const string &alias);
@@ -358,7 +362,7 @@ private:
 	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);
 
 	//! Quack auto-vend (Phase 2.2): fetch a fresh Quack JWT from the boilstream server
-	//! at GET /auth/api/quack/credentials and materialise it as a `quack`-typed
+	//! at GET /secrets/quack/credentials and materialise it as a `quack`-typed
 	//! KeyValueSecret in the local catalog. Returns a SecretMatch on success, or an
 	//! empty SecretMatch on miss / network failure so the caller can fall back.
 	//! Implements 30s near-expiry refresh (tighter than the generic 5min IsExpired buffer).

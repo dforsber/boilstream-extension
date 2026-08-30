@@ -313,6 +313,18 @@ string ManagedCatalogSecretScope(const string &endpoint, const string &catalog_i
 	return "quack:" + endpoint + "/catalog/" + catalog_id;
 }
 
+string ManagedCatalogCredentialUrl(const string &secrets_endpoint, const string &catalog_id) {
+	const auto secrets_pos = secrets_endpoint.rfind("/secrets");
+	if (secrets_pos == string::npos || secrets_pos + string("/secrets").size() != secrets_endpoint.size()) {
+		throw InvalidInputException("Managed DuckDB credential vending requires the canonical /secrets endpoint");
+	}
+	hugeint_t parsed_catalog_id;
+	if (!UUID::FromString(catalog_id, parsed_catalog_id, true) || UUID::ToString(parsed_catalog_id) != catalog_id) {
+		throw InvalidInputException("Managed DuckDB credential vending requires a canonical catalog UUID");
+	}
+	return secrets_endpoint + "/quack/credentials?catalog_id=" + StringUtil::URLEncode(catalog_id);
+}
+
 static string EscapeManagedAttachLiteral(const string &value) {
 	string escaped;
 	escaped.reserve(value.size());
@@ -3142,7 +3154,8 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 
 	// ---------- Quack auto-vend dispatch (Phase 2.2) ----------
 	// For catalog-qualified TYPE quack lookups, bypass the generic /match endpoint
-	// and call the dedicated GET /auth/api/quack/credentials endpoint.
+	// and call the dedicated GET /secrets/quack/credentials endpoint through the
+	// authenticated OPAQUE channel.
 	// The server returns a structured credential plus dedicated client-only mTLS
 	// identity that we materialise into one KeyValueSecret. Cached secrets
 	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
@@ -3902,8 +3915,9 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 // token, endpoint, canonical scope, and client-only mTLS bundle. The user never
 // types CREATE SECRET or handles the transport identity directly.
 //
-// The endpoint is GET /auth/api/quack/credentials (HS256 JWT, signed
-// server-side). The response shape is:
+// The endpoint is GET /secrets/quack/credentials. The request and response use
+// the existing OPAQUE secrets session; the JWT inside is signed server-side.
+// The response shape is:
 //
 //   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>",
 //     "catalog_id": "<uuid>", "storage_owner_tenant_id": <u32>,
@@ -3940,12 +3954,7 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	if (base_url.empty()) {
 		throw IOException("Managed DuckDB credential vending requires an active Boilstream endpoint");
 	}
-	auto pos = base_url.rfind("/secrets");
-	if (pos == string::npos || pos + string("/secrets").size() != base_url.size()) {
-		throw IOException("Managed DuckDB credential vending requires the canonical /secrets endpoint");
-	}
-	string url =
-	    base_url.substr(0, pos) + "/auth/api/quack/credentials?catalog_id=" + StringUtil::URLEncode(catalog_id);
+	string url = ManagedCatalogCredentialUrl(base_url, catalog_id);
 	url = AppendPlatformParams(url, transaction);
 	const auto response = HttpGetWithState(url, conn_state);
 	ManagedCatalogCredentialEnvelope credential;
