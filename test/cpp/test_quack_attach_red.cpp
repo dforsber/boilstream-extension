@@ -42,6 +42,14 @@
 
 using namespace duckdb;
 
+class BoilstreamInputValidationTestAccess {
+public:
+	static std::chrono::system_clock::time_point ParseExpiresAt(RestApiSecretStorage &storage,
+	                                                            const std::string &expires_at_str) {
+		return storage.ParseExpiresAt(expires_at_str);
+	}
+};
+
 struct QuackAttachFixture {
 	duckdb::unique_ptr<DuckDB> db;
 	duckdb::unique_ptr<RestApiSecretStorage> storage;
@@ -53,6 +61,35 @@ struct QuackAttachFixture {
 		storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "");
 	}
 };
+
+TEST_CASE_METHOD(QuackAttachFixture, "Managed credential expiry accepts RFC3339 UTC offsets",
+                 "[quack][credentials][expiry]") {
+	const auto expired = std::chrono::system_clock::time_point::min();
+	const auto zulu = BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, "2030-06-15T14:30:00Z");
+	const auto utc_offset = BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, "2030-06-15T14:30:00+00:00");
+	const auto positive_offset =
+	    BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, "2030-06-15T16:30:00+02:00");
+	const auto negative_offset =
+	    BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, "2030-06-15T09:30:00-05:00");
+	const auto fractional =
+	    BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, "2030-06-15T14:30:00.123456Z");
+	REQUIRE(zulu != expired);
+	REQUIRE(utc_offset == zulu);
+	REQUIRE(positive_offset == zulu);
+	REQUIRE(negative_offset == zulu);
+	REQUIRE(std::chrono::duration_cast<std::chrono::microseconds>(fractional - zulu).count() == 123456);
+
+	const vector<string> invalid_expirations {
+	    "",                                  "2030-06-15T14:30:00",         "2030-06-15 14:30:00Z",
+	    "2030-02-30T14:30:00Z",             "2030-06-15T14:30:00+00:00trailing",
+	    "2030-06-15T14:30:00 UTC",          "2030-06-15T14:30:00+00",      "2030-06-15T14:30:00+0000",
+	    "2030-06-15T14:30:00+00:00:00",     "2030-06-15T14:30:00+24:00",  "2030-06-15T14:30:00+00:60",
+	    "2030-06-15T14:30:00.Z",            "2030-06-15T14:30:00z",
+	};
+	for (const auto &invalid : invalid_expirations) {
+		REQUIRE(BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, invalid) == expired);
+	}
+}
 
 TEST_CASE("Managed catalog credential envelope requires the complete mTLS bundle", "[quack][credentials][mtls]") {
 	const string valid = R"json({

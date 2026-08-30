@@ -22,6 +22,7 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/random_engine.hpp"
@@ -2138,57 +2139,67 @@ unique_ptr<BaseSecret> RestApiSecretStorage::DeserializeSecret(const string &jso
 }
 
 std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const string &expires_at_str) {
-	// Parse ISO 8601 UTC timestamp (e.g., "2025-10-06T15:30:00Z")
-	// Format: YYYY-MM-DDTHH:MM:SSZ
-	std::tm tm = {};
+	// The credential contract is RFC3339, including an explicit UTC designator
+	// or numeric offset. Use DuckDB's parser so Z, +00:00, fractional seconds,
+	// calendar validation, and offset normalization follow one implementation.
+	if (expires_at_str.size() < 20 || expires_at_str[4] != '-' || expires_at_str[7] != '-' ||
+	    expires_at_str[10] != 'T' || expires_at_str[13] != ':' || expires_at_str[16] != ':') {
+		return std::chrono::system_clock::time_point::min();
+	}
+	idx_t offset_pos = 19;
+	if (expires_at_str[offset_pos] == '.') {
+		offset_pos++;
+		const auto fraction_start = offset_pos;
+		while (offset_pos < expires_at_str.size() && StringUtil::CharacterIsDigit(expires_at_str[offset_pos])) {
+			offset_pos++;
+		}
+		if (offset_pos == fraction_start) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	}
+	if (offset_pos >= expires_at_str.size()) {
+		return std::chrono::system_clock::time_point::min();
+	}
+	if (expires_at_str[offset_pos] == 'Z') {
+		if (offset_pos + 1 != expires_at_str.size()) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	} else {
+		if ((expires_at_str[offset_pos] != '+' && expires_at_str[offset_pos] != '-') ||
+		    offset_pos + 6 != expires_at_str.size() || expires_at_str[offset_pos + 3] != ':' ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 1]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 2]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 4]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 5])) {
+			return std::chrono::system_clock::time_point::min();
+		}
+		const auto offset_hours =
+		    (expires_at_str[offset_pos + 1] - '0') * 10 + expires_at_str[offset_pos + 2] - '0';
+		const auto offset_minutes =
+		    (expires_at_str[offset_pos + 4] - '0') * 10 + expires_at_str[offset_pos + 5] - '0';
+		if (offset_hours > 23 || offset_minutes > 59) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	}
 
-	// Manual parsing since std::get_time is not available in C++11
-	int year, month, day, hour, minute, second;
-	char t_sep, z_suffix;
-
-	std::istringstream ss(expires_at_str);
-	ss >> year >> std::noskipws >> std::skipws;
-	ss.ignore(1); // skip '-'
-	ss >> month;
-	ss.ignore(1); // skip '-'
-	ss >> day >> t_sep >> hour;
-	ss.ignore(1); // skip ':'
-	ss >> minute;
-	ss.ignore(1); // skip ':'
-	ss >> second >> z_suffix;
-
-	if (ss.fail() || t_sep != 'T' || z_suffix != 'Z') {
-		// If parsing fails, return a time in the past (already expired)
+	timestamp_t parsed;
+	bool has_offset = false;
+	string_t timezone(nullptr, 0);
+	const auto result = Timestamp::TryConvertTimestampTZ(expires_at_str.c_str(), expires_at_str.size(), parsed, true,
+	                                                     has_offset, timezone);
+	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 ||
+	    !Timestamp::IsFinite(parsed)) {
 		return std::chrono::system_clock::time_point::min();
 	}
 
-	tm.tm_year = year - 1900;
-	tm.tm_mon = month - 1;
-	tm.tm_mday = day;
-	tm.tm_hour = hour;
-	tm.tm_min = minute;
-	tm.tm_sec = second;
-	tm.tm_isdst = 0;
-
-	// Convert to time_point (cross-platform UTC conversion)
-	// timegm() is POSIX but not portable to Windows
-	// Manual UTC calculation: seconds since epoch (1970-01-01 00:00:00)
-	time_t time_t_val = 0;
-
-#ifdef _WIN32
-	// Windows: use _mkgmtime
-	time_t_val = _mkgmtime(&tm);
-#else
-	// POSIX: use timegm
-	time_t_val = timegm(&tm);
-#endif
-
-	if (time_t_val == -1) {
-		// Invalid time, return expired
+	using clock_duration = std::chrono::system_clock::duration;
+	const auto min_micros = std::chrono::duration<long double, std::micro>(clock_duration::min()).count();
+	const auto max_micros = std::chrono::duration<long double, std::micro>(clock_duration::max()).count();
+	if (static_cast<long double>(parsed.value) < min_micros || static_cast<long double>(parsed.value) > max_micros) {
 		return std::chrono::system_clock::time_point::min();
 	}
-
-	return std::chrono::system_clock::from_time_t(time_t_val);
+	return std::chrono::system_clock::time_point(
+	    std::chrono::duration_cast<clock_duration>(std::chrono::microseconds(parsed.value)));
 }
 
 bool RestApiSecretStorage::IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state) {
