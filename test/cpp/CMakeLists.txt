@@ -106,9 +106,9 @@ add_executable(
 target_include_directories(
   boilstream_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_test PRIVATE BOILSTREAM_DEBUG)
@@ -164,7 +164,7 @@ add_executable(boilstream_integration_test test_boilstream_integration.cpp)
 target_include_directories(
   boilstream_integration_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include)
+          ${DUCKDB_SOURCE_DIR}/src/include)
 
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_integration_test PRIVATE BOILSTREAM_DEBUG)
@@ -214,9 +214,9 @@ add_executable(
 target_include_directories(
   boilstream_crypto_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_crypto_test PRIVATE BOILSTREAM_DEBUG)
@@ -239,9 +239,9 @@ add_executable(
 target_include_directories(
   boilstream_conformance_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_conformance_test PRIVATE BOILSTREAM_DEBUG)
@@ -263,9 +263,9 @@ add_executable(
 target_include_directories(
   boilstream_encryption_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for OPAQUE authentication flows
 target_compile_definitions(boilstream_encryption_test PRIVATE BOILSTREAM_DEBUG)
@@ -286,9 +286,9 @@ add_executable(
 target_include_directories(
   boilstream_catalog_version_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for catalog version operations
 target_compile_definitions(boilstream_catalog_version_test
@@ -309,7 +309,7 @@ add_executable(boilstream_connection_state_test
 target_include_directories(
   boilstream_connection_state_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include)
+          ${DUCKDB_SOURCE_DIR}/src/include)
 
 # Enable debug logging
 target_compile_definitions(boilstream_connection_state_test
@@ -340,9 +340,9 @@ add_executable(
 target_include_directories(
   session_routing_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 target_compile_definitions(session_routing_test PRIVATE BOILSTREAM_DEBUG)
 
@@ -359,9 +359,9 @@ add_executable(
 target_include_directories(
   input_validation_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/src/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/mbedtls/include
-          ${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb/third_party/yyjson/include)
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 
 # Enable debug logging for input validation testing
 target_compile_definitions(input_validation_test PRIVATE BOILSTREAM_DEBUG)
