@@ -287,22 +287,20 @@ bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCre
 		out.storage_owner_tenant_id = static_cast<uint32_t>(yyjson_get_uint(owner));
 	}
 	out.catalog_group = SafeGetStr(yyjson_obj_get(root, "catalog_group"));
-	auto identity = yyjson_obj_get(root, "transport_identity");
-	if (identity && yyjson_is_obj(identity)) {
-		out.client_certificate_pem = SafeGetStr(yyjson_obj_get(identity, "client_certificate_pem"));
-		out.client_private_key_pem = SafeGetStr(yyjson_obj_get(identity, "client_private_key_pem"));
-		out.server_ca_pem = SafeGetStr(yyjson_obj_get(identity, "server_ca_pem"));
-	}
+	// Client identity is the short-lived capability. Reject the obsolete mTLS
+	// envelope explicitly so a compromised server cannot inject a reusable
+	// client private key into the public extension process.
+	const bool contains_client_identity = yyjson_obj_get(root, "transport_identity") ||
+	                                      yyjson_obj_get(root, "client_certificate_pem") ||
+	                                      yyjson_obj_get(root, "client_private_key_pem");
+	out.server_ca_pem = SafeGetStr(yyjson_obj_get(root, "server_ca_pem"));
 	yyjson_doc_free(doc);
 	hugeint_t parsed_catalog_id;
 	const bool canonical_catalog_id = UUID::FromString(out.catalog_id, parsed_catalog_id, true) &&
 	                                  UUID::ToString(parsed_catalog_id) == out.catalog_id;
 	const bool complete = !out.token.empty() && !out.expires_at.empty() && IsManagedCatalogEndpoint(out.endpoint) &&
 	                      canonical_catalog_id && out.storage_owner_tenant_id != 0 && !out.catalog_group.empty() &&
-	                      out.client_certificate_pem.find("-----BEGIN CERTIFICATE-----") != string::npos &&
-	                      (out.client_private_key_pem.find("-----BEGIN PRIVATE KEY-----") != string::npos ||
-	                       out.client_private_key_pem.find("-----BEGIN EC PRIVATE KEY-----") != string::npos ||
-	                       out.client_private_key_pem.find("-----BEGIN RSA PRIVATE KEY-----") != string::npos) &&
+	                      !contains_client_identity &&
 	                      out.server_ca_pem.find("-----BEGIN CERTIFICATE-----") != string::npos;
 	if (!complete) {
 		out = ManagedCatalogCredentialEnvelope {};
@@ -3928,8 +3926,8 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 // DuckDB's secret manager calls LookupSecret with a catalog-qualified managed
 // scope. We intercept that, hit the BoilStream server's dedicated credential
 // endpoint, and materialise a KeyValueSecret holding the
-// token, endpoint, canonical scope, and client-only mTLS bundle. The user never
-// types CREATE SECRET or handles the transport identity directly.
+// token, endpoint, canonical scope, and public server trust. The user never
+// types CREATE SECRET or handles transport credentials directly.
 //
 // The endpoint is GET /secrets/quack/credentials. The request and response use
 // the existing OPAQUE secrets session; the JWT inside is signed server-side.
@@ -3937,9 +3935,7 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 //
 //   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>",
 //     "catalog_id": "<uuid>", "storage_owner_tenant_id": <u32>,
-//     "catalog_group": "<group>",
-//     "transport_identity": { "client_certificate_pem": "...",
-//       "client_private_key_pem": "...", "server_ca_pem": "..." } }
+//     "catalog_group": "<group>", "server_ca_pem": "..." }
 //
 // We treat the JWT as opaque — server-side bridge verifies it.
 // ---------------------------------------------------------------------------
@@ -4007,13 +4003,8 @@ SecretMatch RestApiSecretStorage::BuildManagedCatalogSecretMatch(const string &s
 	secret->secret_map["catalog_id"] = Value(credential.catalog_id);
 	secret->secret_map["storage_owner_tenant_id"] = Value::UINTEGER(credential.storage_owner_tenant_id);
 	secret->secret_map["catalog_group"] = Value(credential.catalog_group);
-	secret->secret_map["client_certificate_pem"] = Value(credential.client_certificate_pem);
-	secret->secret_map["client_private_key_pem"] = Value(credential.client_private_key_pem);
 	secret->secret_map["server_ca_pem"] = Value(credential.server_ca_pem);
 	secret->redact_keys.insert("token");
-	secret->redact_keys.insert("client_certificate_pem");
-	secret->redact_keys.insert("client_private_key_pem");
-	secret->redact_keys.insert("server_ca_pem");
 	unique_ptr<const BaseSecret> immutable_secret = std::move(secret);
 	SecretEntry entry(std::move(immutable_secret));
 	auto best_match = SecretMatch();
@@ -4072,7 +4063,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 
 	// Managed credentials are cached in the authenticated connection state,
 	// never DuckDB's catalog-global secret set. This prevents two tenants in
-	// one process from replacing each other's token or mTLS identity.
+	// one process from replacing each other's capability or server trust.
 	const string secret_name = "__quack__" + path;
 
 	// Check local cache: if we have a non-near-expiry copy, return it.

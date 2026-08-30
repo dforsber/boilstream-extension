@@ -105,7 +105,8 @@ TEST_CASE_METHOD(QuackAttachFixture, "Managed credential expiry accepts RFC3339 
 	}
 }
 
-TEST_CASE("Managed catalog credential envelope requires the complete mTLS bundle", "[quack][credentials][mtls]") {
+TEST_CASE("Managed catalog credential envelope requires server trust and rejects client identity",
+          "[quack][credentials][tls]") {
 	const string valid = R"json({
         "token":"signed-capability",
         "expires_at":"2030-01-01T00:05:00Z",
@@ -113,11 +114,7 @@ TEST_CASE("Managed catalog credential envelope requires the complete mTLS bundle
 		"catalog_id":"9a927d1b-30f5-48da-91eb-af1492bf31c0",
 		"storage_owner_tenant_id":42,
 		"catalog_group":"9a927d1b_30f5_48da_91eb_af1492bf31c0",
-        "transport_identity":{
-          "client_certificate_pem":"-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n",
-          "client_private_key_pem":"-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
-          "server_ca_pem":"-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n"
-        }
+        "server_ca_pem":"-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n"
       })json";
 	ManagedCatalogCredentialEnvelope parsed;
 	REQUIRE(ParseManagedCatalogCredentialEnvelope(valid, parsed));
@@ -125,27 +122,26 @@ TEST_CASE("Managed catalog credential envelope requires the complete mTLS bundle
 	REQUIRE(parsed.endpoint == "pod.example.test:9494");
 	REQUIRE(parsed.catalog_id == "9a927d1b-30f5-48da-91eb-af1492bf31c0");
 	REQUIRE(parsed.storage_owner_tenant_id == 42);
-	REQUIRE(parsed.client_private_key_pem.find("BEGIN PRIVATE KEY") != string::npos);
-
-	for (
-	    const auto &partial :
-	    {string(R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e"})json"),
-	     string(
-	         R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e","transport_identity":{"client_certificate_pem":"-----BEGIN CERTIFICATE-----","client_private_key_pem":"-----BEGIN PRIVATE KEY-----"}})json"),
-	     string(
-	         R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e","transport_identity":{"client_certificate_pem":"not-pem","client_private_key_pem":"-----BEGIN PRIVATE KEY-----","server_ca_pem":"-----BEGIN CERTIFICATE-----"}})json")}) {
-		parsed.token = "must-be-cleared";
-		REQUIRE_FALSE(ParseManagedCatalogCredentialEnvelope(partial, parsed));
-		REQUIRE(parsed.token.empty());
-		REQUIRE(parsed.client_private_key_pem.empty());
-	}
-
+	REQUIRE(parsed.server_ca_pem.find("BEGIN CERTIFICATE") != string::npos);
 	auto replace_once = [](string input, const string &from, const string &to) {
 		auto position = input.find(from);
 		REQUIRE(position != string::npos);
 		input.replace(position, from.size(), to);
 		return input;
 	};
+
+	for (
+	    const auto &partial :
+	    {string(R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e"})json"),
+	     replace_once(valid, "\"server_ca_pem\":\"-----BEGIN CERTIFICATE-----\\nca\\n-----END CERTIFICATE-----\\n\"",
+	                  "\"server_ca_pem\":\"not-pem\""),
+	     replace_once(valid, "\"server_ca_pem\":",
+	                  "\"client_private_key_pem\":\"-----BEGIN PRIVATE KEY-----\",\"server_ca_pem\":"),
+	     replace_once(valid, "\"server_ca_pem\":", "\"transport_identity\":{},\"server_ca_pem\":")}) {
+		parsed.token = "must-be-cleared";
+		REQUIRE_FALSE(ParseManagedCatalogCredentialEnvelope(partial, parsed));
+		REQUIRE(parsed.token.empty());
+	}
 	for (const auto &invalid :
 	     {replace_once(valid, "9a927d1b-30f5-48da-91eb-af1492bf31c0", "9A927D1B-30F5-48DA-91EB-AF1492BF31C0"),
 	      replace_once(valid, "pod.example.test:9494", "https://pod.example.test:9494"),
@@ -169,7 +165,6 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 	credential.storage_owner_tenant_id = 42;
 	credential.catalog_group = "9a927d1b_30f5_48da_91eb_af1492bf31c0";
 	credential.token = "must-not-enter-sql";
-	credential.client_private_key_pem = "must-not-enter-sql-private-key";
 	REQUIRE(ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id) ==
 	        "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0");
 	const auto attach_sql = BuildManagedCatalogAttachSql(credential, "shared \"duckie\"");
@@ -177,7 +172,7 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 	                      "CATALOG_ID '9a927d1b-30f5-48da-91eb-af1492bf31c0', TENANT_ID '42', "
 	                      "CATALOG_GROUP '9a927d1b_30f5_48da_91eb_af1492bf31c0', DISABLE_SSL false)");
 	REQUIRE(attach_sql.find(credential.token) == string::npos);
-	REQUIRE(attach_sql.find(credential.client_private_key_pem) == string::npos);
+	REQUIRE(attach_sql.find("PRIVATE KEY") == string::npos);
 	REQUIRE_THROWS_AS(BuildManagedCatalogAttachSql(credential, ""), InvalidInputException);
 }
 
@@ -202,10 +197,8 @@ TEST_CASE("Managed catalog credentials are isolated per authenticated connection
 	const string scope = "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0";
 	ManagedCatalogCredentialEnvelope owner;
 	owner.token = "owner-token";
-	owner.client_private_key_pem = "owner-key";
 	ManagedCatalogCredentialEnvelope member = owner;
 	member.token = "member-token";
-	member.client_private_key_pem = "member-key";
 
 	BoilstreamConnectionState owner_state;
 	BoilstreamConnectionState member_state;
@@ -215,10 +208,8 @@ TEST_CASE("Managed catalog credentials are isolated per authenticated connection
 	ManagedCatalogCredentialEnvelope loaded;
 	REQUIRE(owner_state.TryGetManagedCatalogCredential(scope, loaded));
 	REQUIRE(loaded.token == "owner-token");
-	REQUIRE(loaded.client_private_key_pem == "owner-key");
 	REQUIRE(member_state.TryGetManagedCatalogCredential(scope, loaded));
 	REQUIRE(loaded.token == "member-token");
-	REQUIRE(loaded.client_private_key_pem == "member-key");
 
 	owner.token = "rotated-owner-token";
 	owner_state.StoreManagedCatalogCredential(scope, owner);
@@ -255,8 +246,6 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	managed.catalog_id = catalog_id;
 	managed.storage_owner_tenant_id = 42;
 	managed.catalog_group = "9a927d1b_30f5_48da_91eb_af1492bf31c0";
-	managed.client_certificate_pem = "-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n";
-	managed.client_private_key_pem = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n";
 	managed.server_ca_pem = "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n";
 	session.StoreManagedCatalogCredential(catalog_scope, managed);
 	{
@@ -272,6 +261,9 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	auto &kv = dynamic_cast<const KeyValueSecret &>(match.GetSecret());
 	REQUIRE(kv.secret_map.at("token").ToString() == "managed-catalog-token");
 	REQUIRE(kv.secret_map.at("catalog_id").ToString() == catalog_id);
+	REQUIRE(kv.secret_map.at("server_ca_pem").ToString().find("BEGIN CERTIFICATE") != string::npos);
+	REQUIRE(kv.secret_map.find("client_certificate_pem") == kv.secret_map.end());
+	REQUIRE(kv.secret_map.find("client_private_key_pem") == kv.secret_map.end());
 }
 
 TEST_CASE("Catalog-qualified managed lookup never falls back to a broader user secret",
