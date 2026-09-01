@@ -834,7 +834,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 static string AttachManagedDucklake(ClientContext &context, const FunctionParameters &params) {
 	if constexpr (RestApiSecretStorage::IsWasmMode()) {
 		throw NotImplementedException(
-		    "boilstream_attach_ducklake requires native DuckDB client mTLS and is not available in DuckDB-WASM");
+		    "boilstream_attach_ducklake requires native DuckDB and is not available in DuckDB-WASM");
 	}
 	if (params.values.size() != 2 || params.values[0].IsNull() || params.values[1].IsNull()) {
 		throw InvalidInputException("boilstream_attach_ducklake requires catalog_id and alias");

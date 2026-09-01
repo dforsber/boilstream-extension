@@ -3170,8 +3170,8 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	// For catalog-qualified TYPE quack lookups, bypass the generic /match endpoint
 	// and call the dedicated GET /secrets/quack/credentials endpoint through the
 	// authenticated OPAQUE channel.
-	// The server returns a structured credential plus dedicated client-only mTLS
-	// identity that we materialise into one KeyValueSecret. Cached secrets
+	// The server returns a catalog-scoped capability plus public server trust
+	// that we materialise into one KeyValueSecret. Cached secrets
 	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
 	// used by IsExpired, because Quack JWTs are short-lived).
 	if (StringUtil::Lower(type) == "quack") {
