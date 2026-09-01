@@ -22,6 +22,7 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/random_engine.hpp"
@@ -286,22 +287,20 @@ bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCre
 		out.storage_owner_tenant_id = static_cast<uint32_t>(yyjson_get_uint(owner));
 	}
 	out.catalog_group = SafeGetStr(yyjson_obj_get(root, "catalog_group"));
-	auto identity = yyjson_obj_get(root, "transport_identity");
-	if (identity && yyjson_is_obj(identity)) {
-		out.client_certificate_pem = SafeGetStr(yyjson_obj_get(identity, "client_certificate_pem"));
-		out.client_private_key_pem = SafeGetStr(yyjson_obj_get(identity, "client_private_key_pem"));
-		out.server_ca_pem = SafeGetStr(yyjson_obj_get(identity, "server_ca_pem"));
-	}
+	// Client identity is the short-lived capability. Reject the obsolete mTLS
+	// envelope explicitly so a compromised server cannot inject a reusable
+	// client private key into the public extension process.
+	const bool contains_client_identity = yyjson_obj_get(root, "transport_identity") ||
+	                                      yyjson_obj_get(root, "client_certificate_pem") ||
+	                                      yyjson_obj_get(root, "client_private_key_pem");
+	out.server_ca_pem = SafeGetStr(yyjson_obj_get(root, "server_ca_pem"));
 	yyjson_doc_free(doc);
 	hugeint_t parsed_catalog_id;
 	const bool canonical_catalog_id = UUID::FromString(out.catalog_id, parsed_catalog_id, true) &&
 	                                  UUID::ToString(parsed_catalog_id) == out.catalog_id;
 	const bool complete = !out.token.empty() && !out.expires_at.empty() && IsManagedCatalogEndpoint(out.endpoint) &&
 	                      canonical_catalog_id && out.storage_owner_tenant_id != 0 && !out.catalog_group.empty() &&
-	                      out.client_certificate_pem.find("-----BEGIN CERTIFICATE-----") != string::npos &&
-	                      (out.client_private_key_pem.find("-----BEGIN PRIVATE KEY-----") != string::npos ||
-	                       out.client_private_key_pem.find("-----BEGIN EC PRIVATE KEY-----") != string::npos ||
-	                       out.client_private_key_pem.find("-----BEGIN RSA PRIVATE KEY-----") != string::npos) &&
+	                      !contains_client_identity &&
 	                      out.server_ca_pem.find("-----BEGIN CERTIFICATE-----") != string::npos;
 	if (!complete) {
 		out = ManagedCatalogCredentialEnvelope {};
@@ -311,6 +310,18 @@ bool ParseManagedCatalogCredentialEnvelope(const string &json, ManagedCatalogCre
 
 string ManagedCatalogSecretScope(const string &endpoint, const string &catalog_id) {
 	return "quack:" + endpoint + "/catalog/" + catalog_id;
+}
+
+string ManagedCatalogCredentialUrl(const string &secrets_endpoint, const string &catalog_id) {
+	const auto secrets_pos = secrets_endpoint.rfind("/secrets");
+	if (secrets_pos == string::npos || secrets_pos + string("/secrets").size() != secrets_endpoint.size()) {
+		throw InvalidInputException("Managed DuckDB credential vending requires the canonical /secrets endpoint");
+	}
+	hugeint_t parsed_catalog_id;
+	if (!UUID::FromString(catalog_id, parsed_catalog_id, true) || UUID::ToString(parsed_catalog_id) != catalog_id) {
+		throw InvalidInputException("Managed DuckDB credential vending requires a canonical catalog UUID");
+	}
+	return secrets_endpoint + "/quack/credentials?catalog_id=" + StringUtil::URLEncode(catalog_id);
 }
 
 static string EscapeManagedAttachLiteral(const string &value) {
@@ -2126,57 +2137,72 @@ unique_ptr<BaseSecret> RestApiSecretStorage::DeserializeSecret(const string &jso
 }
 
 std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const string &expires_at_str) {
-	// Parse ISO 8601 UTC timestamp (e.g., "2025-10-06T15:30:00Z")
-	// Format: YYYY-MM-DDTHH:MM:SSZ
-	std::tm tm = {};
+	// The credential contract is RFC3339, including an explicit UTC designator
+	// or numeric offset. Use DuckDB's parser so Z, +00:00, fractional seconds,
+	// calendar validation, and offset normalization follow one implementation.
+	if (expires_at_str.size() < 20 || expires_at_str[4] != '-' || expires_at_str[7] != '-' ||
+	    expires_at_str[10] != 'T' || expires_at_str[13] != ':' || expires_at_str[16] != ':') {
+		return std::chrono::system_clock::time_point::min();
+	}
+	idx_t offset_pos = 19;
+	if (expires_at_str[offset_pos] == '.') {
+		offset_pos++;
+		const auto fraction_start = offset_pos;
+		while (offset_pos < expires_at_str.size() && StringUtil::CharacterIsDigit(expires_at_str[offset_pos])) {
+			offset_pos++;
+		}
+		if (offset_pos == fraction_start) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	}
+	if (offset_pos >= expires_at_str.size()) {
+		return std::chrono::system_clock::time_point::min();
+	}
+	if (expires_at_str[offset_pos] == 'Z') {
+		if (offset_pos + 1 != expires_at_str.size()) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	} else {
+		if ((expires_at_str[offset_pos] != '+' && expires_at_str[offset_pos] != '-') ||
+		    offset_pos + 6 != expires_at_str.size() || expires_at_str[offset_pos + 3] != ':' ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 1]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 2]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 4]) ||
+		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 5])) {
+			return std::chrono::system_clock::time_point::min();
+		}
+		const auto offset_hours =
+		    (expires_at_str[offset_pos + 1] - '0') * 10 + expires_at_str[offset_pos + 2] - '0';
+		const auto offset_minutes =
+		    (expires_at_str[offset_pos + 4] - '0') * 10 + expires_at_str[offset_pos + 5] - '0';
+		if (offset_hours > 23 || offset_minutes > 59) {
+			return std::chrono::system_clock::time_point::min();
+		}
+	}
 
-	// Manual parsing since std::get_time is not available in C++11
-	int year, month, day, hour, minute, second;
-	char t_sep, z_suffix;
-
-	std::istringstream ss(expires_at_str);
-	ss >> year >> std::noskipws >> std::skipws;
-	ss.ignore(1); // skip '-'
-	ss >> month;
-	ss.ignore(1); // skip '-'
-	ss >> day >> t_sep >> hour;
-	ss.ignore(1); // skip ':'
-	ss >> minute;
-	ss.ignore(1); // skip ':'
-	ss >> second >> z_suffix;
-
-	if (ss.fail() || t_sep != 'T' || z_suffix != 'Z') {
-		// If parsing fails, return a time in the past (already expired)
+	timestamp_t parsed;
+	bool has_offset = false;
+	string_t timezone(nullptr, 0);
+	const auto result = Timestamp::TryConvertTimestampTZ(expires_at_str.c_str(), expires_at_str.size(), parsed, true,
+	                                                     has_offset, timezone);
+	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 ||
+	    !Timestamp::IsFinite(parsed)) {
 		return std::chrono::system_clock::time_point::min();
 	}
 
-	tm.tm_year = year - 1900;
-	tm.tm_mon = month - 1;
-	tm.tm_mday = day;
-	tm.tm_hour = hour;
-	tm.tm_min = minute;
-	tm.tm_sec = second;
-	tm.tm_isdst = 0;
-
-	// Convert to time_point (cross-platform UTC conversion)
-	// timegm() is POSIX but not portable to Windows
-	// Manual UTC calculation: seconds since epoch (1970-01-01 00:00:00)
-	time_t time_t_val = 0;
-
-#ifdef _WIN32
-	// Windows: use _mkgmtime
-	time_t_val = _mkgmtime(&tm);
-#else
-	// POSIX: use timegm
-	time_t_val = timegm(&tm);
-#endif
-
-	if (time_t_val == -1) {
-		// Invalid time, return expired
+	using clock_duration = std::chrono::system_clock::duration;
+	const auto min_micros = std::chrono::duration<long double, std::micro>(clock_duration::min()).count();
+	const auto max_micros = std::chrono::duration<long double, std::micro>(clock_duration::max()).count();
+	if (static_cast<long double>(parsed.value) < min_micros || static_cast<long double>(parsed.value) > max_micros) {
 		return std::chrono::system_clock::time_point::min();
 	}
+	return std::chrono::system_clock::time_point(
+	    std::chrono::duration_cast<clock_duration>(std::chrono::microseconds(parsed.value)));
+}
 
-	return std::chrono::system_clock::from_time_t(time_t_val);
+bool RestApiSecretStorage::IsManagedCatalogCredentialExpiredAt(const string &expires_at_str,
+                                                               std::chrono::system_clock::time_point now) {
+	return ParseExpiresAt(expires_at_str) <= now;
 }
 
 bool RestApiSecretStorage::IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state) {
@@ -3142,7 +3168,8 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 
 	// ---------- Quack auto-vend dispatch (Phase 2.2) ----------
 	// For catalog-qualified TYPE quack lookups, bypass the generic /match endpoint
-	// and call the dedicated GET /auth/api/quack/credentials endpoint.
+	// and call the dedicated GET /secrets/quack/credentials endpoint through the
+	// authenticated OPAQUE channel.
 	// The server returns a structured credential plus dedicated client-only mTLS
 	// identity that we materialise into one KeyValueSecret. Cached secrets
 	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
@@ -3899,17 +3926,16 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 // DuckDB's secret manager calls LookupSecret with a catalog-qualified managed
 // scope. We intercept that, hit the BoilStream server's dedicated credential
 // endpoint, and materialise a KeyValueSecret holding the
-// token, endpoint, canonical scope, and client-only mTLS bundle. The user never
-// types CREATE SECRET or handles the transport identity directly.
+// token, endpoint, canonical scope, and public server trust. The user never
+// types CREATE SECRET or handles transport credentials directly.
 //
-// The endpoint is GET /auth/api/quack/credentials (HS256 JWT, signed
-// server-side). The response shape is:
+// The endpoint is GET /secrets/quack/credentials. The request and response use
+// the existing OPAQUE secrets session; the JWT inside is signed server-side.
+// The response shape is:
 //
 //   { "token": "<JWT>", "expires_at": "<RFC3339>", "endpoint": "<host:port>",
 //     "catalog_id": "<uuid>", "storage_owner_tenant_id": <u32>,
-//     "catalog_group": "<group>",
-//     "transport_identity": { "client_certificate_pem": "...",
-//       "client_private_key_pem": "...", "server_ca_pem": "..." } }
+//     "catalog_group": "<group>", "server_ca_pem": "..." }
 //
 // We treat the JWT as opaque — server-side bridge verifies it.
 // ---------------------------------------------------------------------------
@@ -3940,12 +3966,7 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	if (base_url.empty()) {
 		throw IOException("Managed DuckDB credential vending requires an active Boilstream endpoint");
 	}
-	auto pos = base_url.rfind("/secrets");
-	if (pos == string::npos || pos + string("/secrets").size() != base_url.size()) {
-		throw IOException("Managed DuckDB credential vending requires the canonical /secrets endpoint");
-	}
-	string url =
-	    base_url.substr(0, pos) + "/auth/api/quack/credentials?catalog_id=" + StringUtil::URLEncode(catalog_id);
+	string url = ManagedCatalogCredentialUrl(base_url, catalog_id);
 	url = AppendPlatformParams(url, transaction);
 	const auto response = HttpGetWithState(url, conn_state);
 	ManagedCatalogCredentialEnvelope credential;
@@ -3955,8 +3976,11 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	if (credential.catalog_id != catalog_id) {
 		throw IOException("Managed DuckDB credential response catalog does not match the requested catalog");
 	}
-	if (ParseExpiresAt(credential.expires_at) <= std::chrono::system_clock::now() + std::chrono::seconds(30)) {
-		throw IOException("Managed DuckDB credential response is expired or too close to expiry");
+	// A capability may intentionally expire in less than the cache's 30-second
+	// refresh window. A freshly vended credential remains usable until its
+	// authoritative expiry; Quack enforces that same boundary during execution.
+	if (IsManagedCatalogCredentialExpiredAt(credential.expires_at, std::chrono::system_clock::now())) {
+		throw IOException("Managed DuckDB credential response is expired");
 	}
 	return credential;
 }
@@ -3979,13 +4003,8 @@ SecretMatch RestApiSecretStorage::BuildManagedCatalogSecretMatch(const string &s
 	secret->secret_map["catalog_id"] = Value(credential.catalog_id);
 	secret->secret_map["storage_owner_tenant_id"] = Value::UINTEGER(credential.storage_owner_tenant_id);
 	secret->secret_map["catalog_group"] = Value(credential.catalog_group);
-	secret->secret_map["client_certificate_pem"] = Value(credential.client_certificate_pem);
-	secret->secret_map["client_private_key_pem"] = Value(credential.client_private_key_pem);
 	secret->secret_map["server_ca_pem"] = Value(credential.server_ca_pem);
 	secret->redact_keys.insert("token");
-	secret->redact_keys.insert("client_certificate_pem");
-	secret->redact_keys.insert("client_private_key_pem");
-	secret->redact_keys.insert("server_ca_pem");
 	unique_ptr<const BaseSecret> immutable_secret = std::move(secret);
 	SecretEntry entry(std::move(immutable_secret));
 	auto best_match = SecretMatch();
@@ -4044,7 +4063,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 
 	// Managed credentials are cached in the authenticated connection state,
 	// never DuckDB's catalog-global secret set. This prevents two tenants in
-	// one process from replacing each other's token or mTLS identity.
+	// one process from replacing each other's capability or server trust.
 	const string secret_name = "__quack__" + path;
 
 	// Check local cache: if we have a non-near-expiry copy, return it.

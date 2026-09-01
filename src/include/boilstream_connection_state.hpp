@@ -22,7 +22,7 @@ namespace duckdb {
 
 //! Complete server-owned credential for one managed catalog. Kept in the
 //! authenticated connection state so concurrent tenants can never overwrite
-//! each other's token or mTLS identity in DuckDB's catalog-global secret set.
+//! each other's capability or server trust in DuckDB's catalog-global secret set.
 struct ManagedCatalogCredentialEnvelope {
 	string token;
 	string expires_at;
@@ -30,8 +30,6 @@ struct ManagedCatalogCredentialEnvelope {
 	string catalog_id;
 	uint32_t storage_owner_tenant_id = 0;
 	string catalog_group;
-	string client_certificate_pem;
-	string client_private_key_pem;
 	string server_ca_pem;
 };
 
@@ -290,7 +288,6 @@ public:
 private:
 	static void SecureZeroManagedCatalogCredential(ManagedCatalogCredentialEnvelope &credential) {
 		SecureZeroString(credential.token);
-		SecureZeroString(credential.client_private_key_pem);
 	}
 
 	void SecureClearManagedCatalogCredentials() {
