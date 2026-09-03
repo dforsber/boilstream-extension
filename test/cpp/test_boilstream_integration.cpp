@@ -14,6 +14,8 @@
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch.hpp>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <fstream>
 #include <thread>
@@ -39,6 +41,25 @@ static string GetBoilstreamExtensionPath() {
 	return "../../../build/release/extension/boilstream/boilstream.duckdb_extension";
 }
 
+static string GetHttpfsExtensionPath() {
+	const char *env_path = std::getenv("BOILSTREAM_HTTPFS_EXTENSION_PATH");
+	if (env_path && strlen(env_path) > 0) {
+		return string(env_path);
+	}
+	return "httpfs";
+}
+
+static string QuoteSqlLiteral(const string &value) {
+	string result = "'";
+	for (auto character : value) {
+		result += character;
+		if (character == '\'') {
+			result += '\'';
+		}
+	}
+	return result + "'";
+}
+
 // Helper to request a new bootstrap token from the user
 // Bootstrap tokens are single-use for security - each test needs a fresh one
 static string RequestNewBootstrapToken(const string &test_name) {
@@ -60,13 +81,13 @@ static string RequestNewBootstrapToken(const string &test_name) {
 }
 
 static void LoadExtensions(Connection &con) {
-	auto httpfs_result = con.Query("LOAD httpfs;");
+	auto httpfs_result = con.Query("LOAD " + QuoteSqlLiteral(GetHttpfsExtensionPath()) + ";");
 	if (httpfs_result->HasError()) {
 		throw std::runtime_error("Failed to load httpfs: " + httpfs_result->GetError());
 	}
 
 	string extension_path = GetBoilstreamExtensionPath();
-	string load_sql = "LOAD '" + extension_path + "';";
+	string load_sql = "LOAD " + QuoteSqlLiteral(extension_path) + ";";
 	auto load_result = con.Query(load_sql);
 	if (load_result->HasError()) {
 		throw std::runtime_error("Failed to load boilstream extension from " + extension_path + ": " +
@@ -84,22 +105,18 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 	Connection con(db);
 
 	SECTION("Load httpfs extension") {
-		auto result = con.Query("LOAD httpfs;");
-		if (result->HasError()) {
-			WARN("httpfs not available: " << result->GetError());
-		} else {
-			REQUIRE_FALSE(result->HasError());
-		}
+		auto result = con.Query("LOAD " + QuoteSqlLiteral(GetHttpfsExtensionPath()) + ";");
+		INFO("httpfs load error: " << result->GetError());
+		REQUIRE_FALSE(result->HasError());
 	}
 
 	SECTION("Load boilstream extension") {
 		string extension_path = GetBoilstreamExtensionPath();
-		string load_sql = "LOAD '" + extension_path + "';";
+		string load_sql = "LOAD " + QuoteSqlLiteral(extension_path) + ";";
 		auto result = con.Query(load_sql);
-
-		if (result->HasError()) {
-			WARN("Boilstream extension not built at " << extension_path);
-		}
+		INFO("boilstream extension path: " << extension_path);
+		INFO("boilstream load error: " << result->GetError());
+		REQUIRE_FALSE(result->HasError());
 	}
 }
 

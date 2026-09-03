@@ -419,7 +419,17 @@ add_test(NAME BoilstreamConnectionStateTests
          COMMAND boilstream_connection_state_test)
 add_test(NAME WasmLockOrderingTests COMMAND wasm_lock_ordering_test)
 add_test(NAME InputValidationTests COMMAND input_validation_test)
-add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test)
+# The CTest lane is deliberately non-interactive: it proves that the exact
+# loadable artifact works in stock DuckDB. Server/OPAQUE cases require
+# single-use credentials and belong to the product and staging gates.
+add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test
+                                                 "[local]")
+set_tests_properties(
+  BoilstreamIntegrationTests
+  PROPERTIES
+    ENVIRONMENT
+    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/httpfs/httpfs.duckdb_extension"
+)
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
