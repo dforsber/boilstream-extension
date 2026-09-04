@@ -394,10 +394,10 @@ target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
                                                     Catch2::Catch2)
 link_rust_dependencies(quack_attach_red_test)
 
-# Quack planner bridge ABI tests exercise the statically linked extension's
-# public C callbacks, including opaque execution-target forwarding and
-# fail-closed output handling.
-add_executable(quack_bridge_test test_quack_bridge.cpp)
+# Quack planner bridge ABI tests compile the bridge source under review rather
+# than silently reusing a possibly stale extension archive from DUCKDB_BUILD_DIR.
+# The archive remains linked for the same full DuckDB dependency surface.
+add_executable(quack_bridge_test test_quack_bridge.cpp ../../src/quack_bridge.cpp)
 
 target_include_directories(
   quack_bridge_test

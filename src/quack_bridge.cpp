@@ -99,14 +99,19 @@ typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint3
 namespace duckdb {
 namespace {
 
-std::mutex &SessionMapMutex() {
-	static std::mutex mutex;
-	return mutex;
-}
+struct SessionRegistry {
+	std::mutex mutex;
+	std::unordered_map<std::string, SessionCtx> sessions;
+};
 
-std::unordered_map<std::string, SessionCtx> &SessionMap() {
-	static std::unordered_map<std::string, SessionCtx> sessions;
-	return sessions;
+SessionRegistry &QuackSessionRegistry() {
+	// Quack closes its final sessions from DuckDB's database-owner callback.
+	// A process-global DuckDB may run that callback during static destruction,
+	// after ordinary function-local statics in this extension were destroyed.
+	// Keep this small registry alive until process reclamation so the callback's
+	// mutex and map always share one valid lifetime.
+	static auto *registry = new SessionRegistry();
+	return *registry;
 }
 
 void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &result) {
@@ -135,8 +140,9 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 			    SessionCtx context;
 			    context.user_id = user_id;
 			    context.capability_bundle = bundle.data();
-			    std::lock_guard<std::mutex> guard(SessionMapMutex());
-			    SessionMap()[session_id] = std::move(context);
+			    auto &registry = QuackSessionRegistry();
+			    std::lock_guard<std::mutex> guard(registry.mutex);
+			    registry.sessions[session_id] = std::move(context);
 			    return true;
 		    } catch (...) {
 			    return false;
@@ -159,17 +165,19 @@ void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &, Vector &re
 
 void BoilstreamQuackDebugSessionCountFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 0);
-	std::lock_guard<std::mutex> guard(SessionMapMutex());
+	auto &registry = QuackSessionRegistry();
+	std::lock_guard<std::mutex> guard(registry.mutex);
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	ConstantVector::GetData<int32_t>(result)[0] = static_cast<int32_t>(SessionMap().size());
+	ConstantVector::GetData<int32_t>(result)[0] = static_cast<int32_t>(registry.sessions.size());
 }
 
 } // namespace
 
 std::pair<SessionCtx, bool> GetQuackSessionCtx(const std::string &session_id) {
-	std::lock_guard<std::mutex> guard(SessionMapMutex());
-	auto found = SessionMap().find(session_id);
-	if (found == SessionMap().end()) {
+	auto &registry = QuackSessionRegistry();
+	std::lock_guard<std::mutex> guard(registry.mutex);
+	auto found = registry.sessions.find(session_id);
+	if (found == registry.sessions.end()) {
 		return {SessionCtx {}, false};
 	}
 	return {found->second, true};
@@ -203,8 +211,9 @@ extern "C" void boilstream_quack_catalog_session_close(const char *session_id) {
 		return;
 	}
 	try {
-		std::lock_guard<std::mutex> guard(duckdb::SessionMapMutex());
-		duckdb::SessionMap().erase(session_id);
+		auto &registry = duckdb::QuackSessionRegistry();
+		std::lock_guard<std::mutex> guard(registry.mutex);
+		registry.sessions.erase(session_id);
 	} catch (...) {
 		// Quack teardown callbacks are no-throw and idempotent.
 	}

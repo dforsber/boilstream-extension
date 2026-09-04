@@ -15,6 +15,7 @@
 #include "quack_bridge.hpp"
 
 #include <cstring>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -177,7 +178,31 @@ struct BridgeDatabase {
 	}
 };
 
+// Register this destructor before the session registry is first used. Process
+// finalization destroys later-registered statics first, so this is a faithful
+// oracle for Quack closing its final sessions while a process-global DuckDB is
+// being destroyed. A destructible session registry makes GetQuackSessionCtx()
+// lock dead state here and terminates the test process after Catch has passed.
+struct LateSessionCloseProbe {
+	~LateSessionCloseProbe() noexcept {
+		boilstream_quack_catalog_session_close(SESSION_ID);
+		try {
+			if (GetQuackSessionCtx(SESSION_ID).second) {
+				std::terminate();
+			}
+		} catch (...) {
+			std::terminate();
+		}
+	}
+};
+
+void ArmLateSessionCloseProbe() {
+	static LateSessionCloseProbe probe;
+	(void)probe;
+}
+
 BridgeDatabase &SharedBridgeDatabase() {
+	ArmLateSessionCloseProbe();
 	static BridgeDatabase database;
 	return database;
 }
@@ -216,6 +241,11 @@ struct BridgeFixture {
 };
 
 } // namespace
+
+TEST_CASE("Session registry remains valid through late process teardown", "[quack][bridge][lifetime]") {
+	(void)SharedBridgeDatabase();
+	REQUIRE(true);
+}
 
 TEST_CASE_METHOD(BridgeFixture, "Planner bridge forwards opaque execution alias independently of rewrite",
                  "[quack][bridge][abi]") {
