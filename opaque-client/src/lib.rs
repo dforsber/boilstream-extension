@@ -13,6 +13,29 @@ type HmacSha256 = Hmac<Sha256>;
 // Import registration module
 mod registration;
 
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    // Miri checks that the allocator layout used by opaque_free_buffer matches
+    // the original allocation, including when the input Vec has spare capacity.
+    #[test]
+    fn ffi_buffer_frees_spare_capacity() {
+        let mut bytes = Vec::with_capacity(128);
+        bytes.extend_from_slice(b"secret");
+        let buffer = OpaqueBuffer::new(bytes);
+        assert_eq!(unsafe { slice::from_raw_parts(buffer.data, buffer.len) }, b"secret");
+        opaque_free_buffer(buffer);
+    }
+
+    #[test]
+    fn ffi_buffer_frees_empty_allocations() {
+        opaque_free_buffer(OpaqueBuffer::new(Vec::with_capacity(128)));
+        opaque_free_buffer(OpaqueBuffer::new(Vec::new()));
+        opaque_free_buffer(OpaqueBuffer::empty());
+    }
+}
+
 // Platform-specific imports
 use std::os::raw::c_char;
 
@@ -71,9 +94,11 @@ pub struct OpaqueBuffer {
 
 impl OpaqueBuffer {
     fn new(data: Vec<u8>) -> Self {
+        // The C ABI carries only a pointer and length, so discard spare capacity
+        // before transferring ownership. Reconstruct the same boxed slice on free.
+        let data = data.into_boxed_slice();
         let len = data.len();
-        let ptr = data.as_ptr() as *mut u8;
-        std::mem::forget(data); // Prevent Rust from freeing the memory
+        let ptr = Box::into_raw(data) as *mut u8;
         OpaqueBuffer { data: ptr, len }
     }
 
@@ -314,10 +339,10 @@ pub extern "C" fn opaque_client_login_finish(
 pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
     if !buffer.data.is_null() {
         unsafe {
-            let mut vec = Vec::from_raw_parts(buffer.data, buffer.len, buffer.len);
+            let mut bytes = Box::from_raw(ptr::slice_from_raw_parts_mut(buffer.data, buffer.len));
             // Zero the memory before dropping
-            vec.zeroize();
-            // Rust will free the memory when the Vec goes out of scope
+            bytes.zeroize();
+            // Rust frees the original allocation when the boxed slice goes out of scope.
         }
     }
 }

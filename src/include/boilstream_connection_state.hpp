@@ -192,7 +192,8 @@ public:
 		// Check expiration with 30 minute buffer
 		auto now = std::chrono::system_clock::now();
 		auto buffer = std::chrono::minutes(30);
-		return (token_expires_at - buffer) > now;
+		// Apply the buffer to now: expiration may be the minimum-time sentinel.
+		return token_expires_at > now + buffer;
 	}
 
 	//! Securely zero a string using volatile writes to prevent compiler optimization
@@ -327,7 +328,7 @@ public:
 		}
 		auto now = std::chrono::system_clock::now();
 		auto buffer = std::chrono::minutes(5);
-		return (it->second - buffer) <= now;
+		return it->second <= now + buffer;
 	}
 
 	//! Clear expiration data for a secret

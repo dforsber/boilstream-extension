@@ -22,6 +22,20 @@
 #include <atomic>
 
 using namespace duckdb;
+
+TEST_CASE("Expiration sentinels never keep credentials valid", "[boilstream][connection][expiry_regression]") {
+	BoilstreamConnectionState state;
+	using Clock = std::chrono::system_clock;
+	const auto expiration = GENERATE(Clock::time_point::min(), Clock::time_point::min() + std::chrono::seconds(1),
+	                                 Clock::now() - std::chrono::hours(1));
+	state.access_token = "test-token";
+	state.session_key = {1, 2, 3};
+	state.token_expires_at = expiration;
+	state.StoreExpiration("catalog", expiration);
+	CHECK_FALSE(state.IsSessionTokenValid());
+	CHECK(state.IsSecretExpired("catalog"));
+}
+
 // Note: Don't use "using namespace std" due to conflicts with duckdb::vector, duckdb::unique_ptr, etc.
 
 //===----------------------------------------------------------------------===//
