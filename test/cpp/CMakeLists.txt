@@ -10,9 +10,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(RUST_LIB_FOUND FALSE)
 set(RUST_LIB_PATH "")
 
-# Use DuckDB libraries from the extension build (not system DuckDB). Honour
-# the workspace's direnv-managed external build when configured, while keeping
-# the repository-local path as the standalone fallback.
+# Use DuckDB libraries from the extension build (not system DuckDB). Honour the
+# workspace's direnv-managed external build when configured, while keeping the
+# repository-local path as the standalone fallback.
 if(DEFINED ENV{DUCKDB_BUILD_DIR} AND NOT "$ENV{DUCKDB_BUILD_DIR}" STREQUAL "")
   set(EXTENSION_BUILD_DIR "$ENV{DUCKDB_BUILD_DIR}")
 else()
@@ -50,7 +50,9 @@ function(resolve_required_extension_artifact variable_name artifact_name)
         "${variable_name} to the exact compatible "
         "${artifact_name}.duckdb_extension artifact.")
   else()
-    set(${variable_name} "${candidate}" PARENT_SCOPE)
+    set(${variable_name}
+        "${candidate}"
+        PARENT_SCOPE)
   endif()
 endfunction()
 
@@ -59,8 +61,8 @@ resolve_required_extension_artifact(BOILSTREAM_QUACK_EXTENSION_PATH quack)
 
 get_filename_component(_httpfs_platform_dir
                        "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" DIRECTORY)
-get_filename_component(_quack_platform_dir
-                       "${BOILSTREAM_QUACK_EXTENSION_PATH}" DIRECTORY)
+get_filename_component(_quack_platform_dir "${BOILSTREAM_QUACK_EXTENSION_PATH}"
+                       DIRECTORY)
 if(NOT _httpfs_platform_dir STREQUAL _quack_platform_dir)
   message(
     FATAL_ERROR
@@ -442,14 +444,15 @@ target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
 link_rust_dependencies(quack_attach_red_test)
 
 # Quack planner bridge ABI tests compile the bridge source under review rather
-# than silently reusing a possibly stale extension archive from DUCKDB_BUILD_DIR.
-# The archive remains linked for the same full DuckDB dependency surface.
-add_executable(quack_bridge_test test_quack_bridge.cpp ../../src/quack_bridge.cpp)
+# than silently reusing a possibly stale extension archive from
+# DUCKDB_BUILD_DIR. The archive remains linked for the same full DuckDB
+# dependency surface.
+add_executable(quack_bridge_test test_quack_bridge.cpp
+                                 ../../src/quack_bridge.cpp)
 
 target_include_directories(
-  quack_bridge_test
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${DUCKDB_SOURCE_DIR}/src/include)
+  quack_bridge_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+                            ${DUCKDB_SOURCE_DIR}/src/include)
 
 target_link_libraries(quack_bridge_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
 link_rust_dependencies(quack_bridge_test)

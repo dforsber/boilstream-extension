@@ -49,8 +49,7 @@ public:
 		return storage.ParseExpiresAt(expires_at_str);
 	}
 
-	static bool IsManagedCatalogCredentialExpiredAt(RestApiSecretStorage &storage,
-	                                                const std::string &expires_at_str,
+	static bool IsManagedCatalogCredentialExpiredAt(RestApiSecretStorage &storage, const std::string &expires_at_str,
 	                                                std::chrono::system_clock::time_point now) {
 		return storage.IsManagedCatalogCredentialExpiredAt(expires_at_str, now);
 	}
@@ -90,15 +89,23 @@ TEST_CASE_METHOD(QuackAttachFixture, "Managed credential expiry accepts RFC3339 
 	    *storage, "2030-06-15T14:30:00+00:00", zulu - std::chrono::milliseconds(1)));
 	REQUIRE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
 	    *storage, "2030-06-15T14:30:00+00:00", zulu));
-	REQUIRE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(
-	    *storage, "not-rfc3339", zulu - std::chrono::seconds(15)));
+	REQUIRE(BoilstreamInputValidationTestAccess::IsManagedCatalogCredentialExpiredAt(*storage, "not-rfc3339",
+	                                                                                 zulu - std::chrono::seconds(15)));
 
 	const vector<string> invalid_expirations {
-	    "",                                  "2030-06-15T14:30:00",         "2030-06-15 14:30:00Z",
-	    "2030-02-30T14:30:00Z",             "2030-06-15T14:30:00+00:00trailing",
-	    "2030-06-15T14:30:00 UTC",          "2030-06-15T14:30:00+00",      "2030-06-15T14:30:00+0000",
-	    "2030-06-15T14:30:00+00:00:00",     "2030-06-15T14:30:00+24:00",  "2030-06-15T14:30:00+00:60",
-	    "2030-06-15T14:30:00.Z",            "2030-06-15T14:30:00z",
+	    "",
+	    "2030-06-15T14:30:00",
+	    "2030-06-15 14:30:00Z",
+	    "2030-02-30T14:30:00Z",
+	    "2030-06-15T14:30:00+00:00trailing",
+	    "2030-06-15T14:30:00 UTC",
+	    "2030-06-15T14:30:00+00",
+	    "2030-06-15T14:30:00+0000",
+	    "2030-06-15T14:30:00+00:00:00",
+	    "2030-06-15T14:30:00+24:00",
+	    "2030-06-15T14:30:00+00:60",
+	    "2030-06-15T14:30:00.Z",
+	    "2030-06-15T14:30:00z",
 	};
 	for (const auto &invalid : invalid_expirations) {
 		REQUIRE(BoilstreamInputValidationTestAccess::ParseExpiresAt(*storage, invalid) == expired);
@@ -130,14 +137,13 @@ TEST_CASE("Managed catalog credential envelope requires server trust and rejects
 		return input;
 	};
 
-	for (
-	    const auto &partial :
-	    {string(R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e"})json"),
-	     replace_once(valid, "\"server_ca_pem\":\"-----BEGIN CERTIFICATE-----\\nca\\n-----END CERTIFICATE-----\\n\"",
-	                  "\"server_ca_pem\":\"not-pem\""),
-	     replace_once(valid, "\"server_ca_pem\":",
-	                  "\"client_private_key_pem\":\"-----BEGIN PRIVATE KEY-----\",\"server_ca_pem\":"),
-	     replace_once(valid, "\"server_ca_pem\":", "\"transport_identity\":{},\"server_ca_pem\":")}) {
+	for (const auto &partial :
+	     {string(R"json({"token":"t","expires_at":"2030-01-01T00:05:00Z","endpoint":"e"})json"),
+	      replace_once(valid, "\"server_ca_pem\":\"-----BEGIN CERTIFICATE-----\\nca\\n-----END CERTIFICATE-----\\n\"",
+	                   "\"server_ca_pem\":\"not-pem\""),
+	      replace_once(valid, "\"server_ca_pem\":",
+	                   "\"client_private_key_pem\":\"-----BEGIN PRIVATE KEY-----\",\"server_ca_pem\":"),
+	      replace_once(valid, "\"server_ca_pem\":", "\"transport_identity\":{},\"server_ca_pem\":")}) {
 		parsed.token = "must-be-cleared";
 		REQUIRE_FALSE(ParseManagedCatalogCredentialEnvelope(partial, parsed));
 		REQUIRE(parsed.token.empty());
@@ -184,10 +190,8 @@ TEST_CASE("Managed catalog credential vending stays inside the OPAQUE secrets bo
 	REQUIRE(ManagedCatalogCredentialUrl("https://host:8443/v1/secrets", catalog_id) ==
 	        "https://host:8443/v1/secrets/quack/credentials?catalog_id=" + catalog_id);
 	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/auth", catalog_id), InvalidInputException);
-	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets/trailing", catalog_id),
-	                  InvalidInputException);
-	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets", "not-a-uuid"),
-	                  InvalidInputException);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets/trailing", catalog_id), InvalidInputException);
+	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets", "not-a-uuid"), InvalidInputException);
 	REQUIRE_THROWS_AS(ManagedCatalogCredentialUrl("https://host/secrets", "9A927D1B-30F5-48DA-91EB-AF1492BF31C0"),
 	                  InvalidInputException);
 }

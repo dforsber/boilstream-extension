@@ -2171,10 +2171,8 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 		    !StringUtil::CharacterIsDigit(expires_at_str[offset_pos + 5])) {
 			return std::chrono::system_clock::time_point::min();
 		}
-		const auto offset_hours =
-		    (expires_at_str[offset_pos + 1] - '0') * 10 + expires_at_str[offset_pos + 2] - '0';
-		const auto offset_minutes =
-		    (expires_at_str[offset_pos + 4] - '0') * 10 + expires_at_str[offset_pos + 5] - '0';
+		const auto offset_hours = (expires_at_str[offset_pos + 1] - '0') * 10 + expires_at_str[offset_pos + 2] - '0';
+		const auto offset_minutes = (expires_at_str[offset_pos + 4] - '0') * 10 + expires_at_str[offset_pos + 5] - '0';
 		if (offset_hours > 23 || offset_minutes > 59) {
 			return std::chrono::system_clock::time_point::min();
 		}
