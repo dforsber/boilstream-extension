@@ -5,6 +5,33 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-05
+
+### Added
+
+- Capability-authenticated managed-catalog attachment for Quack-backed DuckLakes. The trusted
+  planner carries canonical catalog identity, storage-owner placement, typed access mode, and the
+  operation's opaque execution target without exposing product authorization to DuckDB.
+- Post-execute durability notification for successful catalog mutations.
+
+### Changed
+
+- External managed-catalog connections now use normal server-authenticated TLS plus short-lived,
+  catalog-scoped capabilities obtained through the existing OPAQUE session. Reusable client private
+  keys are no longer part of the external credential boundary; node-to-node Raft mTLS is unchanged.
+- Standalone builds and distribution tests now target stock DuckDB v1.5.5.
+
+### Fixed
+
+- Respect short-lived catalog-grant expiry, including RFC 3339 timestamps with timezone offsets.
+- Preserve per-session capability state through late DuckDB shutdown callbacks, avoiding invalid
+  access during process finalization.
+
+### Tests
+
+- Added typed planner/authorizer, execution-target, authorization-denial, session-lifecycle, and
+  stock-DuckDB load compatibility coverage.
+
 ## [0.6.1] - 2026-05-14
 
 ### Added
@@ -666,13 +693,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - yyjson for JSON parsing
 - mbedtls for cryptographic operations
 
-[0.4.1]: https://github.com/yourusername/boilstream-extension/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/yourusername/boilstream-extension/compare/v0.3.5...v0.4.0
-[0.3.5]: https://github.com/yourusername/boilstream-extension/compare/v0.3.4...v0.3.5
-[0.3.4]: https://github.com/yourusername/boilstream-extension/compare/v0.3.3...v0.3.4
-[0.3.3]: https://github.com/yourusername/boilstream-extension/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/yourusername/boilstream-extension/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/yourusername/boilstream-extension/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/yourusername/boilstream-extension/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/yourusername/boilstream-extension/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/yourusername/boilstream-extension/releases/tag/v0.1.0
+[0.7.0]: https://github.com/dforsber/boilstream-extension/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/dforsber/boilstream-extension/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/dforsber/boilstream-extension/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/dforsber/boilstream-extension/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/dforsber/boilstream-extension/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/dforsber/boilstream-extension/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/dforsber/boilstream-extension/compare/v0.3.5...v0.4.0
+[0.3.5]: https://github.com/dforsber/boilstream-extension/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/dforsber/boilstream-extension/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/dforsber/boilstream-extension/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/dforsber/boilstream-extension/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/dforsber/boilstream-extension/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/dforsber/boilstream-extension/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/dforsber/boilstream-extension/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/dforsber/boilstream-extension/releases/tag/v0.1.0
