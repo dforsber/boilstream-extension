@@ -57,6 +57,20 @@ endfunction()
 resolve_required_extension_artifact(BOILSTREAM_HTTPFS_EXTENSION_PATH httpfs)
 resolve_required_extension_artifact(BOILSTREAM_QUACK_EXTENSION_PATH quack)
 
+get_filename_component(_httpfs_platform_dir
+                       "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" DIRECTORY)
+get_filename_component(_quack_platform_dir
+                       "${BOILSTREAM_QUACK_EXTENSION_PATH}" DIRECTORY)
+if(NOT _httpfs_platform_dir STREQUAL _quack_platform_dir)
+  message(
+    FATAL_ERROR
+      "httpfs and quack must come from the same DuckDB version/platform extension directory"
+  )
+endif()
+get_filename_component(_stock_version_dir "${_quack_platform_dir}" DIRECTORY)
+get_filename_component(BOILSTREAM_STOCK_EXTENSION_DIRECTORY
+                       "${_stock_version_dir}" DIRECTORY)
+
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
 file(GLOB_RECURSE RUST_LIB_CANDIDATES
      "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a")
@@ -461,7 +475,7 @@ set_tests_properties(
   BoilstreamIntegrationTests
   PROPERTIES
     ENVIRONMENT
-    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_QUACK_EXTENSION_PATH=${BOILSTREAM_QUACK_EXTENSION_PATH}"
+    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_STOCK_EXTENSION_DIRECTORY=${BOILSTREAM_STOCK_EXTENSION_DIRECTORY}"
 )
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)

@@ -10,7 +10,7 @@
 //   BOILSTREAM_TEST_ENDPOINT - Full endpoint with token (e.g., "https://localhost:4332/secrets:TOKEN")
 //   BOILSTREAM_EXTENSION_PATH - Path to boilstream extension (optional)
 //   BOILSTREAM_HTTPFS_EXTENSION_PATH - Path to the compatible httpfs extension
-//   BOILSTREAM_QUACK_EXTENSION_PATH - Path to the compatible Quack client extension
+//   BOILSTREAM_STOCK_EXTENSION_DIRECTORY - Root containing version/platform artifacts
 //
 //===----------------------------------------------------------------------===//
 
@@ -51,12 +51,12 @@ static string GetHttpfsExtensionPath() {
 	return "httpfs";
 }
 
-static string GetQuackExtensionPath() {
-	const char *env_path = std::getenv("BOILSTREAM_QUACK_EXTENSION_PATH");
-	if (env_path && strlen(env_path) > 0) {
-		return string(env_path);
+static string GetStockExtensionDirectory() {
+	const char *env_path = std::getenv("BOILSTREAM_STOCK_EXTENSION_DIRECTORY");
+	if (!env_path || strlen(env_path) == 0) {
+		throw std::runtime_error("BOILSTREAM_STOCK_EXTENSION_DIRECTORY is required");
 	}
-	return "quack";
+	return string(env_path);
 }
 
 static string QuoteSqlLiteral(const string &value) {
@@ -91,14 +91,10 @@ static string RequestNewBootstrapToken(const string &test_name) {
 }
 
 static void LoadExtensions(Connection &con) {
-	auto quack_result = con.Query("LOAD " + QuoteSqlLiteral(GetQuackExtensionPath()) + ";");
-	if (quack_result->HasError()) {
-		throw std::runtime_error("Failed to load Quack client: " + quack_result->GetError());
-	}
-
-	auto httpfs_result = con.Query("LOAD " + QuoteSqlLiteral(GetHttpfsExtensionPath()) + ";");
-	if (httpfs_result->HasError()) {
-		throw std::runtime_error("Failed to load httpfs: " + httpfs_result->GetError());
+	auto extension_directory = con.Query("SET extension_directory = " + QuoteSqlLiteral(GetStockExtensionDirectory()) +
+	                                     "; SET autoinstall_known_extensions = false;");
+	if (extension_directory->HasError()) {
+		throw std::runtime_error("Failed to configure stock extension directory: " + extension_directory->GetError());
 	}
 
 	string extension_path = GetBoilstreamExtensionPath();
@@ -118,14 +114,18 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
+	auto configure = con.Query("SET extension_directory = " + QuoteSqlLiteral(GetStockExtensionDirectory()) +
+	                           "; SET autoinstall_known_extensions = false;");
+	REQUIRE_FALSE(configure->HasError());
 
-	SECTION("Load Quack client extension") {
-		auto result = con.Query("LOAD " + QuoteSqlLiteral(GetQuackExtensionPath()) + ";");
-		INFO("Quack load error: " << result->GetError());
+	SECTION("BoilStream auto-loads the stock Quack client") {
+		string extension_path = GetBoilstreamExtensionPath();
+		auto result = con.Query("LOAD " + QuoteSqlLiteral(extension_path) + ";");
+		INFO("BoilStream load error: " << result->GetError());
 		REQUIRE_FALSE(result->HasError());
 
-		auto secret_type = con.Query(
-		    "SELECT default_provider FROM duckdb_secret_types() WHERE type = 'quack' AND extension = 'quack';");
+		auto secret_type = con.Query("SELECT default_provider FROM duckdb_secret_types() "
+		                             "WHERE type = 'quack' AND extension = 'quack';");
 		INFO("Quack secret type error: " << secret_type->GetError());
 		REQUIRE_FALSE(secret_type->HasError());
 		REQUIRE(secret_type->RowCount() == 1);

@@ -2287,6 +2287,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 		BOILSTREAM_LOG("LoadInternal: WARNING - Failed to auto-load httpfs extension. HTTPS may not work.");
 	}
 
+	// Load the stock Quack client before registering the trusted capability
+	// bridge below. Private BoilStream builds already have Quack loaded
+	// statically; stock DuckDB installs/loads the compatible signed client.
+	BOILSTREAM_LOG("LoadInternal: Attempting to auto-load Quack client extension");
+	if (ExtensionHelper::TryAutoLoadExtension(db, "quack")) {
+		BOILSTREAM_LOG("LoadInternal: Quack client extension loaded successfully");
+	} else {
+		BOILSTREAM_LOG(
+		    "LoadInternal: WARNING - Failed to auto-load Quack client. Managed DuckLake ATTACH may not work.");
+	}
+
 	// Auto-load postgres_scanner extension for postgres secrets (not available in WASM)
 #ifndef __EMSCRIPTEN__
 	BOILSTREAM_LOG("LoadInternal: Attempting to auto-load postgres_scanner extension for postgres secrets");
@@ -2325,17 +2336,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_manager.SetDefaultStorage("boilstream");
 	BOILSTREAM_LOG("LoadInternal: Set boilstream as default persistent storage");
 
-	// Note: the `quack` SecretType is registered by the upstream `quack` extension
+	// The `quack` SecretType is registered by the upstream `quack` extension
 	// itself (RegisterQuackSecretType in quack_extension.cpp). We don't register it
 	// here — duplicate RegisterSecretType throws InternalException. Our Phase 2.2
 	// managed lookup (RestApiSecretStorage::LookupQuackSecret) materializes a
 	// connection-local KeyValueSecret of type "quack" as a SecretMatch; it never
 	// publishes authentication material into DuckDB's catalog-global secret set.
-	// DuckDB's SecretManager doesn't require the registration to live in *our*
-	// extension for that to work. If the user loads boilstream without the quack
-	// extension, the dispatch still runs but the SecretMatch returned is only
-	// consumed by quack-aware code (ATTACH 'quack:...'), which itself requires
-	// the quack extension — so the missing registration won't surface.
 
 	// Register PRAGMA function with PragmaCall to accept parameters
 	// Use temporary LogicalType objects to avoid ODR violations with static const members
