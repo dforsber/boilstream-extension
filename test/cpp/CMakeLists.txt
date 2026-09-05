@@ -24,34 +24,38 @@ else()
   set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
 endif()
 
-# The public extension declares httpfs as a runtime dependency, but DuckDB's
-# extension build does not necessarily build that external dependency locally.
-# Require the integration lane to name the exact compatible artifact it will
-# load instead of silently pointing CTest at a path that may not exist.
+# The public extension uses the stock httpfs and Quack client extensions at
+# runtime, but its standalone build does not necessarily build either external
+# dependency. Require the integration lane to name the exact compatible
+# artifacts it will load instead of inventing paths that may not exist.
 set(BOILSTREAM_HTTPFS_EXTENSION_PATH
     ""
     CACHE FILEPATH "Path to a DuckDB-compatible httpfs.duckdb_extension")
-if(BOILSTREAM_HTTPFS_EXTENSION_PATH STREQUAL "")
-  set(_local_httpfs_extension
-      "${EXTENSION_BUILD_DIR}/extension/httpfs/httpfs.duckdb_extension")
-  if(EXISTS "${_local_httpfs_extension}")
-    set(BOILSTREAM_HTTPFS_EXTENSION_PATH "${_local_httpfs_extension}")
-  else()
+set(BOILSTREAM_QUACK_EXTENSION_PATH
+    ""
+    CACHE FILEPATH "Path to a DuckDB-compatible quack.duckdb_extension")
+
+function(resolve_required_extension_artifact variable_name artifact_name)
+  set(candidate "${${variable_name}}")
+  if(candidate STREQUAL "")
+    set(candidate
+        "${EXTENSION_BUILD_DIR}/extension/${artifact_name}/${artifact_name}.duckdb_extension"
+    )
+  endif()
+  get_filename_component(candidate "${candidate}" REALPATH)
+  if(NOT EXISTS "${candidate}")
     message(
       FATAL_ERROR
-        "The C++ integration tests require httpfs. Set "
-        "BOILSTREAM_HTTPFS_EXTENSION_PATH to the exact compatible "
-        "httpfs.duckdb_extension artifact.")
+        "The C++ integration tests require ${artifact_name}. Set "
+        "${variable_name} to the exact compatible "
+        "${artifact_name}.duckdb_extension artifact.")
+  else()
+    set(${variable_name} "${candidate}" PARENT_SCOPE)
   endif()
-endif()
-get_filename_component(BOILSTREAM_HTTPFS_EXTENSION_PATH
-                       "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" REALPATH)
-if(NOT EXISTS "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
-  message(
-    FATAL_ERROR
-      "BOILSTREAM_HTTPFS_EXTENSION_PATH does not exist: "
-      "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
-endif()
+endfunction()
+
+resolve_required_extension_artifact(BOILSTREAM_HTTPFS_EXTENSION_PATH httpfs)
+resolve_required_extension_artifact(BOILSTREAM_QUACK_EXTENSION_PATH quack)
 
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
 file(GLOB_RECURSE RUST_LIB_CANDIDATES
@@ -457,7 +461,7 @@ set_tests_properties(
   BoilstreamIntegrationTests
   PROPERTIES
     ENVIRONMENT
-    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}"
+    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_QUACK_EXTENSION_PATH=${BOILSTREAM_QUACK_EXTENSION_PATH}"
 )
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)

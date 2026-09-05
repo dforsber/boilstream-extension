@@ -9,6 +9,8 @@
 // Environment Variables:
 //   BOILSTREAM_TEST_ENDPOINT - Full endpoint with token (e.g., "https://localhost:4332/secrets:TOKEN")
 //   BOILSTREAM_EXTENSION_PATH - Path to boilstream extension (optional)
+//   BOILSTREAM_HTTPFS_EXTENSION_PATH - Path to the compatible httpfs extension
+//   BOILSTREAM_QUACK_EXTENSION_PATH - Path to the compatible Quack client extension
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,6 +51,14 @@ static string GetHttpfsExtensionPath() {
 	return "httpfs";
 }
 
+static string GetQuackExtensionPath() {
+	const char *env_path = std::getenv("BOILSTREAM_QUACK_EXTENSION_PATH");
+	if (env_path && strlen(env_path) > 0) {
+		return string(env_path);
+	}
+	return "quack";
+}
+
 static string QuoteSqlLiteral(const string &value) {
 	string result = "'";
 	for (auto character : value) {
@@ -81,6 +91,11 @@ static string RequestNewBootstrapToken(const string &test_name) {
 }
 
 static void LoadExtensions(Connection &con) {
+	auto quack_result = con.Query("LOAD " + QuoteSqlLiteral(GetQuackExtensionPath()) + ";");
+	if (quack_result->HasError()) {
+		throw std::runtime_error("Failed to load Quack client: " + quack_result->GetError());
+	}
+
 	auto httpfs_result = con.Query("LOAD " + QuoteSqlLiteral(GetHttpfsExtensionPath()) + ";");
 	if (httpfs_result->HasError()) {
 		throw std::runtime_error("Failed to load httpfs: " + httpfs_result->GetError());
@@ -103,6 +118,19 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 	config.SetOptionByName("allow_unsigned_extensions", duckdb::Value::BOOLEAN(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
+
+	SECTION("Load Quack client extension") {
+		auto result = con.Query("LOAD " + QuoteSqlLiteral(GetQuackExtensionPath()) + ";");
+		INFO("Quack load error: " << result->GetError());
+		REQUIRE_FALSE(result->HasError());
+
+		auto secret_type = con.Query(
+		    "SELECT default_provider FROM duckdb_secret_types() WHERE type = 'quack' AND extension = 'quack';");
+		INFO("Quack secret type error: " << secret_type->GetError());
+		REQUIRE_FALSE(secret_type->HasError());
+		REQUIRE(secret_type->RowCount() == 1);
+		REQUIRE(secret_type->GetValue(0, 0).ToString() == "config");
+	}
 
 	SECTION("Load httpfs extension") {
 		auto result = con.Query("LOAD " + QuoteSqlLiteral(GetHttpfsExtensionPath()) + ";");
