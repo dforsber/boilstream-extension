@@ -24,6 +24,35 @@ else()
   set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
 endif()
 
+# The public extension declares httpfs as a runtime dependency, but DuckDB's
+# extension build does not necessarily build that external dependency locally.
+# Require the integration lane to name the exact compatible artifact it will
+# load instead of silently pointing CTest at a path that may not exist.
+set(BOILSTREAM_HTTPFS_EXTENSION_PATH
+    ""
+    CACHE FILEPATH "Path to a DuckDB-compatible httpfs.duckdb_extension")
+if(BOILSTREAM_HTTPFS_EXTENSION_PATH STREQUAL "")
+  set(_local_httpfs_extension
+      "${EXTENSION_BUILD_DIR}/extension/httpfs/httpfs.duckdb_extension")
+  if(EXISTS "${_local_httpfs_extension}")
+    set(BOILSTREAM_HTTPFS_EXTENSION_PATH "${_local_httpfs_extension}")
+  else()
+    message(
+      FATAL_ERROR
+        "The C++ integration tests require httpfs. Set "
+        "BOILSTREAM_HTTPFS_EXTENSION_PATH to the exact compatible "
+        "httpfs.duckdb_extension artifact.")
+  endif()
+endif()
+get_filename_component(BOILSTREAM_HTTPFS_EXTENSION_PATH
+                       "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" REALPATH)
+if(NOT EXISTS "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+  message(
+    FATAL_ERROR
+      "BOILSTREAM_HTTPFS_EXTENSION_PATH does not exist: "
+      "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+endif()
+
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
 file(GLOB_RECURSE RUST_LIB_CANDIDATES
      "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a")
@@ -428,7 +457,7 @@ set_tests_properties(
   BoilstreamIntegrationTests
   PROPERTIES
     ENVIRONMENT
-    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/httpfs/httpfs.duckdb_extension"
+    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}"
 )
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
