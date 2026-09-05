@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Respect short-lived catalog-grant expiry, including RFC 3339 timestamps with timezone offsets.
 - Preserve per-session capability state through late DuckDB shutdown callbacks, avoiding invalid
   access during process finalization.
+- Load DuckDB's signed Quack client when BoilStream is loaded, so managed-catalog attachment works
+  without a separate user-issued `LOAD quack` while secrets-only use still works if Quack is absent.
 
 ### Tests
 

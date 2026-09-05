@@ -2291,11 +2291,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// bridge below. Private BoilStream builds already have Quack loaded
 	// statically; stock DuckDB installs/loads the compatible signed client.
 	BOILSTREAM_LOG("LoadInternal: Attempting to auto-load Quack client extension");
-	if (ExtensionHelper::TryAutoLoadExtension(db, "quack")) {
+	try {
+		// BoilStream was explicitly loaded, so load its installed runtime
+		// dependency even when generic query-triggered autoloading is disabled.
+		// AutoLoadExtension still respects DuckDB's autoinstall setting.
+		ExtensionHelper::AutoLoadExtension(db, "quack");
 		BOILSTREAM_LOG("LoadInternal: Quack client extension loaded successfully");
-	} else {
+	} catch (const std::exception &e) {
 		BOILSTREAM_LOG(
-		    "LoadInternal: WARNING - Failed to auto-load Quack client. Managed DuckLake ATTACH may not work.");
+		    "LoadInternal: WARNING - Failed to load Quack client. Managed DuckLake ATTACH may not work: " << e.what());
 	}
 
 	// Auto-load postgres_scanner extension for postgres secrets (not available in WASM)

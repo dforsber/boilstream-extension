@@ -115,7 +115,8 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 	auto configure = con.Query("SET extension_directory = " + QuoteSqlLiteral(GetStockExtensionDirectory()) +
-	                           "; SET autoinstall_known_extensions = false;");
+	                           "; SET autoinstall_known_extensions = false;"
+	                           " SET autoload_known_extensions = false;");
 	REQUIRE_FALSE(configure->HasError());
 
 	SECTION("BoilStream auto-loads the stock Quack client") {
@@ -124,12 +125,33 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 		INFO("BoilStream load error: " << result->GetError());
 		REQUIRE_FALSE(result->HasError());
 
+		auto loaded = con.Query("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'quack';");
+		INFO("Quack extension state error: " << loaded->GetError());
+		REQUIRE_FALSE(loaded->HasError());
+		REQUIRE(loaded->RowCount() == 1);
+		REQUIRE(loaded->GetValue(0, 0).GetValue<bool>());
+
 		auto secret_type = con.Query("SELECT default_provider FROM duckdb_secret_types() "
 		                             "WHERE type = 'quack' AND extension = 'quack';");
 		INFO("Quack secret type error: " << secret_type->GetError());
 		REQUIRE_FALSE(secret_type->HasError());
 		REQUIRE(secret_type->RowCount() == 1);
 		REQUIRE(secret_type->GetValue(0, 0).ToString() == "config");
+	}
+
+	SECTION("BoilStream still loads when the optional Quack client is unavailable") {
+		auto missing_directory = GetStockExtensionDirectory() + "/missing";
+		auto configure_missing = con.Query("SET extension_directory = " + QuoteSqlLiteral(missing_directory) + ";");
+		REQUIRE_FALSE(configure_missing->HasError());
+
+		auto result = con.Query("LOAD " + QuoteSqlLiteral(GetBoilstreamExtensionPath()) + ";");
+		INFO("BoilStream secrets-only load error: " << result->GetError());
+		REQUIRE_FALSE(result->HasError());
+
+		auto loaded = con.Query("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'quack';");
+		REQUIRE_FALSE(loaded->HasError());
+		REQUIRE(loaded->RowCount() == 1);
+		REQUIRE_FALSE(loaded->GetValue(0, 0).GetValue<bool>());
 	}
 
 	SECTION("Load httpfs extension") {
