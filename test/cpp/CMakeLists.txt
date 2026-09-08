@@ -142,8 +142,8 @@ FetchContent_Declare(
   GIT_TAG v2.13.10)
 FetchContent_MakeAvailable(Catch2)
 
-# Add library search paths (must be before add_executable)
-link_directories(/opt/homebrew/lib /usr/local/lib)
+# Native test dependencies above are exact artifacts from the selected build.
+# Do not let Homebrew/local library search paths silently replace those inputs.
 
 # Test executable
 add_executable(

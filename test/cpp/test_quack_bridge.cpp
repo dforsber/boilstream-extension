@@ -25,9 +25,9 @@ using namespace duckdb;
 namespace {
 
 using ExpectedPlannerAdapter = int (*)(const char *, const char *, const char *, uint32_t *, char *, size_t, char *,
-                                       size_t, char *, size_t, char *, size_t);
-using ExpectedAuthorizerAdapter = int (*)(const char *, uint32_t, const char *, const char *, uint32_t *, char *,
-                                          size_t);
+                                       size_t, char *, size_t, char *, size_t, char *, size_t);
+using ExpectedAuthorizerAdapter = int (*)(const char *, uint32_t, const char *, const char *, const char *, uint32_t *,
+                                          char *, size_t);
 static_assert(std::is_same<boilstream_quack_catalog_planner_fn, ExpectedPlannerAdapter>::value,
               "Boilstream host planner ABI changed");
 static_assert(std::is_same<decltype(&boilstream_quack_catalog_plan), ExpectedPlannerAdapter>::value,
@@ -53,6 +53,7 @@ std::string seen_sql;
 std::string seen_authorizer_capability;
 std::string seen_authorizer_catalog;
 std::string seen_authorizer_alias;
+std::string seen_authorizer_read_alias;
 uint32_t seen_authorizer_operation = 0;
 
 bool CopyOutput(char *out, size_t capacity, const char *value) {
@@ -74,16 +75,19 @@ int VerifyJwt(const char *, size_t, char *user_id_out, size_t user_id_capacity, 
 
 int PlanSuccess(const char *capability, const char *declared_catalog_id, const char *sql_in, uint32_t *operation_out,
                 char *catalog_id_out, size_t catalog_id_out_size, char *execution_catalog_alias_out,
-                size_t execution_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *error_out_buf,
+                size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
+                size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *error_out_buf,
                 size_t error_out_size) {
 	planner_inputs_were_clear = operation_out && *operation_out == 0 && catalog_id_out && catalog_id_out[0] == '\0' &&
-	                            execution_catalog_alias_out && execution_catalog_alias_out[0] == '\0' && sql_out_buf &&
+	                            execution_catalog_alias_out && execution_catalog_alias_out[0] == '\0' &&
+	                            read_catalog_alias_out && read_catalog_alias_out[0] == '\0' && sql_out_buf &&
 	                            sql_out_buf[0] == '\0' && error_out_buf && error_out_buf[0] == '\0';
 	seen_capability = capability ? capability : "";
 	seen_declared_catalog = declared_catalog_id ? declared_catalog_id : "";
 	seen_sql = sql_in ? sql_in : "";
 	if (!operation_out || !CopyOutput(catalog_id_out, catalog_id_out_size, CATALOG_ID) ||
 	    !CopyOutput(execution_catalog_alias_out, execution_catalog_alias_out_size, planner_execution_alias) ||
+	    !CopyOutput(read_catalog_alias_out, read_catalog_alias_out_size, "durable-source") ||
 	    !CopyOutput(sql_out_buf, sql_out_size, SQL_OUT)) {
 		CopyOutput(error_out_buf, error_out_size, "test output buffer too small");
 		return -1;
@@ -94,11 +98,13 @@ int PlanSuccess(const char *capability, const char *declared_catalog_id, const c
 
 int PlanDenialWithDirtyOutputs(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                                size_t catalog_id_out_size, char *execution_catalog_alias_out,
-                               size_t execution_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size,
+                               size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
+                               size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size,
                                char *error_out_buf, size_t error_out_size) {
 	*operation_out = 99;
 	CopyOutput(catalog_id_out, catalog_id_out_size, "dirty-catalog");
 	CopyOutput(execution_catalog_alias_out, execution_catalog_alias_out_size, "dirty-alias");
+	CopyOutput(read_catalog_alias_out, read_catalog_alias_out_size, "dirty-read");
 	CopyOutput(sql_out_buf, sql_out_size, "dirty-sql");
 	CopyOutput(error_out_buf, error_out_size, "planner denied exactly");
 	return -7;
@@ -106,43 +112,49 @@ int PlanDenialWithDirtyOutputs(const char *, const char *, const char *, uint32_
 
 int PlanInvalidStatus(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                       size_t catalog_id_out_size, char *execution_catalog_alias_out,
-                      size_t execution_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *, size_t) {
+                      size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
+                      size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *, size_t) {
 	*operation_out = 99;
 	CopyOutput(catalog_id_out, catalog_id_out_size, "dirty-catalog");
 	CopyOutput(execution_catalog_alias_out, execution_catalog_alias_out_size, "dirty-alias");
+	CopyOutput(read_catalog_alias_out, read_catalog_alias_out_size, "dirty-read");
 	CopyOutput(sql_out_buf, sql_out_size, "dirty-sql");
 	return 2;
 }
 
 int PlanThrows(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                size_t catalog_id_out_size, char *execution_catalog_alias_out, size_t execution_catalog_alias_out_size,
-               char *sql_out_buf, size_t sql_out_size, char *, size_t) {
+               char *read_catalog_alias_out, size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size,
+               char *, size_t) {
 	*operation_out = 99;
 	CopyOutput(catalog_id_out, catalog_id_out_size, "dirty-catalog");
 	CopyOutput(execution_catalog_alias_out, execution_catalog_alias_out_size, "dirty-alias");
+	CopyOutput(read_catalog_alias_out, read_catalog_alias_out_size, "dirty-read");
 	CopyOutput(sql_out_buf, sql_out_size, "dirty-sql");
 	throw std::runtime_error("planner exception must not cross C ABI");
 }
 
 int AuthorizeSuccess(const char *capability, uint32_t operation, const char *catalog_id,
-                     const char *execution_catalog_alias, uint32_t *storage_owner_tenant_id_out, char *, size_t) {
+                     const char *execution_catalog_alias, const char *read_catalog_alias,
+                     uint32_t *storage_owner_tenant_id_out, char *, size_t) {
 	seen_authorizer_capability = capability ? capability : "";
 	seen_authorizer_operation = operation;
 	seen_authorizer_catalog = catalog_id ? catalog_id : "";
 	seen_authorizer_alias = execution_catalog_alias ? execution_catalog_alias : "";
+	seen_authorizer_read_alias = read_catalog_alias ? read_catalog_alias : "";
 	*storage_owner_tenant_id_out = 6001;
 	return 0;
 }
 
-int AuthorizeDenial(const char *, uint32_t, const char *, const char *, uint32_t *storage_owner_tenant_id_out,
-                    char *error_out_buf, size_t error_out_size) {
+int AuthorizeDenial(const char *, uint32_t, const char *, const char *, const char *,
+                    uint32_t *storage_owner_tenant_id_out, char *error_out_buf, size_t error_out_size) {
 	*storage_owner_tenant_id_out = 9999;
 	CopyOutput(error_out_buf, error_out_size, "authorizer denied exactly");
 	return -7;
 }
 
-int AuthorizeThrows(const char *, uint32_t, const char *, const char *, uint32_t *storage_owner_tenant_id_out, char *,
-                    size_t) {
+int AuthorizeThrows(const char *, uint32_t, const char *, const char *, const char *,
+                    uint32_t *storage_owner_tenant_id_out, char *, size_t) {
 	*storage_owner_tenant_id_out = 9999;
 	throw std::runtime_error("authorizer exception must not cross C ABI");
 }
@@ -151,21 +163,40 @@ struct PlanOutputs {
 	uint32_t operation = 99;
 	char catalog[128] = "stale-catalog";
 	char alias[192] = "stale-alias";
+	char read_alias[192] = "stale-read";
 	char sql[256] = "stale-sql";
 	char error[128] = "stale-error";
 
 	int Call() {
 		return boilstream_quack_catalog_plan(SESSION_ID, CATALOG_ID, SQL_IN, &operation, catalog, sizeof(catalog),
-		                                     alias, sizeof(alias), sql, sizeof(sql), error, sizeof(error));
+		                                     alias, sizeof(alias), read_alias, sizeof(read_alias), sql, sizeof(sql),
+		                                     error, sizeof(error));
 	}
 
 	void RequireDataCleared() const {
 		REQUIRE(operation == 0);
 		REQUIRE(catalog[0] == '\0');
 		REQUIRE(alias[0] == '\0');
+		REQUIRE(read_alias[0] == '\0');
 		REQUIRE(sql[0] == '\0');
 	}
 };
+
+TEST_CASE("Planner rejects missing paired-source buffers", "[quack_bridge]") {
+	// The fixture/session tests below exercise authenticated adapter dispatch.
+	// Here the raw buffer boundary must reject the missing source even before dispatch.
+	for (const auto capacity : {size_t(0), size_t(192)}) {
+		PlanOutputs outputs;
+		REQUIRE(boilstream_quack_catalog_plan(SESSION_ID, CATALOG_ID, SQL_IN, &outputs.operation, outputs.catalog,
+		                                      sizeof(outputs.catalog), outputs.alias, sizeof(outputs.alias), nullptr,
+		                                      capacity, outputs.sql, sizeof(outputs.sql), outputs.error,
+		                                      sizeof(outputs.error)) == -1);
+		REQUIRE(outputs.operation == 0);
+		REQUIRE(outputs.catalog[0] == '\0');
+		REQUIRE(outputs.alias[0] == '\0');
+		REQUIRE(outputs.sql[0] == '\0');
+	}
+}
 
 struct BridgeDatabase {
 	DuckDB db {nullptr};
@@ -264,6 +295,7 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge forwards opaque execution alias 
 		REQUIRE(outputs.operation == 4);
 		REQUIRE(std::string(outputs.catalog) == CATALOG_ID);
 		REQUIRE(std::string(outputs.alias) == EXECUTION_ALIAS);
+		REQUIRE(std::string(outputs.read_alias) == "durable-source");
 		REQUIRE(std::string(outputs.sql) == SQL_OUT);
 		REQUIRE(outputs.error[0] == '\0');
 	}
@@ -304,8 +336,9 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge clears outputs on denial and inv
 		boilstream_quack_set_catalog_planner(&PlanSuccess);
 		PlanOutputs outputs;
 		REQUIRE(boilstream_quack_catalog_plan(SESSION_ID, CATALOG_ID, SQL_IN, &outputs.operation, outputs.catalog,
-		                                      sizeof(outputs.catalog), outputs.alias, 8, outputs.sql,
-		                                      sizeof(outputs.sql), outputs.error, sizeof(outputs.error)) == -1);
+		                                      sizeof(outputs.catalog), outputs.alias, 8, outputs.read_alias,
+		                                      sizeof(outputs.read_alias), outputs.sql, sizeof(outputs.sql),
+		                                      outputs.error, sizeof(outputs.error)) == -1);
 		REQUIRE(outputs.operation == 0);
 		REQUIRE(outputs.catalog[0] == '\0');
 		REQUIRE(outputs.alias[0] == '\0');
@@ -389,8 +422,9 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge rejects invalid output buffers b
 
 		INFO("invalid output case " << static_cast<int>(invalid));
 		REQUIRE(boilstream_quack_catalog_plan(SESSION_ID, CATALOG_ID, SQL_IN, operation_out, catalog_out,
-		                                      catalog_capacity, alias_out, alias_capacity, sql_out, sql_capacity,
-		                                      error_out, error_capacity) == -1);
+		                                      catalog_capacity, alias_out, alias_capacity, outputs.read_alias,
+		                                      sizeof(outputs.read_alias), sql_out, sql_capacity, error_out,
+		                                      error_capacity) == -1);
 		if (operation_out) {
 			REQUIRE(outputs.operation == 0);
 		}
@@ -420,8 +454,8 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge rejects null input strings with 
 		INFO("null input index " << null_index);
 		REQUIRE(boilstream_quack_catalog_plan(session_id, catalog_id, sql_in, &outputs.operation, outputs.catalog,
 		                                      sizeof(outputs.catalog), outputs.alias, sizeof(outputs.alias),
-		                                      outputs.sql, sizeof(outputs.sql), outputs.error,
-		                                      sizeof(outputs.error)) == -1);
+		                                      outputs.read_alias, sizeof(outputs.read_alias), outputs.sql,
+		                                      sizeof(outputs.sql), outputs.error, sizeof(outputs.error)) == -1);
 		outputs.RequireDataCleared();
 		REQUIRE(std::string(outputs.error) == "Catalog planner received invalid buffers");
 	}
@@ -451,13 +485,14 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge forwards the planner-selected
 	for (const auto alias : {EXECUTION_ALIAS, ""}) {
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, alias, &storage_owner, error,
-		                                           sizeof(error)) == 0);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, alias, "durable-source", &storage_owner,
+		                                           error, sizeof(error)) == 0);
 		REQUIRE(storage_owner == 6001);
 		REQUIRE(error[0] == '\0');
 		REQUIRE(seen_authorizer_capability == CAPABILITY);
 		REQUIRE(seen_authorizer_operation == 4);
 		REQUIRE(seen_authorizer_catalog == CATALOG_ID);
+		REQUIRE(seen_authorizer_read_alias == "durable-source");
 		REQUIRE(seen_authorizer_alias == alias);
 	}
 }
@@ -467,8 +502,8 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner
 		boilstream_quack_set_catalog_authorizer(&AuthorizeDenial);
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
-		                                           sizeof(error)) == -7);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
+		                                           &storage_owner, error, sizeof(error)) == -7);
 		REQUIRE(storage_owner == 0);
 		REQUIRE(std::string(error) == "authorizer denied exactly");
 	}
@@ -476,8 +511,8 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner
 	SECTION("missing authorizer") {
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
-		                                           sizeof(error)) == -1);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
+		                                           &storage_owner, error, sizeof(error)) == -1);
 		REQUIRE(storage_owner == 0);
 		REQUIRE(std::string(error) == "Catalog authorizer is not registered");
 	}
@@ -487,8 +522,8 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner
 		boilstream_quack_catalog_session_close(SESSION_ID);
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
-		                                           sizeof(error)) == -1);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
+		                                           &storage_owner, error, sizeof(error)) == -1);
 		REQUIRE(storage_owner == 0);
 		REQUIRE(std::string(error) == "Quack session capability bundle is missing");
 	}
@@ -498,8 +533,9 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
 		int rc = 0;
-		REQUIRE_NOTHROW(rc = boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS,
-		                                                        &storage_owner, error, sizeof(error)));
+		REQUIRE_NOTHROW(rc =
+		                    boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS,
+		                                                       "durable-source", &storage_owner, error, sizeof(error)));
 		REQUIRE(rc == -1);
 		REQUIRE(storage_owner == 0);
 		REQUIRE(std::string(error) == "Catalog authorizer bridge failed");
@@ -516,8 +552,8 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge rejects every invalid require
 		const char *execution_alias = null_index == 2 ? nullptr : EXECUTION_ALIAS;
 		auto owner_out = null_index == 3 ? nullptr : &storage_owner;
 		INFO("null authorizer input index " << null_index);
-		REQUIRE(boilstream_quack_catalog_authorize(session_id, 4, catalog_id, execution_alias, owner_out, error,
-		                                           sizeof(error)) == -1);
+		REQUIRE(boilstream_quack_catalog_authorize(session_id, 4, catalog_id, execution_alias, "durable-source",
+		                                           owner_out, error, sizeof(error)) == -1);
 		if (owner_out) {
 			REQUIRE(storage_owner == 0);
 		}
@@ -526,16 +562,16 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge rejects every invalid require
 
 	SECTION("null error buffer") {
 		uint32_t storage_owner = 9999;
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, nullptr,
-		                                           128) == -1);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
+		                                           &storage_owner, nullptr, 128) == -1);
 		REQUIRE(storage_owner == 0);
 	}
 
 	SECTION("zero error capacity") {
 		uint32_t storage_owner = 9999;
 		char error[128] = "stale-error";
-		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, &storage_owner, error,
-		                                           0) == -1);
+		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
+		                                           &storage_owner, error, 0) == -1);
 		REQUIRE(storage_owner == 0);
 	}
 }

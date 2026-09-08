@@ -35,8 +35,10 @@ void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn);
 typedef int (*boilstream_quack_catalog_planner_fn)(const char *capability_bundle, const char *declared_catalog_id,
                                                    const char *sql_in, uint32_t *operation_out, char *catalog_id_out,
                                                    size_t catalog_id_out_size, char *execution_catalog_alias_out,
-                                                   size_t execution_catalog_alias_out_size, char *sql_out_buf,
-                                                   size_t sql_out_size, char *error_out_buf, size_t error_out_size);
+                                                   size_t execution_catalog_alias_out_size,
+                                                   char *read_catalog_alias_out, size_t read_catalog_alias_out_size,
+                                                   char *sql_out_buf, size_t sql_out_size, char *error_out_buf,
+                                                   size_t error_out_size);
 void boilstream_quack_set_catalog_planner(boilstream_quack_catalog_planner_fn fn);
 
 //! Typed data-plane authorizer. The execution alias is an opaque target selected
@@ -45,6 +47,7 @@ void boilstream_quack_set_catalog_planner(boilstream_quack_catalog_planner_fn fn
 //! physical routing. Returns 0 on allow and nonzero on hard denial.
 typedef int (*boilstream_quack_catalog_authorizer_fn)(const char *capability_bundle, uint32_t operation,
                                                       const char *catalog_id, const char *execution_catalog_alias,
+                                                      const char *read_catalog_alias,
                                                       uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
                                                       size_t error_out_size);
 void boilstream_quack_set_catalog_authorizer(boilstream_quack_catalog_authorizer_fn fn);
@@ -59,10 +62,12 @@ void boilstream_quack_set_post_execute_hook(boilstream_quack_post_execute_fn fn)
 int boilstream_quack_catalog_plan(const char *session_id, const char *declared_catalog_id, const char *sql_in,
                                   uint32_t *operation_out, char *catalog_id_out, size_t catalog_id_out_size,
                                   char *execution_catalog_alias_out, size_t execution_catalog_alias_out_size,
-                                  char *sql_out_buf, size_t sql_out_size, char *error_out_buf, size_t error_out_size);
+                                  char *read_catalog_alias_out, size_t read_catalog_alias_out_size, char *sql_out_buf,
+                                  size_t sql_out_size, char *error_out_buf, size_t error_out_size);
 int boilstream_quack_catalog_authorize(const char *session_id, uint32_t operation, const char *catalog_id,
-                                       const char *execution_catalog_alias, uint32_t *storage_owner_tenant_id_out,
-                                       char *error_out_buf, size_t error_out_size);
+                                       const char *execution_catalog_alias, const char *read_catalog_alias,
+                                       uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
+                                       size_t error_out_size);
 int boilstream_quack_catalog_post_execute(const char *session_id, uint32_t operation, const char *catalog_id,
                                           char *error_out_buf, size_t error_out_size);
 void boilstream_quack_catalog_session_close(const char *session_id);
