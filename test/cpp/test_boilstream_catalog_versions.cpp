@@ -13,6 +13,8 @@
 #include "boilstream_connection_state.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/common/http_util.hpp"
 
 #include <thread>
 #include <chrono>
@@ -83,6 +85,74 @@ struct TestFixture {
 		storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
 	}
 };
+
+// Capture the real polling request after its OPAQUE headers are built. No
+// network or mock authentication acceptance is involved: the request is stopped
+// at DuckDB's HTTP seam, and FetchCatalogVersions handles the transport error.
+class CatalogVersionRecordingHTTPUtil : public HTTPUtil {
+public:
+	struct RecordedRequest {
+		string url;
+		string sequence;
+		bool signed_request;
+	};
+	duckdb::vector<RecordedRequest> requests;
+
+	duckdb::unique_ptr<HTTPParams> InitializeParameters(DatabaseInstance &, const string &) override {
+		return make_uniq<HTTPParams>(*this);
+	}
+
+	duckdb::unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, duckdb::unique_ptr<HTTPClient> &) override {
+		requests.push_back({request.url, request.headers.GetHeaderValue("X-Boilstream-Sequence"),
+		                    !request.headers.GetHeaderValue("X-Boilstream-Signature").empty()});
+		throw IOException("catalog version test captured the outgoing request");
+	}
+};
+
+static duckdb::shared_ptr<CatalogVersionRecordingHTTPUtil> RecordCatalogVersionRequests(TestFixture &fixture) {
+	auto http = make_shared_ptr<CatalogVersionRecordingHTTPUtil>();
+	DBConfig::GetConfig(*fixture.db->instance).SetHTTPUtil(http);
+	fixture.conn_state.access_token = "catalog-version-test-token";
+	fixture.conn_state.session_key = duckdb::vector<uint8_t>(32, 7);
+	fixture.conn_state.region = "eu-west-1";
+	return http;
+}
+
+TEST_CASE("Catalog version polling uses the authenticated product route", "[boilstream][catalog_versions]") {
+	for (const auto &base : {"https://localhost", "https://catalog.example:8443", "https://[::1]:8443",
+	                         "https://gateway.example/product"}) {
+		DYNAMIC_SECTION(base) {
+			TestFixture fixture;
+			auto http = RecordCatalogVersionRequests(fixture);
+			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, string(base) + "/secrets");
+			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+			REQUIRE(http->requests.size() == 1);
+			REQUIRE(http->requests[0].url == string(base) + "/catalog-versions");
+			REQUIRE(http->requests[0].sequence == "0");
+			REQUIRE(http->requests[0].signed_request);
+
+			// A second lookup must not spend another lock-step sequence on a
+			// rate-limited poll, even when the first request failed in transport.
+			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+			REQUIRE(http->requests.size() == 1);
+			REQUIRE(fixture.conn_state.client_sequence == 1);
+		}
+	}
+}
+
+TEST_CASE("Catalog version polling rejects a noncanonical secrets endpoint", "[boilstream][catalog_versions]") {
+	for (const auto &endpoint : {"https://catalog.example", "https://catalog.example/secrets/other",
+	                             "https://catalog.example/secrets?other=value"}) {
+		DYNAMIC_SECTION(endpoint) {
+			TestFixture fixture;
+			auto http = RecordCatalogVersionRequests(fixture);
+			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, endpoint);
+			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+			REQUIRE(http->requests.empty());
+			REQUIRE(fixture.conn_state.client_sequence == 0);
+		}
+	}
+}
 
 //===----------------------------------------------------------------------===//
 // Test: CatalogVersionInfo Struct

@@ -3843,14 +3843,14 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 		return versions;
 	}
 
-	// Build URL: replace /secrets with /api/v1/catalog-versions
-	// endpoint_url is like "https://host/secrets"
-	// We need "https://host/api/v1/catalog-versions"
+	// Use the sibling route protected by the server's OPAQUE middleware.
+	// An unregistered path spends the client's sequence without advancing the
+	// server's sequence, causing the next authenticated request to be rejected.
 	auto pos = base_url.rfind("/secrets");
-	if (pos == string::npos) {
+	if (pos == string::npos || pos + string("/secrets").size() != base_url.size()) {
 		return versions;
 	}
-	string url = base_url.substr(0, pos) + "/api/v1/catalog-versions";
+	string url = base_url.substr(0, pos) + "/catalog-versions";
 
 	string response;
 	try {
