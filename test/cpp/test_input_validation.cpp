@@ -18,6 +18,7 @@
 #include "boilstream_connection_state.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "opaque_client.h"
@@ -35,6 +36,14 @@ using namespace duckdb;
 //===----------------------------------------------------------------------===//
 class BoilstreamInputValidationTestAccess {
 public:
+	static bool IsExpired(RestApiSecretStorage &storage, const string &name, BoilstreamConnectionState &state) {
+		return storage.IsExpired(name, state);
+	}
+
+	static void CheckCatalogVersions(RestApiSecretStorage &storage, BoilstreamConnectionState &state) {
+		storage.CheckCatalogVersions(state);
+	}
+
 	static RestApiSecretStorage::SigningResult SignRequest(RestApiSecretStorage &storage, const std::string &method,
 	                                                       const std::string &url, const std::string &body,
 	                                                       uint64_t timestamp, uint64_t sequence,
@@ -101,6 +110,46 @@ struct InputValidationTestFixture {
 		valid_access_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 	}
 };
+
+TEST_CASE_METHOD(InputValidationTestFixture, "Storage expiration sentinels require refresh",
+                 "[input_validation][expiry_regression]") {
+	BoilstreamConnectionState state;
+	using Clock = std::chrono::system_clock;
+	const auto expiration = GENERATE(Clock::time_point::min(), Clock::time_point::min() + std::chrono::seconds(1));
+	state.StoreExpiration("catalog", expiration);
+	CHECK(BoilstreamInputValidationTestAccess::IsExpired(*storage, "catalog", state));
+}
+
+TEST_CASE_METHOD(InputValidationTestFixture, "Initial catalog version check is not rate limited",
+                 "[input_validation][expiry_regression]") {
+	BoilstreamConnectionState state;
+	const auto before = std::chrono::system_clock::now();
+	// With no session the fetch fails locally, but the initial poll must still be attempted.
+	BoilstreamInputValidationTestAccess::CheckCatalogVersions(*storage, state);
+	CHECK(state.last_version_check >= before);
+	const auto last_check = state.last_version_check;
+	BoilstreamInputValidationTestAccess::CheckCatalogVersions(*storage, state);
+	CHECK(state.last_version_check == last_check);
+}
+
+TEST_CASE_METHOD(InputValidationTestFixture, "Managed catalog forced expiration rejects cached token",
+                 "[input_validation][expiry_regression]") {
+	Connection connection(*db);
+	connection.BeginTransaction();
+	auto &state = storage->GetOrCreateSession("expiry-test");
+	storage->SetActiveSessionKeyForConnection(connection.context->GetConnectionId(), "expiry-test");
+	const string catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	const auto scope = ManagedCatalogSecretScope("pod.example.test:9494", catalog_id);
+	ManagedCatalogCredentialEnvelope credential;
+	credential.token = "expired-token";
+	credential.catalog_id = catalog_id;
+	state.StoreManagedCatalogCredential(scope, credential);
+	state.StoreExpiration("__quack__" + scope, std::chrono::system_clock::time_point::min());
+	// No endpoint: re-vending fails locally and must not resurrect the cached token.
+	storage->SetEndpoint("");
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*connection.context);
+	CHECK_FALSE(storage->LookupSecret(scope, "quack", &transaction).HasMatch());
+}
 
 //===----------------------------------------------------------------------===//
 // SECTION 1: Region Validation Tests

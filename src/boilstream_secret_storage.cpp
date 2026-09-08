@@ -2204,19 +2204,7 @@ bool RestApiSecretStorage::IsManagedCatalogCredentialExpiredAt(const string &exp
 }
 
 bool RestApiSecretStorage::IsExpired(const string &secret_name, BoilstreamConnectionState &conn_state) {
-	lock_guard<mutex> lock(conn_state.expiration_lock);
-
-	auto it = conn_state.secret_expiration.find(secret_name);
-	if (it == conn_state.secret_expiration.end()) {
-		// No expiration data, consider expired (need to fetch)
-		return true;
-	}
-
-	// Consider expired if less than 5 minutes remaining
-	// This ensures proactive refresh before credentials become invalid
-	const auto BUFFER = std::chrono::minutes(5);
-	auto now = std::chrono::system_clock::now();
-	return now >= (it->second - BUFFER);
+	return conn_state.IsSecretExpired(secret_name);
 }
 
 void RestApiSecretStorage::StoreExpiration(const string &secret_name, const string &expires_at_str,
@@ -4083,7 +4071,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 		// expire-by-setting-time semantics, but as a read-side check.
 		if (expires_at != std::chrono::system_clock::time_point()) {
 			auto now = std::chrono::system_clock::now();
-			if (now < expires_at - std::chrono::seconds(30)) {
+			if (expires_at > now + std::chrono::seconds(30)) {
 				BOILSTREAM_LOG("LookupQuackSecret EXIT: cached, fresh (>30s remaining)");
 				return BuildManagedCatalogSecretMatch(path, credential);
 			}
@@ -4127,8 +4115,8 @@ void RestApiSecretStorage::CheckCatalogVersions(BoilstreamConnectionState &conn_
 	auto now = std::chrono::system_clock::now();
 	{
 		lock_guard<mutex> lock(conn_state.version_lock);
-		auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - conn_state.last_version_check).count();
-		if (elapsed < VERSION_CHECK_INTERVAL_SECONDS) {
+		// Compare timestamps directly: subtracting the initial minimum sentinel overflows.
+		if (conn_state.last_version_check > now - std::chrono::seconds(VERSION_CHECK_INTERVAL_SECONDS)) {
 			return; // Too soon, skip check
 		}
 		conn_state.last_version_check = now;

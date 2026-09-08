@@ -92,7 +92,7 @@ TEST_CASE("registration_build_totp_uri - default issuer", "[registration][ffi]")
 	REQUIRE(result < 512);
 
 	std::string uri(uri_buffer, result);
-	REQUIRE(uri.find("otpauth://totp/BoilStream:alice@example.com") == 0);
+	REQUIRE(uri.find("otpauth://totp/BoilStream:alice%40example.com") == 0);
 	REQUIRE(uri.find("secret=JBSWY3DPEHPK3PXP") != std::string::npos);
 	REQUIRE(uri.find("issuer=BoilStream") != std::string::npos);
 	REQUIRE(uri.find("algorithm=SHA512") != std::string::npos);
@@ -111,7 +111,7 @@ TEST_CASE("registration_build_totp_uri - custom issuer", "[registration][ffi]") 
 	REQUIRE(result > 0);
 
 	std::string uri(uri_buffer, result);
-	REQUIRE(uri.find("otpauth://totp/MyCompany:bob@company.com") == 0);
+	REQUIRE(uri.find("otpauth://totp/MyCompany:bob%40company.com") == 0);
 	REQUIRE(uri.find("secret=SECRET123") != std::string::npos);
 	REQUIRE(uri.find("issuer=MyCompany") != std::string::npos);
 }
@@ -154,7 +154,7 @@ TEST_CASE("registration_build_totp_uri - special characters in email", "[registr
 	REQUIRE(result > 0);
 
 	std::string uri(uri_buffer, result);
-	REQUIRE(uri.find("user+tag@example.com") != std::string::npos);
+	REQUIRE(uri.find("user%2Btag%40example.com") != std::string::npos);
 }
 
 TEST_CASE("registration_build_totp_uri - verify null termination", "[registration][ffi]") {
@@ -195,7 +195,7 @@ TEST_CASE("registration flow validation", "[registration][integration]") {
 
 	std::string uri(uri_buffer, uri_len);
 	REQUIRE(uri.find("otpauth://totp/") == 0);
-	REQUIRE(uri.find(email) != std::string::npos);
+	REQUIRE(uri.find("newuser%40example.com") != std::string::npos);
 	REQUIRE(uri.find(secret) != std::string::npos);
 }
 

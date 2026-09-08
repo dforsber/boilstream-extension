@@ -151,7 +151,7 @@ pub fn validate_email(email: &str) -> Result<(), RegistrationError> {
 
 /// Validate password strength (minimum 12 characters)
 pub fn validate_password(password: &str) -> Result<(), RegistrationError> {
-    if password.len() < 12 {
+    if password.chars().count() < 12 {
         return Err(RegistrationError::WeakPassword);
     }
     Ok(())
@@ -160,11 +160,28 @@ pub fn validate_password(password: &str) -> Result<(), RegistrationError> {
 /// Build TOTP URI for QR code generation
 /// Format: otpauth://totp/BoilStream:email?secret=SECRET&issuer=BoilStream&algorithm=SHA512&digits=6&period=30
 pub fn build_totp_uri(email: &str, secret: &str, issuer: Option<&str>) -> String {
-    let issuer = issuer.unwrap_or("BoilStream");
+    let issuer = encode_uri_component(issuer.unwrap_or("BoilStream"));
+    let email = encode_uri_component(email);
+    let secret = encode_uri_component(secret);
     format!(
         "otpauth://totp/{}:{}?secret={}&issuer={}&algorithm=SHA512&digits=6&period=30",
         issuer, email, secret, issuer
     )
+}
+
+fn encode_uri_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 /// Parse error code from signup response
@@ -221,7 +238,7 @@ mod tests {
     fn test_build_totp_uri_default_issuer() {
         let uri = build_totp_uri("alice@example.com", "JBSWY3DPEHPK3PXP", None);
 
-        assert!(uri.starts_with("otpauth://totp/BoilStream:alice@example.com"));
+        assert!(uri.starts_with("otpauth://totp/BoilStream:alice%40example.com"));
         assert!(uri.contains("secret=JBSWY3DPEHPK3PXP"));
         assert!(uri.contains("issuer=BoilStream"));
         assert!(uri.contains("algorithm=SHA512"));
@@ -233,7 +250,7 @@ mod tests {
     fn test_build_totp_uri_custom_issuer() {
         let uri = build_totp_uri("bob@company.com", "SECRET123", Some("MyCompany"));
 
-        assert!(uri.starts_with("otpauth://totp/MyCompany:bob@company.com"));
+        assert!(uri.starts_with("otpauth://totp/MyCompany:bob%40company.com"));
         assert!(uri.contains("secret=SECRET123"));
         assert!(uri.contains("issuer=MyCompany"));
     }
