@@ -495,3 +495,13 @@ target_include_directories(session_publication_test PRIVATE
 target_link_libraries(session_publication_test PRIVATE ${DUCKDB_LIBS})
 link_rust_dependencies(session_publication_test)
 add_test(NAME SessionPublication COMMAND session_publication_test)
+
+# Bounded, read-only refresh loading against a recording filesystem.
+add_executable(refresh_token_loading_test test_refresh_token_loading.cpp
+               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+target_include_directories(refresh_token_loading_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(refresh_token_loading_test PRIVATE ${DUCKDB_LIBS})
+link_rust_dependencies(refresh_token_loading_test)
+add_test(NAME RefreshTokenLoading COMMAND refresh_token_loading_test)

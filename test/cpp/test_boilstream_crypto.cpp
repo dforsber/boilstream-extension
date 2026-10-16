@@ -14,6 +14,9 @@
 #include "boilstream_connection_state.hpp"
 #include "mbedtls_wrapper.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include <filesystem>
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "mbedtls/sha256.h"
@@ -71,7 +74,7 @@ public:
 	}
 
 	static string GetRefreshTokenPath(RestApiSecretStorage *storage) {
-		return storage->GetRefreshTokenPath();
+		return storage->GetRefreshTokenPath(true);
 	}
 };
 
@@ -719,16 +722,27 @@ TEST_CASE("Refresh Token - resume_user_id Calculation", "[boilstream][crypto][re
 }
 
 TEST_CASE("Refresh Token - Storage Round-Trip", "[boilstream][crypto][refresh-token][storage]") {
-	auto db = duckdb::make_uniq<DuckDB>(nullptr);
+	const auto test_home = std::filesystem::temp_directory_path() /
+	                       ("boilstream-refresh-test-" + UUID::ToString(UUID::GenerateRandomUUID()));
+	REQUIRE(std::filesystem::create_directory(test_home));
+	struct OwnedDirectory {
+		std::filesystem::path path;
+		~OwnedDirectory() {
+			std::error_code error;
+			std::filesystem::remove_all(path, error);
+		}
+	} cleanup {test_home};
+	DBConfig config;
+	config.SetOptionByName("home_directory", Value(test_home.string()));
+	auto db = duckdb::make_uniq<DuckDB>(nullptr, &config);
 	auto storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
 	BoilstreamConnectionState conn_state;
-
-	// Clean up any existing token file
-	string token_path = BoilstreamCryptoTestAccess::GetRefreshTokenPath(storage.get());
 	auto &fs = FileSystem::GetFileSystem(*db->instance);
-	if (fs.FileExists(token_path)) {
-		fs.RemoveFile(token_path);
-	}
+	// Validate DuckDB's scoped path expansion before any fixture file operation.
+	REQUIRE(fs.ExpandPath("~") == test_home.string());
+	string token_path = BoilstreamCryptoTestAccess::GetRefreshTokenPath(storage.get());
+	REQUIRE(token_path == (test_home / ".duckdb" / ".boilstream_refresh_token").string());
+	REQUIRE_FALSE(fs.FileExists(token_path));
 
 	SECTION("Storage round-trip with user_id verification") {
 		// This test manually creates and saves a token file, then loads it back

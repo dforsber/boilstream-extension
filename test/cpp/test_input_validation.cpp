@@ -83,7 +83,7 @@ public:
 	}
 
 	static std::string GetRefreshTokenPath(RestApiSecretStorage &storage) {
-		return storage.GetRefreshTokenPath();
+		return storage.GetRefreshTokenPath(true);
 	}
 };
 

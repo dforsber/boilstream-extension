@@ -22,6 +22,7 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/http_util.hpp"
@@ -500,7 +501,7 @@ std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt(Cl
 	return session->GetTokenExpiresAt();
 }
 
-string RestApiSecretStorage::GetRefreshTokenPath() {
+string RestApiSecretStorage::GetRefreshTokenPath(bool create_directory) {
 	auto &fs = FileSystem::GetFileSystem(db);
 
 	// Use DuckDB's path expansion which respects home_directory setting (chroot-aware)
@@ -513,7 +514,7 @@ string RestApiSecretStorage::GetRefreshTokenPath() {
 	}
 
 	// Create ~/.duckdb directory if it doesn't exist
-	if (!fs.DirectoryExists(duckdb_dir)) {
+	if (create_directory && !fs.DirectoryExists(duckdb_dir)) {
 		fs.CreateDirectory(duckdb_dir);
 	}
 
@@ -567,6 +568,9 @@ void RestApiSecretStorage::SaveRefreshToken(BoilstreamConnectionState &conn_stat
 
 	string json_output = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
+	if (json_output.size() > MAX_REFRESH_TOKEN_RECORD_BYTES) {
+		throw IOException("Refresh token record exceeds the storage size limit");
+	}
 
 #ifdef __EMSCRIPTEN__
 	// WASM: Use browser localStorage
@@ -576,7 +580,7 @@ void RestApiSecretStorage::SaveRefreshToken(BoilstreamConnectionState &conn_stat
 #else
 	// Native: Write to file (overwrite if exists for token rotation)
 	BOILSTREAM_LOG("SaveRefreshToken: Saving refresh token to disk");
-	string file_path = GetRefreshTokenPath();
+	string file_path = GetRefreshTokenPath(true);
 	auto &fs = FileSystem::GetFileSystem(db);
 
 	// Delete existing file if present (for token rotation)
@@ -609,7 +613,13 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 		BOILSTREAM_LOG("LoadRefreshToken: No token found in localStorage");
 		return false;
 	}
-	file_contents = string(json_c_str);
+	size_t length = 0;
+	while (length <= MAX_REFRESH_TOKEN_RECORD_BYTES && json_c_str[length] != '\0') ++length;
+	if (length == 0 || length > MAX_REFRESH_TOKEN_RECORD_BYTES) {
+		free(json_c_str);
+		return false;
+	}
+	file_contents.assign(json_c_str, length);
 	free(json_c_str);
 #else
 	// Native: Load from file
@@ -626,16 +636,22 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 	// Read file
 	auto handle = fs.OpenFile(file_path, FileOpenFlags::FILE_FLAGS_READ);
 	auto file_size = fs.GetFileSize(*handle);
-	file_contents.resize(file_size);
-	fs.Read(*handle, const_cast<char *>(file_contents.data()), file_size);
+	if (file_size <= 0 || file_size > MAX_REFRESH_TOKEN_RECORD_BYTES) {
+		handle->Close();
+		return false;
+	}
+	file_contents.resize(static_cast<size_t>(file_size));
+	auto bytes_read = fs.Read(*handle, &file_contents[0], file_size);
 	handle->Close();
+	if (bytes_read != file_size) return false;
 #endif
 
+	// Loading is read-only. An invalid snapshot must never delete a newer
+	// record published after this read began. A later successful save replaces it.
 	// Parse JSON
 	auto doc = yyjson_read(file_contents.c_str(), file_contents.size(), 0);
 	if (!doc) {
 		BOILSTREAM_LOG("LoadRefreshToken: Failed to parse JSON");
-		DeleteRefreshToken();
 		return false;
 	}
 
@@ -649,7 +665,6 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 	if (!version_val || !yyjson_is_int(version_val) || yyjson_get_int(version_val) != 1) {
 		yyjson_doc_free(doc);
 		BOILSTREAM_LOG("LoadRefreshToken: Invalid or unsupported version");
-		DeleteRefreshToken();
 		return false;
 	}
 
@@ -657,49 +672,38 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 	    !region_val || !yyjson_is_str(region_val) || !expires_val || !yyjson_is_str(expires_val)) {
 		yyjson_doc_free(doc);
 		BOILSTREAM_LOG("LoadRefreshToken: Missing required fields");
-		DeleteRefreshToken();
 		return false;
 	}
 
-	string refresh_token_b64 = SafeGetStr(refresh_token_val);
-	string endpoint = SafeGetStr(endpoint_val);
-	string region_str = SafeGetStr(region_val);
-	string expires_str = SafeGetStr(expires_val);
+	string refresh_token_b64(yyjson_get_str(refresh_token_val), yyjson_get_len(refresh_token_val));
+	string endpoint(yyjson_get_str(endpoint_val), yyjson_get_len(endpoint_val));
+	string region_str(yyjson_get_str(region_val), yyjson_get_len(region_val));
+	string expires_str(yyjson_get_str(expires_val), yyjson_get_len(expires_val));
 
 	yyjson_doc_free(doc);
 
 	// Validate required fields are not empty
-	if (refresh_token_b64.empty() || endpoint.empty() || region_str.empty() || expires_str.empty()) {
+	if (refresh_token_b64.empty() || endpoint.empty() || region_str.empty() || expires_str.empty() ||
+	    refresh_token_b64.find('\0') != string::npos || endpoint.find('\0') != string::npos ||
+	    region_str.find('\0') != string::npos || expires_str.find('\0') != string::npos) {
 		BOILSTREAM_LOG("LoadRefreshToken: Required field is empty");
-		DeleteRefreshToken();
 		return false;
 	}
 
 	// Decode refresh token from base64
-	BOILSTREAM_LOG("LoadRefreshToken: Base64 token from file: " << refresh_token_b64);
-	string refresh_token_bytes_str = Blob::FromBase64(refresh_token_b64);
+	string refresh_token_bytes_str;
+	try {
+		refresh_token_bytes_str = Blob::FromBase64(refresh_token_b64);
+	} catch (const ConversionException &) {
+		return false;
+	}
 	// Refresh token is derived using HKDF-Expand and should be exactly 32 bytes
 	if (refresh_token_bytes_str.size() != 32) {
 		BOILSTREAM_LOG("LoadRefreshToken: Invalid refresh token size: " << refresh_token_bytes_str.size()
 		                                                                << " (expected 32)");
-		DeleteRefreshToken();
 		return false;
 	}
 	BOILSTREAM_LOG("LoadRefreshToken: Loaded refresh token, size=" << refresh_token_bytes_str.size() << " bytes");
-
-	// Debug: compute and log what user_id SHOULD be from this token
-	uint8_t debug_hash[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t *>(refresh_token_bytes_str.c_str()),
-	                     refresh_token_bytes_str.size(), debug_hash);
-	string debug_user_id;
-	debug_user_id.reserve(64);
-	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < 32; i++) {
-		unsigned char byte = static_cast<unsigned char>(debug_hash[i]);
-		debug_user_id += hex_chars[(byte >> 4) & 0xF];
-		debug_user_id += hex_chars[byte & 0xF];
-	}
-	BOILSTREAM_LOG("LoadRefreshToken: Expected resume_user_id=" << debug_user_id);
 
 	// Parse expiration timestamp
 	std::chrono::system_clock::time_point expires_at;
@@ -707,7 +711,6 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 		expires_at = ParseExpiresAt(expires_str);
 	} catch (...) {
 		BOILSTREAM_LOG("LoadRefreshToken: Failed to parse expires_at");
-		DeleteRefreshToken();
 		return false;
 	}
 
@@ -715,7 +718,6 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 	auto now = std::chrono::system_clock::now();
 	if (now >= expires_at) {
 		BOILSTREAM_LOG("LoadRefreshToken: Refresh token has expired");
-		DeleteRefreshToken();
 		return false;
 	}
 
@@ -732,25 +734,6 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 	return true;
 }
 
-void RestApiSecretStorage::DeleteRefreshToken() {
-#ifdef __EMSCRIPTEN__
-	// WASM: Delete from localStorage
-	BOILSTREAM_LOG("DeleteRefreshToken: Deleting refresh token from localStorage");
-	js_localStorage_removeItem("duckdb_boilstream_refresh_token");
-	BOILSTREAM_LOG("DeleteRefreshToken: Token deleted from localStorage");
-#else
-	// Native: Delete file
-	BOILSTREAM_LOG("DeleteRefreshToken: Deleting refresh token file");
-
-	string file_path = GetRefreshTokenPath();
-	auto &fs = FileSystem::GetFileSystem(db);
-
-	if (fs.FileExists(file_path)) {
-		fs.RemoveFile(file_path);
-		BOILSTREAM_LOG("DeleteRefreshToken: File deleted");
-	}
-#endif
-}
 
 void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string &context) {
 	// Validate token is not empty
@@ -3512,7 +3495,7 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 			// Refresh both the owning handle and its authority after publication.
 			conn_state = GetSession(transaction);
 			url = conn_state ? conn_state->GetEndpointUrl() : "";
-			BOILSTREAM_LOG("AllSecrets: Re-fetched conn_state after resume, ptr=" << (void *)conn_state);
+			BOILSTREAM_LOG("AllSecrets: Re-fetched conn_state after resume, ptr=" << static_cast<void *>(conn_state.get()));
 		} catch (const std::exception &e) {
 			BOILSTREAM_LOG("AllSecrets: Resume failed: " << e.what());
 			// Continue - will try unauthenticated or fail appropriately

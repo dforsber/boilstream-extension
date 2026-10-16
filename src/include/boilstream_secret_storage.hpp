@@ -255,6 +255,8 @@ private:
 		string credential_scope; // AWS-style credential scope
 	};
 
+	static constexpr idx_t MAX_REFRESH_TOKEN_RECORD_BYTES = 64 * 1024;
+
 	//! Stored refresh token metadata
 	struct RefreshTokenData {
 		vector<uint8_t> refresh_token;
@@ -344,7 +346,7 @@ private:
 	void HttpDelete(const string &url, BoilstreamConnectionState &conn_state);
 
 	//! Get the file path for stored refresh token
-	string GetRefreshTokenPath();
+	string GetRefreshTokenPath(bool create_directory = false);
 
 	//! Save refresh token to file on disk (uses connection state)
 	void SaveRefreshToken(BoilstreamConnectionState &conn_state, bool resumption_enabled);
@@ -352,9 +354,6 @@ private:
 	//! Load refresh token from encrypted file on disk into connection state
 	//! Returns true if loaded successfully, false if not found or expired
 	bool LoadRefreshToken(BoilstreamConnectionState &conn_state);
-
-	//! Delete refresh token file from disk
-	void DeleteRefreshToken();
 
 	//! Check catalog versions and refresh credentials for changed catalogs (uses connection state)
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
