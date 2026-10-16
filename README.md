@@ -6,6 +6,13 @@ It incorporates industrial grade e2e application level security even inside the 
 
 > You can also create your own server that implements the required [REST API](src/README.md) to work with `boilstream` extension.
 
+## Login lifetime
+
+Login credentials remain only in the DuckDB connection's memory. New connections
+and process restarts require login again. The extension does not save credentials
+to files or browser storage, and ignores credential files left by older releases.
+Secure restart login is deferred.
+
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)

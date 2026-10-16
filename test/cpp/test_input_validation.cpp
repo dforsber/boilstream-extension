@@ -73,18 +73,7 @@ public:
 		return storage.ParseExpiresAt(expires_at_str);
 	}
 
-	static bool LoadRefreshToken(RestApiSecretStorage &storage, BoilstreamConnectionState &conn_state) {
-		return storage.LoadRefreshToken(conn_state);
-	}
 
-	static void SaveRefreshToken(RestApiSecretStorage &storage, BoilstreamConnectionState &conn_state,
-	                             bool resumption_enabled) {
-		storage.SaveRefreshToken(conn_state, resumption_enabled);
-	}
-
-	static std::string GetRefreshTokenPath(RestApiSecretStorage &storage) {
-		return storage.GetRefreshTokenPath(true);
-	}
 };
 
 //===----------------------------------------------------------------------===//

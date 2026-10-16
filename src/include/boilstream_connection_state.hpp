@@ -73,7 +73,7 @@ public:
 	//! OPAQUE session key (32 bytes, HKDF-derived, in-memory only)
 	vector<uint8_t> session_key;
 
-	//! OPAQUE refresh token (32 bytes, for session resumption)
+	//! OPAQUE refresh token (32 bytes, in-memory only, for this connection's resumption)
 	vector<uint8_t> refresh_token;
 
 	//! Lock-step sequence counter (increments per request)

@@ -92,14 +92,14 @@ public:
 	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
 	                        const string &endpoint);
 
-	//! Perform OPAQUE session resumption with stored refresh token
+	//! Perform OPAQUE resumption using only this connection's in-memory refresh token
 	void PerformOpaqueResume(ClientContext &context);
 
 	//! Clear the active session (on error or logout)
 	void ClearSession(ClientContext &context);
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
-	//! Only receives unpublished state; returns whether refresh persistence is enabled
+	//! Only receives unpublished state; returns whether the server supports in-memory resumption
 	bool PerformOpaqueLoginCommon(const string &password, bool is_resume, BoilstreamConnectionState &pending);
 
 	//! Set user context for a connection
@@ -255,16 +255,6 @@ private:
 		string credential_scope; // AWS-style credential scope
 	};
 
-	static constexpr idx_t MAX_REFRESH_TOKEN_RECORD_BYTES = 64 * 1024;
-
-	//! Stored refresh token metadata
-	struct RefreshTokenData {
-		vector<uint8_t> refresh_token;
-		string endpoint_url;
-		string region;
-		std::chrono::system_clock::time_point expires_at;
-	};
-
 	//! Use SessionSnapshot from BoilstreamConnectionState
 	using SessionSnapshot = BoilstreamConnectionState::SessionSnapshot;
 
@@ -345,16 +335,6 @@ private:
 	//! Make HTTP DELETE request to REST API (uses connection state)
 	void HttpDelete(const string &url, BoilstreamConnectionState &conn_state);
 
-	//! Get the file path for stored refresh token
-	string GetRefreshTokenPath(bool create_directory = false);
-
-	//! Save refresh token to file on disk (uses connection state)
-	void SaveRefreshToken(BoilstreamConnectionState &conn_state, bool resumption_enabled);
-
-	//! Load refresh token from encrypted file on disk into connection state
-	//! Returns true if loaded successfully, false if not found or expired
-	bool LoadRefreshToken(BoilstreamConnectionState &conn_state);
-
 	//! Check catalog versions and refresh credentials for changed catalogs (uses connection state)
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
 	void CheckCatalogVersions(BoilstreamConnectionState &conn_state);
@@ -394,7 +374,7 @@ private:
 
 	void PublishSession(ClientContext &context, shared_ptr<BoilstreamConnectionState> pending,
 	                    const shared_ptr<BoilstreamConnectionState> &previous, uint64_t generation,
-	                    bool persist_refresh);
+	                    bool supports_resumption);
 
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
@@ -441,16 +421,11 @@ private:
 	//! Map of session_key (bootstrap_token_hash) -> session state
 	std::unordered_map<string, shared_ptr<BoilstreamConnectionState>> sessions_;
 
-	//! Map of refresh_token_hash -> session_key (trusted mapping for resume)
-	//! This is stored in database-level storage, NOT in tenant-controlled files
-	//! Prevents malicious tenants from hijacking sessions by modifying their refresh token file
-	std::unordered_map<string, string> refresh_to_session_;
-
 	//! Per-connection session keys: connection_id -> session_key
 	//! Prevents concurrent bootstrap from clobbering each other's sessions
 	std::unordered_map<idx_t, string> connection_session_keys_;
 
-	//! Lock for sessions_ map, refresh_to_session_, and connection_session_keys_
+	//! Lock for sessions_ and connection_session_keys_
 	mutex sessions_lock_;
 };
 
