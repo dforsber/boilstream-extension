@@ -26,22 +26,8 @@
 #include <emscripten.h>
 #endif
 
-// Debug logging macro - always enabled for WASM debugging
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#include <sstream>
-#define BOILSTREAM_LOG(msg)                                                                                            \
-	do {                                                                                                               \
-		std::ostringstream oss;                                                                                        \
-		oss << "[BOILSTREAM] " << msg;                                                                                 \
-		emscripten_log(EM_LOG_CONSOLE, "%s", oss.str().c_str());                                                       \
-	} while (0)
-#elif defined(BOILSTREAM_DEBUG)
-#include <iostream>
-#define BOILSTREAM_LOG(msg) std::cerr << "[BOILSTREAM] " << msg << std::endl
-#else
-#define BOILSTREAM_LOG(msg) ((void)0)
-#endif
+#include "boilstream_diagnostics.hpp"
+#define BOILSTREAM_LOG(event) duckdb::BoilstreamLogEvent("" event)
 
 namespace duckdb {
 
@@ -105,7 +91,6 @@ static void ClearQueryLogs(ClientContext &context) {
 		log_manager.TruncateLogStorage();
 		BOILSTREAM_LOG("ClearQueryLogs: Query logs truncated successfully");
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("ClearQueryLogs: Failed to truncate logs: " << e.what());
 		// Don't throw - log clearing is a security best-effort, shouldn't fail the operation
 	}
 }
@@ -205,8 +190,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	// Append multi-tenant parameter if in multi-tenant mode
 	ducklakes_url = RestApiSecretStorage::AppendMultiTenantParam(ducklakes_url, context);
 
-	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
-
 	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -217,8 +200,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	try {
 		response = storage->HttpGetWithState(ducklakes_url, *conn_state);
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("BoilstreamDucklakesInit: Failed to fetch ducklakes: " << e.what());
-		throw IOException("Failed to fetch ducklakes from boilstream server: %s", e.what());
+		BoilstreamRethrowSafe("Failed to fetch ducklakes from boilstream server", e);
 	}
 
 	// Check if response is empty (indicates error like 401, 403, etc.)
@@ -362,8 +344,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	duckdb_yyjson::yyjson_doc_free(doc);
 
-	BOILSTREAM_LOG("BoilstreamDucklakesInit: Loaded " << result->ducklakes_data.size() << " ducklakes");
-
 	return std::move(result);
 }
 
@@ -454,11 +434,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		secrets = storage->AllSecrets(transaction);
 #endif
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("BoilstreamSecretsInit: Failed to fetch secrets: " << e.what());
-		throw IOException("Failed to fetch secrets from boilstream storage: %s", e.what());
+		BoilstreamRethrowSafe("Failed to fetch secrets from boilstream storage", e);
 	}
-
-	BOILSTREAM_LOG("BoilstreamSecretsInit: Processing " << secrets.size() << " secrets");
 
 	// Get transaction for expiration lookups
 	auto expiration_transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -501,8 +478,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 
 		result->secrets_data.push_back(std::move(row));
 	}
-
-	BOILSTREAM_LOG("BoilstreamSecretsInit: Loaded " << result->secrets_data.size() << " secrets");
 
 	return std::move(result);
 }
@@ -590,8 +565,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	// Construct the buckets API URL
 	string buckets_url = endpoint_url + "/buckets";
 
-	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
-
 	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -602,8 +575,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	try {
 		response = storage->HttpGetWithState(buckets_url, *conn_state);
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("BoilstreamBucketsInit: Failed to fetch buckets: " << e.what());
-		throw IOException("Failed to fetch buckets from boilstream server: %s", e.what());
+		BoilstreamRethrowSafe("Failed to fetch buckets from boilstream server", e);
 	}
 
 	// Check if response is empty (indicates error like 401, 403, etc.)
@@ -695,8 +667,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	duckdb_yyjson::yyjson_doc_free(doc);
 
-	BOILSTREAM_LOG("BoilstreamBucketsInit: Loaded " << result->buckets_data.size() << " buckets");
-
 	return std::move(result);
 }
 
@@ -742,9 +712,6 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 		s3_bucket_name = params.values[2].ToString();
 	}
 
-	BOILSTREAM_LOG("CreateDucklake: catalog_name=" << catalog_name << ", description=" << description
-	                                               << ", s3_bucket_name=" << s3_bucket_name);
-
 	// Validate catalog_name
 	if (catalog_name.empty()) {
 		throw InvalidInputException("catalog_name cannot be empty");
@@ -771,8 +738,6 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	// Append multi-tenant parameter if in multi-tenant mode
 	create_url = RestApiSecretStorage::AppendMultiTenantParam(create_url, context);
 
-	BOILSTREAM_LOG("CreateDucklake: create_url=" << create_url);
-
 	// Build request body using yyjson
 	auto doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
 	auto obj = duckdb_yyjson::yyjson_mut_obj(doc);
@@ -789,8 +754,6 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	string body = SafeJsonSerialize(doc);
 	duckdb_yyjson::yyjson_mut_doc_free(doc);
 
-	BOILSTREAM_LOG("CreateDucklake: Making POST request, body_len=" << body.size());
-
 	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -801,8 +764,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	try {
 		response = storage->HttpPostWithState(create_url, body, *conn_state);
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("CreateDucklake: Failed to create ducklake: " << e.what());
-		throw IOException("Failed to create ducklake: %s", e.what());
+		BoilstreamRethrowSafe("Failed to create ducklake", e);
 	}
 
 	BOILSTREAM_LOG("CreateDucklake: Ducklake created successfully");
@@ -818,7 +780,6 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 		BOILSTREAM_LOG("CreateDucklake: Ducklake created; list its UUID and attach it through the managed pragma.");
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("CreateDucklake: Warning - Failed to fetch secrets: " << e.what());
 		// Continue - ducklake was created, just failed to fetch secrets
 	}
 
@@ -861,7 +822,6 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	BOILSTREAM_LOG("Step 2: Getting parameter");
 	string input = params.values[0].ToString();
-	BOILSTREAM_LOG("Step 3: Parameter = " << input.substr(0, 50) << "...");
 
 	// Validate input format
 	if (input.empty()) {
@@ -995,7 +955,6 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 12: Starting OPAQUE login");
 
 	try {
-		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
 
 		// Bind this bootstrap identity to the newly authenticated session
 		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
@@ -1005,21 +964,8 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		BOILSTREAM_LOG("SetEndpoint: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
 		// The failed pending exchange never changed the active session.
-		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed: " << e.what());
 
-		// Normalize network-related errors to "Token exchange failed" for consistent test behavior
-		// This prevents exposing internal error details when the server is unreachable
-		string error_msg = e.what();
-		if (error_msg.find("scheme is not supported") != string::npos ||
-		    error_msg.find("not implemented") != string::npos || error_msg.find("Connection refused") != string::npos ||
-		    error_msg.find("Could not connect") != string::npos ||
-		    error_msg.find("Failed to connect") != string::npos || error_msg.find("Timeout") != string::npos ||
-		    error_msg.find("timed out") != string::npos) {
-			throw InvalidInputException("Token exchange failed");
-		}
-
-		// For other errors (validation, parsing, etc.), include the full error message
-		throw InvalidInputException("OPAQUE login failed: %s", e.what());
+		BoilstreamRethrowSafe("Token exchange failed", e);
 	}
 
 	// Set context for this connection (use hash of bootstrap token, not the token itself)
@@ -1042,21 +988,16 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		auto bootstrap_conn_state = storage->GetSessionForContext(context);
 		// Use FetchAllSecretsFromServer to always fetch (AllSecrets returns empty in WASM)
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
-		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
 
 		// Collect legacy DuckLake secret names for the login summary only.
 		for (const auto &entry : secrets) {
 			if (entry.secret) {
-				BOILSTREAM_LOG("SetEndpoint: Secret '" << entry.secret->GetName() << "' type='"
-				                                       << entry.secret->GetType() << "'");
 				if (entry.secret->GetType() == "ducklake") {
 					ducklake_names.push_back(entry.secret->GetName());
-					BOILSTREAM_LOG("SetEndpoint: Found ducklake secret: " << entry.secret->GetName());
 				}
 			}
 		}
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("SetEndpoint: Failed to fetch secrets: " << e.what());
 		// Continue - not critical for login success
 	}
 
@@ -1082,15 +1023,12 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		}
 		ducklakes_list += EscapeSqlLiteral(RestApiSecretStorage::StripTenantPrefix(ducklake_names[i], context));
 	}
-	BOILSTREAM_LOG("SetEndpoint: Available ducklakes: " << ducklakes_list);
 
 	// Return status with available legacy DuckLake secret names. Managed catalog
 	// attachment is selected separately by canonical UUID.
 	string result_sql = "SELECT 'Session established' as status, TIMESTAMP '" + string(expires_str) +
 	                    "' as expires_at, " + std::to_string(ducklake_names.size()) + " as ducklakes_available, '" +
 	                    ducklakes_list + "' as available_ducklakes;";
-
-	BOILSTREAM_LOG("SetEndpoint: Returning SQL to DuckDB:\n" << result_sql);
 
 	return result_sql;
 }
@@ -1150,8 +1088,6 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	if (!is_localhost && base_url.find("https://") != 0) {
 		throw InvalidInputException("boilstream_register_user: URL must use HTTPS (or localhost for testing)");
 	}
-
-	BOILSTREAM_LOG("RegisterUser: base_url=" << base_url << ", email=" << email);
 
 	// Validate email format using Rust FFI
 	if (registration_validate_email(email.c_str()) != 0) {
@@ -1214,44 +1150,43 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Helper: Make unauthenticated HTTP GET request (for public registration APIs)
 	// Note: Fails fast on non-2xx status to prevent automatic retries
 	auto http_get = [&](const string &url) -> string {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &http_util = HTTPUtil::Get(db);
-		auto params = http_util.InitializeParameters(db, url);
-		if (!params) {
-			throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
-		}
-		HTTPHeaders headers(db);
-		headers.Insert("Content-Type", "application/json");
-
-		// Response handlers for capturing body
-		string response_body;
-		auto response_handler = [&](const HTTPResponse &response) {
-			// Don't use response.body - it may be empty when using content_handler
-			return true;
-		};
-		auto content_handler = [&](const_data_ptr_t data, idx_t size) {
-			// Build response body from streamed chunks
-			response_body.append(reinterpret_cast<const char *>(data), size);
-			return true;
-		};
-
-		GetRequestInfo request(url, headers, *params, response_handler, content_handler);
-		auto response = http_util.Request(request);
-
-		// Log status and body length for debugging
-		auto status_code = static_cast<int>(response->status);
-		BOILSTREAM_LOG("HTTP GET " << url << " -> status=" << status_code << " body_len=" << response_body.size());
-
-		// Check status code and fail fast on errors to prevent retries
-		if (status_code < 200 || status_code >= 300) {
-			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
-			if (response_body.size() > 500) {
-				error_preview += "... (truncated)";
+		try {
+			auto &db = DatabaseInstance::GetDatabase(context);
+			auto &http_util = HTTPUtil::Get(db);
+			auto params = http_util.InitializeParameters(db, url);
+			if (!params) {
+				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
 			}
-			throw IOException("HTTP GET failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
-		}
+			HTTPHeaders headers(db);
+			headers.Insert("Content-Type", "application/json");
 
-		return response_body;
+			// Response handlers for capturing body
+			string response_body;
+			auto response_handler = [&](const HTTPResponse &response) {
+				// Don't use response.body - it may be empty when using content_handler
+				return true;
+			};
+			auto content_handler = [&](const_data_ptr_t data, idx_t size) {
+				// Build response body from streamed chunks
+				response_body.append(reinterpret_cast<const char *>(data), size);
+				return true;
+			};
+
+			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
+			auto response = http_util.Request(request);
+
+			auto status_code = static_cast<int>(response->status);
+
+			// Check status code and fail fast on errors to prevent retries
+			if (status_code < 200 || status_code >= 300) {
+				BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
+			}
+
+			return response_body;
+
+		} catch (const std::exception &e) {
+			BoilstreamRethrowSafe("HTTP GET failed", e);
+		}
 	};
 
 	// Helper: Make unauthenticated HTTP POST request (for public registration APIs)
@@ -1259,53 +1194,49 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Optional out_headers parameter to capture response headers (e.g., Set-Cookie)
 	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &http_util = HTTPUtil::Get(db);
-		auto params = http_util.InitializeParameters(db, url);
-		if (!params) {
-			throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-		}
-		HTTPHeaders headers(db);
-		headers.Insert("Content-Type", "application/json");
-		if (!cookie.empty()) {
-			headers.Insert("Cookie", cookie);
-		}
-
-		// PostRequestInfo stores response in buffer_out member (not via handlers)
-		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-		auto response = http_util.Request(request);
-
-		// Capture response headers if requested
-		if (out_headers) {
-			*out_headers = response->headers;
-		}
-
-		// Get response body from buffer_out
-		string response_body = request.buffer_out;
-
-		// Log status and body length for debugging
-		auto status_code = static_cast<int>(response->status);
-		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
-
-		// Check status code and fail fast on errors to prevent retries
-		// Include response body in error for JSON error messages
-		if (status_code < 200 || status_code >= 300) {
-			// Special handling for rate limit / replay protection
-			if (status_code == 429) {
-				throw IOException(
-				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
-				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+		try {
+			auto &db = DatabaseInstance::GetDatabase(context);
+			auto &http_util = HTTPUtil::Get(db);
+			auto params = http_util.InitializeParameters(db, url);
+			if (!params) {
+				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
+			}
+			HTTPHeaders headers(db);
+			headers.Insert("Content-Type", "application/json");
+			if (!cookie.empty()) {
+				headers.Insert("Cookie", cookie);
 			}
 
-			// Include response body (may contain JSON error) in exception
-			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
-			if (response_body.size() > 500) {
-				error_preview += "... (truncated)";
-			}
-			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
-		}
+			// PostRequestInfo stores response in buffer_out member (not via handlers)
+			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			auto response = http_util.Request(request);
 
-		return response_body;
+			// Capture response headers if requested
+			if (out_headers) {
+				*out_headers = response->headers;
+			}
+
+			// Get response body from buffer_out
+			string response_body = request.buffer_out;
+
+			auto status_code = static_cast<int>(response->status);
+
+			// Check status code and fail fast on errors to prevent retries
+			// Include response body in error for JSON error messages
+			if (status_code < 200 || status_code >= 300) {
+				// Special handling for rate limit / replay protection
+				if (status_code == 429) {
+					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
+				}
+
+				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
+			}
+
+			return response_body;
+
+		} catch (const std::exception &e) {
+			BoilstreamRethrowSafe("HTTP POST failed", e);
+		}
 	};
 
 	// Step 1: Get CSRF token
@@ -1314,14 +1245,13 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	try {
 		csrf_response = http_get(csrf_url);
 	} catch (const std::exception &e) {
-		throw IOException("Failed to fetch CSRF token: %s", e.what());
+		BoilstreamRethrowSafe("Failed to fetch CSRF token", e);
 	}
 
 	// Parse CSRF token from JSON response
 	auto csrf_doc = duckdb_yyjson::yyjson_read(csrf_response.c_str(), csrf_response.size(), 0);
 	if (!csrf_doc) {
-		string preview = csrf_response.substr(0, std::min<size_t>(500, csrf_response.size()));
-		throw IOException("Failed to parse CSRF response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse CSRF response");
 	}
 	auto csrf_root = duckdb_yyjson::yyjson_doc_get_root(csrf_doc);
 	auto csrf_token_val = duckdb_yyjson::yyjson_obj_get(csrf_root, "csrf_token");
@@ -1355,7 +1285,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	try {
 		signup_response = http_post(signup_url, signup_body);
 	} catch (const std::exception &e) {
-		throw IOException("Signup failed: %s", e.what());
+		BoilstreamRethrowSafe("Signup failed", e);
 	}
 
 	// Check if response is empty
@@ -1364,26 +1294,19 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		    "Signup response is empty - server may not be responding or HTTPS certificate validation failed");
 	}
 
-	BOILSTREAM_LOG("RegisterUser: signup response size=" << signup_response.size());
-
 	// Parse signup response
 	auto signup_resp_doc = duckdb_yyjson::yyjson_read(signup_response.c_str(), signup_response.size(), 0);
 	if (!signup_resp_doc) {
 		// Show first 500 chars of response for debugging
-		string preview = signup_response.substr(0, std::min<size_t>(500, signup_response.size()));
-		throw IOException("Failed to parse signup response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse signup response");
 	}
 	auto signup_resp_root = duckdb_yyjson::yyjson_doc_get_root(signup_resp_doc);
 	auto success_val = duckdb_yyjson::yyjson_obj_get(signup_resp_root, "success");
 	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
 
 	if (!success) {
-		auto error_val = duckdb_yyjson::yyjson_obj_get(signup_resp_root, "error");
-		string error_msg = SafeYyjsonGetStr(error_val);
-		if (error_msg.empty())
-			error_msg = "Unknown error";
 		duckdb_yyjson::yyjson_doc_free(signup_resp_doc);
-		throw IOException("Signup failed: %s", error_msg.c_str());
+		throw IOException("Signup failed");
 	}
 	duckdb_yyjson::yyjson_doc_free(signup_resp_doc);
 
@@ -1411,26 +1334,21 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	try {
 		login_response = http_post(login_url, login_body, "", &login_response_headers);
 	} catch (const std::exception &e) {
-		throw IOException("Login failed: %s", e.what());
+		BoilstreamRethrowSafe("Login failed", e);
 	}
 
 	// Parse login response to get session_id
 	auto login_resp_doc = duckdb_yyjson::yyjson_read(login_response.c_str(), login_response.size(), 0);
 	if (!login_resp_doc) {
-		string preview = login_response.substr(0, std::min<size_t>(500, login_response.size()));
-		throw IOException("Failed to parse login response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse login response");
 	}
 	auto login_resp_root = duckdb_yyjson::yyjson_doc_get_root(login_resp_doc);
 	auto login_success_val = duckdb_yyjson::yyjson_obj_get(login_resp_root, "success");
 	bool login_success = login_success_val && duckdb_yyjson::yyjson_get_bool(login_success_val);
 
 	if (!login_success) {
-		auto error_val = duckdb_yyjson::yyjson_obj_get(login_resp_root, "error");
-		string error_msg = SafeYyjsonGetStr(error_val);
-		if (error_msg.empty())
-			error_msg = "Unknown error";
 		duckdb_yyjson::yyjson_doc_free(login_resp_doc);
-		throw IOException("Login failed: %s", error_msg.c_str());
+		throw IOException("Login failed");
 	}
 
 	duckdb_yyjson::yyjson_doc_free(login_resp_doc);
@@ -1446,7 +1364,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	string session_token;
 	size_t session_pos = set_cookie_header.find("session=");
 	if (session_pos == string::npos) {
-		throw IOException("Set-Cookie header missing session cookie: %s", set_cookie_header.c_str());
+		throw IOException("Set-Cookie header missing session cookie");
 	}
 
 	size_t value_start = session_pos + 8; // Length of "session="
@@ -1481,14 +1399,13 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	try {
 		totp_response = http_post(totp_enroll_url, totp_body, session_cookie);
 	} catch (const std::exception &e) {
-		throw IOException("TOTP enrollment failed: %s", e.what());
+		BoilstreamRethrowSafe("TOTP enrollment failed", e);
 	}
 
 	// Parse TOTP enrollment response
 	auto totp_resp_doc = duckdb_yyjson::yyjson_read(totp_response.c_str(), totp_response.size(), 0);
 	if (!totp_resp_doc) {
-		string preview = totp_response.substr(0, std::min<size_t>(500, totp_response.size()));
-		throw IOException("Failed to parse TOTP enrollment response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse TOTP enrollment response");
 	}
 	auto totp_resp_root = duckdb_yyjson::yyjson_doc_get_root(totp_resp_doc);
 	auto secret_val = duckdb_yyjson::yyjson_obj_get(totp_resp_root, "secret");
@@ -1517,9 +1434,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	BOILSTREAM_LOG("RegisterUser: TOTP URI built successfully");
 
 	// Store registration state for MFA verification step
-	BOILSTREAM_LOG("RegisterUser: Storing session token (first 8 chars): "
-	               << session_token.substr(0, std::min<size_t>(8, session_token.length()))
-	               << "... (total length=" << session_token.length() << ")");
+
 	storage->StoreRegistrationState(base_url, session_token, totp_uri);
 	BOILSTREAM_LOG("RegisterUser: Registration state stored successfully");
 
@@ -1587,65 +1502,56 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	}
 	auto [base_url, session_token, totp_uri] = storage->GetRegistrationState();
 
-	BOILSTREAM_LOG("VerifyMfa: Retrieved registration state, base_url=" << base_url);
-
 	// Helper: Make unauthenticated HTTP POST request with cookie
 	// Note: Fails fast on non-2xx status to prevent automatic retries
 	// Optional out_headers parameter to capture response headers
 	auto http_post = [&](const string &url, const string &body, const string &cookie,
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &http_util = HTTPUtil::Get(db);
-		auto params = http_util.InitializeParameters(db, url);
-		if (!params) {
-			throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-		}
-		HTTPHeaders headers(db);
-		headers.Insert("Content-Type", "application/json");
-		if (!cookie.empty()) {
-			headers.Insert("Cookie", cookie);
-			BOILSTREAM_LOG("HTTP POST: Added Cookie header: " << cookie.substr(0, std::min<size_t>(30, cookie.length()))
-			                                                  << "...");
-		} else {
-			BOILSTREAM_LOG("HTTP POST: No cookie provided");
-		}
+		try {
+			auto &db = DatabaseInstance::GetDatabase(context);
+			auto &http_util = HTTPUtil::Get(db);
+			auto params = http_util.InitializeParameters(db, url);
+			if (!params) {
+				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
+			}
+			HTTPHeaders headers(db);
+			headers.Insert("Content-Type", "application/json");
+			if (!cookie.empty()) {
+				headers.Insert("Cookie", cookie);
 
-		BOILSTREAM_LOG("HTTP POST: Sending request to " << url);
-		BOILSTREAM_LOG("HTTP POST: Body length: " << body.size());
-
-		// PostRequestInfo stores response in buffer_out member (not via handlers)
-		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-		auto response = http_util.Request(request);
-
-		// Capture response headers if requested
-		if (out_headers) {
-			*out_headers = response->headers;
-		}
-
-		// Get response body from buffer_out
-		string response_body = request.buffer_out;
-
-		auto status_code = static_cast<int>(response->status);
-		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
-
-		// Check status code and fail fast on errors to prevent retries
-		if (status_code < 200 || status_code >= 300) {
-			// Special handling for rate limit / replay protection
-			if (status_code == 429) {
-				throw IOException(
-				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
-				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+			} else {
+				BOILSTREAM_LOG("HTTP POST: No cookie provided");
 			}
 
-			// Include response body (may contain JSON error) in exception
-			string error_preview = response_body.substr(0, std::min<size_t>(500, response_body.size()));
-			if (response_body.size() > 500) {
-				error_preview += "... (truncated)";
-			}
-			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
-		}
+			// PostRequestInfo stores response in buffer_out member (not via handlers)
+			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			auto response = http_util.Request(request);
 
-		return response_body;
+			// Capture response headers if requested
+			if (out_headers) {
+				*out_headers = response->headers;
+			}
+
+			// Get response body from buffer_out
+			string response_body = request.buffer_out;
+
+			auto status_code = static_cast<int>(response->status);
+
+			// Check status code and fail fast on errors to prevent retries
+			if (status_code < 200 || status_code >= 300) {
+				// Special handling for rate limit / replay protection
+				if (status_code == 429) {
+					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
+				}
+
+				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
+			}
+
+			return response_body;
+
+		} catch (const std::exception &e) {
+			BoilstreamRethrowSafe("HTTP POST failed", e);
+		}
 	};
 
 	// POST /auth/api/mfa/verify-enrollment
@@ -1666,23 +1572,13 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// Cookie format: "session={token}" as per server spec
 	string session_cookie = "session=" + session_token;
 
-	BOILSTREAM_LOG("VerifyMfa: Sending request body: " << verify_body);
-	BOILSTREAM_LOG("VerifyMfa: Session token (first 8 chars): "
-	               << session_token.substr(0, std::min<size_t>(8, session_token.length()))
-	               << "... (total length=" << session_token.length() << ")");
-	BOILSTREAM_LOG("VerifyMfa: Cookie header: "
-	               << session_cookie.substr(0, std::min<size_t>(20, session_cookie.length())) << "...");
-
 	HTTPHeaders response_headers(DatabaseInstance::GetDatabase(context));
 	string verify_response;
 	try {
 		verify_response = http_post(verify_url, verify_body, session_cookie, &response_headers);
 	} catch (const std::exception &e) {
-		throw IOException("MFA verification failed: %s", e.what());
+		BoilstreamRethrowSafe("MFA verification failed", e);
 	}
-
-	BOILSTREAM_LOG(
-	    "VerifyMfa: Response body: " << verify_response.substr(0, std::min<size_t>(200, verify_response.size())));
 
 	// Handle empty response
 	if (verify_response.empty()) {
@@ -1693,20 +1589,15 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// Parse verification response
 	auto verify_resp_doc = duckdb_yyjson::yyjson_read(verify_response.c_str(), verify_response.size(), 0);
 	if (!verify_resp_doc) {
-		string preview = verify_response.substr(0, std::min<size_t>(500, verify_response.size()));
-		throw IOException("Failed to parse verification response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse verification response");
 	}
 	auto verify_resp_root = duckdb_yyjson::yyjson_doc_get_root(verify_resp_doc);
 	auto success_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "success");
 	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
 
 	if (!success) {
-		auto error_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "error");
-		string error_msg = SafeYyjsonGetStr(error_val);
-		if (error_msg.empty())
-			error_msg = "Invalid TOTP code";
 		duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
-		throw IOException("MFA verification failed: %s", error_msg.c_str());
+		throw IOException("MFA verification failed");
 	}
 
 	// Extract backup codes
@@ -1725,8 +1616,6 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		}
 	}
 	duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
-
-	BOILSTREAM_LOG("VerifyMfa: Verification successful, " << backup_codes.size() << " backup codes received");
 
 	// Clear registration state after successful verification
 	storage->ClearRegistrationState();
@@ -1824,82 +1713,83 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		}
 	}
 
-	BOILSTREAM_LOG("Login: Parsed base_url=" << base_url << ", email=" << email);
-
 	// Helper: Make HTTP GET request
 	auto http_get = [&](const string &url) -> string {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &http_util = HTTPUtil::Get(db);
-		auto params = http_util.InitializeParameters(db, url);
-		if (!params) {
-			throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
+		try {
+			auto &db = DatabaseInstance::GetDatabase(context);
+			auto &http_util = HTTPUtil::Get(db);
+			auto params = http_util.InitializeParameters(db, url);
+			if (!params) {
+				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
+			}
+
+			HTTPHeaders headers(db);
+			string response_body;
+			auto response_handler = [&](const HTTPResponse &response) -> bool {
+				return true;
+			};
+			auto content_handler = [&](const_data_ptr_t data, idx_t size) -> bool {
+				response_body.append(const_char_ptr_cast(data), size);
+				return true;
+			};
+
+			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
+			auto response = http_util.Request(request);
+
+			if (!response->Success()) {
+				BoilstreamThrowHttpStatus("HTTP GET failed", static_cast<int>(response->status));
+			}
+
+			return response_body;
+
+		} catch (const std::exception &e) {
+			BoilstreamRethrowSafe("HTTP GET failed", e);
 		}
-
-		HTTPHeaders headers(db);
-		string response_body;
-		auto response_handler = [&](const HTTPResponse &response) -> bool {
-			return true;
-		};
-		auto content_handler = [&](const_data_ptr_t data, idx_t size) -> bool {
-			response_body.append(const_char_ptr_cast(data), size);
-			return true;
-		};
-
-		GetRequestInfo request(url, headers, *params, response_handler, content_handler);
-		auto response = http_util.Request(request);
-
-		if (!response->Success()) {
-			throw IOException("HTTP GET %s failed with status %d", url.c_str(), static_cast<int>(response->status));
-		}
-
-		return response_body;
 	};
 
 	// Helper: Make HTTP POST request
 	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &http_util = HTTPUtil::Get(db);
-		auto params = http_util.InitializeParameters(db, url);
-		if (!params) {
-			throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-		}
-		HTTPHeaders headers(db);
-		headers.Insert("Content-Type", "application/json");
-		if (!cookie.empty()) {
-			headers.Insert("Cookie", cookie);
-		}
-
-		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-		auto response = http_util.Request(request);
-
-		if (out_headers) {
-			*out_headers = response->headers;
-		}
-
-		string response_body = request.buffer_out;
-
-		auto status_code = static_cast<int>(response->status);
-		BOILSTREAM_LOG("HTTP POST " << url << " -> status=" << status_code << " body_len=" << response_body.size());
-
-		// Check status code and fail fast on errors to prevent retries
-		if (status_code < 200 || status_code >= 300) {
-			// Special handling for rate limit / replay protection
-			if (status_code == 429) {
-				throw IOException(
-				    "HTTP POST failed: HTTP 429 - Too Many Requests. "
-				    "This may be due to TOTP code replay protection. Please generate a fresh TOTP code and try again.");
+		try {
+			auto &db = DatabaseInstance::GetDatabase(context);
+			auto &http_util = HTTPUtil::Get(db);
+			auto params = http_util.InitializeParameters(db, url);
+			if (!params) {
+				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
+			}
+			HTTPHeaders headers(db);
+			headers.Insert("Content-Type", "application/json");
+			if (!cookie.empty()) {
+				headers.Insert("Cookie", cookie);
 			}
 
-			// General error handling
-			string error_preview = response_body.substr(0, std::min<size_t>(200, response_body.size()));
-			if (response_body.size() > 200) {
-				error_preview += "... (truncated)";
-			}
-			throw IOException("HTTP POST failed: HTTP " + std::to_string(status_code) + " - " + error_preview);
-		}
+			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			auto response = http_util.Request(request);
 
-		return response_body;
+			if (out_headers) {
+				*out_headers = response->headers;
+			}
+
+			string response_body = request.buffer_out;
+
+			auto status_code = static_cast<int>(response->status);
+
+			// Check status code and fail fast on errors to prevent retries
+			if (status_code < 200 || status_code >= 300) {
+				// Special handling for rate limit / replay protection
+				if (status_code == 429) {
+					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
+				}
+
+				// General error handling
+				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
+			}
+
+			return response_body;
+
+		} catch (const std::exception &e) {
+			BoilstreamRethrowSafe("HTTP POST failed", e);
+		}
 	};
 
 	// Step 1: Get CSRF token
@@ -1908,22 +1798,18 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	try {
 		csrf_response = http_get(csrf_url);
 	} catch (const std::exception &e) {
-		throw IOException("Failed to fetch CSRF token: %s", e.what());
+		BoilstreamRethrowSafe("Failed to fetch CSRF token", e);
 	}
-
-	BOILSTREAM_LOG("Login: CSRF response: " << csrf_response.substr(0, std::min<size_t>(200, csrf_response.size())));
 
 	auto csrf_doc = duckdb_yyjson::yyjson_read(csrf_response.c_str(), csrf_response.size(), 0);
 	if (!csrf_doc) {
-		string preview = csrf_response.substr(0, std::min<size_t>(100, csrf_response.size()));
-		throw IOException("Failed to parse CSRF response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse CSRF response");
 	}
 	auto csrf_root = duckdb_yyjson::yyjson_doc_get_root(csrf_doc);
 	auto csrf_token_val = duckdb_yyjson::yyjson_obj_get(csrf_root, "csrf_token");
 	if (!csrf_token_val) {
-		string preview = csrf_response.substr(0, std::min<size_t>(100, csrf_response.size()));
 		duckdb_yyjson::yyjson_doc_free(csrf_doc);
-		throw IOException("CSRF response missing csrf_token field. Response preview: %s", preview.c_str());
+		throw IOException("CSRF response missing csrf_token field");
 	}
 	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
 	duckdb_yyjson::yyjson_doc_free(csrf_doc);
@@ -1954,7 +1840,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	try {
 		login_response = http_post(login_url, login_body, "", &login_response_headers);
 	} catch (const std::exception &e) {
-		throw IOException("Login request failed: %s", e.what());
+		BoilstreamRethrowSafe("Login request failed", e);
 	}
 
 	// Check if login was successful by looking for Set-Cookie header
@@ -1970,8 +1856,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
 	} catch (...) {
 		// No Set-Cookie header - login probably failed
-		throw IOException("Login failed: No session cookie returned. Response: %s",
-		                  login_response.substr(0, 100).c_str());
+		throw IOException("Login failed: No session cookie returned");
 	}
 	if (set_cookie_header.empty()) {
 		throw IOException("Login response missing Set-Cookie header");
@@ -1982,7 +1867,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	string session_token;
 	size_t session_pos = set_cookie_header.find("session=");
 	if (session_pos == string::npos) {
-		throw IOException("Set-Cookie header missing session cookie: %s", set_cookie_header.c_str());
+		throw IOException("Set-Cookie header missing session cookie");
 	}
 
 	size_t value_start = session_pos + 8; // Length of "session="
@@ -2013,28 +1898,21 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	try {
 		mfa_response = http_post(mfa_url, mfa_body, session_cookie);
 	} catch (const std::exception &e) {
-		throw IOException("MFA authentication failed: %s", e.what());
+		BoilstreamRethrowSafe("MFA authentication failed", e);
 	}
-
-	BOILSTREAM_LOG("Login: MFA response: " << mfa_response);
 
 	// Parse MFA response to verify success
 	auto mfa_resp_doc = duckdb_yyjson::yyjson_read(mfa_response.c_str(), mfa_response.size(), 0);
 	if (!mfa_resp_doc) {
-		string preview = mfa_response.substr(0, std::min<size_t>(100, mfa_response.size()));
-		throw IOException("Failed to parse MFA response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse MFA response");
 	}
 	auto mfa_resp_root = duckdb_yyjson::yyjson_doc_get_root(mfa_resp_doc);
 	auto success_val = duckdb_yyjson::yyjson_obj_get(mfa_resp_root, "success");
 	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
 
 	if (!success) {
-		auto error_val = duckdb_yyjson::yyjson_obj_get(mfa_resp_root, "error");
-		string error_msg = SafeYyjsonGetStr(error_val);
-		if (error_msg.empty())
-			error_msg = "Invalid MFA code";
 		duckdb_yyjson::yyjson_doc_free(mfa_resp_doc);
-		throw IOException("MFA authentication failed: %s", error_msg.c_str());
+		throw IOException("MFA authentication failed");
 	}
 	duckdb_yyjson::yyjson_doc_free(mfa_resp_doc);
 
@@ -2052,16 +1930,13 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	try {
 		bootstrap_response = http_post(bootstrap_url_endpoint, bootstrap_body, session_cookie);
 	} catch (const std::exception &e) {
-		throw IOException("Bootstrap token request failed: %s", e.what());
+		BoilstreamRethrowSafe("Bootstrap token request failed", e);
 	}
-
-	BOILSTREAM_LOG("Login: Bootstrap response: " << bootstrap_response);
 
 	// Parse bootstrap token response
 	auto bootstrap_resp_doc = duckdb_yyjson::yyjson_read(bootstrap_response.c_str(), bootstrap_response.size(), 0);
 	if (!bootstrap_resp_doc) {
-		string preview = bootstrap_response.substr(0, std::min<size_t>(100, bootstrap_response.size()));
-		throw IOException("Failed to parse bootstrap token response. Response preview: %s", preview.c_str());
+		throw IOException("Failed to parse bootstrap token response");
 	}
 	auto bootstrap_resp_root = duckdb_yyjson::yyjson_doc_get_root(bootstrap_resp_doc);
 	auto bootstrap_token_val = duckdb_yyjson::yyjson_obj_get(bootstrap_resp_root, "bootstrap_token");
@@ -2128,7 +2003,6 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	// Perform OPAQUE login
 	try {
-		BOILSTREAM_LOG("Login: endpoint_url=" << endpoint_url);
 
 		// Bind the bootstrap identity and endpoint together
 		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
@@ -2138,8 +2012,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		BOILSTREAM_LOG("Login: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
 		// The failed pending exchange never changed the active session.
-		BOILSTREAM_LOG("Login: OPAQUE login failed: " << e.what());
-		throw IOException("OPAQUE login failed: %s", e.what());
+
+		BoilstreamRethrowSafe("OPAQUE login failed", e);
 	}
 
 	// Set context for this connection (use hash of bootstrap token, not the token itself)
@@ -2161,11 +2035,9 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		for (const auto &entry : secrets) {
 			if (entry.secret && entry.secret->GetType() == "ducklake") {
 				ducklake_names.push_back(entry.secret->GetName());
-				BOILSTREAM_LOG("Login: Found ducklake secret: " << entry.secret->GetName());
 			}
 		}
 	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("Login: Failed to fetch secrets: " << e.what());
 		// Continue - not critical for login success
 	}
 
@@ -2192,8 +2064,6 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// explicit-attach state. Catalog discovery remains `boilstream_ducklakes()`.
 	result_sql += "SELECT 'Session token obtained' as status, TIMESTAMP '" + string(expires_str) +
 	              "' as expires_at, 0 as ducklakes_attached;";
-
-	BOILSTREAM_LOG("Login: Returning multi-statement SQL with " << ducklake_names.size() << " ATTACH command(s)");
 
 	return result_sql;
 }
@@ -2289,9 +2159,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		// AutoLoadExtension still respects DuckDB's autoinstall setting.
 		ExtensionHelper::AutoLoadExtension(db, "quack");
 		BOILSTREAM_LOG("LoadInternal: Quack client extension loaded successfully");
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG(
-		    "LoadInternal: WARNING - Failed to load Quack client. Managed DuckLake ATTACH may not work: " << e.what());
+	} catch (const std::exception &) {
+		BOILSTREAM_LOG("LoadInternal: Quack client extension unavailable");
 	}
 
 	// Auto-load postgres_scanner extension for postgres secrets (not available in WASM)

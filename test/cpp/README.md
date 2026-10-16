@@ -102,3 +102,24 @@ However, these require proper integration with DuckDB's test framework to run.
 1. Integrate C++ tests into DuckDB's test framework
 2. Add mock HTTP server for integration testing
 3. Add performance benchmarks
+
+## Authentication diagnostic regression tests
+
+`AuthDiagnostics_debug` and `AuthDiagnostics_release` compile the actual storage
+and SQL authentication entrypoints against the selected BoilStream fork shared
+library and its statically built HTTPFS provider. Both use optimized C++; the
+mode selects whether `BOILSTREAM_DEBUG` diagnostics are enabled. This does not
+qualify an entire product Release build.
+
+Run the registered CTest cases with `ctest -R '^AuthDiagnostics_' --output-on-failure`.
+The Python runner starts only a loopback synthetic HTTP server and has a 30-second
+child deadline. It needs no account, password, external service or persistent
+credential file. It asserts request counts as well as native case outcomes.
+
+The cases cover secret markers in logs and errors, structured exception metadata,
+exact status preservation, malformed cipher headers, real SQL login/registration
+failure stages, malformed cookies, successful response delivery, request reuse
+after errors, and simultaneous exception handling. Captured diagnostics are never
+printed. A passing case must reach its intended failure stage; merely throwing is
+insufficient. Full OPAQUE success, browser/WASM behavior, registration ownership
+and mandatory response-signature enforcement remain separate qualification work.

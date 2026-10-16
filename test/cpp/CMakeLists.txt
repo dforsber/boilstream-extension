@@ -537,3 +537,37 @@ endif()
 set_property(TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
   BoilstreamCryptoTests InputValidationTests BoilstreamConnectionStateTests
   APPEND PROPERTY ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+
+# Compile the actual authentication SQL entrypoints and storage implementation.
+# Runtime uses synthetic loopback HTTP; never needs real credentials.
+if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  find_package(Threads REQUIRED)
+  find_library(BOILSTREAM_AUTH_TEST_LIBRARY NAMES duckdb
+    PATHS "${EXTENSION_BUILD_DIR}/src" NO_DEFAULT_PATH)
+  if(NOT BOILSTREAM_AUTH_TEST_LIBRARY)
+    message(FATAL_ERROR "Auth diagnostics require the exact fork shared library with static httpfs providers")
+  endif()
+  foreach(mode IN ITEMS debug release)
+    add_executable(auth_diagnostics_${mode}_test test_auth_diagnostics.cpp
+      ../../src/boilstream_secret_storage.cpp ../../src/boilstream_extension.cpp
+      ../../src/opaque_wrapper.cpp)
+    target_include_directories(auth_diagnostics_${mode}_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+      ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+    target_link_libraries(auth_diagnostics_${mode}_test PRIVATE
+      ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+      "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      target_compile_definitions(auth_diagnostics_${mode}_test PRIVATE BOILSTREAM_TRACK_STATE_FREE)
+      target_link_options(auth_diagnostics_${mode}_test PRIVATE
+        "-Wl,--wrap=opaque_free_login_state" "-Wl,--wrap=opaque_free_registration_state")
+    endif()
+    if(mode STREQUAL "debug")
+      target_compile_definitions(auth_diagnostics_${mode}_test PRIVATE BOILSTREAM_DEBUG)
+    endif()
+    add_test(NAME AuthDiagnostics_${mode} COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py $<TARGET_FILE:auth_diagnostics_${mode}_test>)
+    set_tests_properties(AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40
+      ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+  endforeach()
+endif()
