@@ -507,3 +507,33 @@ link_rust_dependencies(session_memory_only_test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME SessionMemoryOnly COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_SOURCE_DIR}/run_session_memory_only.py $<TARGET_FILE:session_memory_only_test>)
+
+# Generic cache isolation, stale publication, capacity and real secret-manager routing.
+add_executable(secret_cache_ownership_test test_secret_cache_ownership.cpp
+               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+target_include_directories(secret_cache_ownership_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(secret_cache_ownership_test PRIVATE ${DUCKDB_LIBS})
+link_rust_dependencies(secret_cache_ownership_test)
+add_test(NAME SecretCacheOwnership COMMAND secret_cache_ownership_test)
+set_tests_properties(SecretCacheOwnership PROPERTIES TIMEOUT 60)
+
+# This integration gate targets the BoilStream fork's required static providers.
+if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  add_executable(secret_cache_providers_test test_secret_cache_providers.cpp
+                 ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+  target_include_directories(secret_cache_providers_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+    ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+  target_link_libraries(secret_cache_providers_test PRIVATE ${DUCKDB_LIBS})
+  link_rust_dependencies(secret_cache_providers_test)
+  add_test(NAME SecretCacheProviders COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_cache_providers.py $<TARGET_FILE:secret_cache_providers_test>)
+  set_tests_properties(SecretCacheProviders PROPERTIES TIMEOUT 70)
+endif()
+
+# Unit/security tests must not perform unrelated Airport startup telemetry.
+set_property(TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
+  BoilstreamCryptoTests InputValidationTests BoilstreamConnectionStateTests
+  APPEND PROPERTY ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")

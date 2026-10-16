@@ -13,6 +13,16 @@ and process restarts require login again. The extension does not save credential
 to files or browser storage, and ignores credential files left by older releases.
 Secure restart login is deferred.
 
+Generic remote secrets are private to the authenticated session and active tenant,
+including worker-thread tenant context in the BoilStream DuckDB fork. A tenant
+change requires login again. Logout, replacement and connection teardown retire
+the owner's cache; credentials are never copied into shared `memory` storage.
+Complete secret lists replace the cache atomically after validation. Each owner
+has at most 10,000 entries, 10 MiB of serialized entries, and 1 MiB per entry;
+capacity errors preserve existing entries. Explicit secrets created without login
+remain local to that connection and tenant. Provider compatibility is qualified
+against the BoilStream DuckDB fork's secret lookup behavior.
+
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)

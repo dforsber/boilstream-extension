@@ -190,7 +190,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: Fetching ducklakes from API");
 
 	// Get the endpoint URL and validate it's configured
-	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	auto conn_state = storage->GetSessionForContext(context);
 	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException(
@@ -580,7 +580,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: Fetching buckets from API");
 
 	// Get the endpoint URL and validate it's configured
-	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	auto conn_state = storage->GetSessionForContext(context);
 	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException(
@@ -758,7 +758,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	}
 
 	// Get endpoint URL
-	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	auto conn_state = storage->GetSessionForContext(context);
 	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException("boilstream_create_ducklake: No endpoint configured. Call PRAGMA "
@@ -967,7 +967,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 13: Hash complete");
 
 	// Check if this is the same bootstrap token from an existing valid session
-	auto existing_session = storage->GetSessionForConnection(context.GetConnectionId());
+	auto existing_session = storage->GetSessionForContext(context);
 	if (existing_session && existing_session->GetBootstrapTokenHash() == incoming_token_hash &&
 	    !incoming_token_hash.empty() && existing_session->IsSessionTokenValid() &&
 	    existing_session->GetEndpointUrl() == endpoint_url) {
@@ -1039,7 +1039,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto bootstrap_conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+		auto bootstrap_conn_state = storage->GetSessionForContext(context);
 		// Use FetchAllSecretsFromServer to always fetch (AllSecrets returns empty in WASM)
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
@@ -2103,7 +2103,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Check if this is the same bootstrap token from an existing valid session
-	auto existing_session = storage->GetSessionForConnection(context.GetConnectionId());
+	auto existing_session = storage->GetSessionForContext(context);
 	if (existing_session && existing_session->GetBootstrapTokenHash() == incoming_token_hash &&
 	    !incoming_token_hash.empty() && existing_session->IsSessionTokenValid() &&
 	    existing_session->GetEndpointUrl() == endpoint_url) {
@@ -2153,7 +2153,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto bootstrap_conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+		auto bootstrap_conn_state = storage->GetSessionForContext(context);
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("Login: Successfully fetched and cached secrets");
 

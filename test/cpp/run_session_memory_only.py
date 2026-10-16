@@ -1,5 +1,6 @@
 """Run the memory-only session regression with a rejecting loopback authority."""
 import http.server
+import os
 import subprocess
 import sys
 import threading
@@ -30,6 +31,7 @@ def main():
             [sys.argv[1], f"http://127.0.0.1:{server.server_port}/secrets"],
             timeout=60,
             check=False,
+            env={**os.environ, "QUERY_FARM_TELEMETRY_OPT_OUT": "1"},
         )
     finally:
         server.shutdown()

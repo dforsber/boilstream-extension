@@ -87,6 +87,9 @@ public:
 	//! Get session by connection ID (returns nullptr if not found)
 	shared_ptr<BoilstreamConnectionState> GetSessionForConnection(idx_t connection_id);
 
+	//! Context-aware authority access; a changed tenant must authenticate again.
+	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
+
 	//! Perform OPAQUE login with password
 	//! Authenticate private state, then publish it for this connection
 	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
@@ -244,9 +247,20 @@ protected:
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
 
 private:
+	struct SecretOwner {
+		shared_ptr<BoilstreamConnectionState> session;
+		shared_ptr<BoilstreamSecretCache> cache;
+	};
+	SecretOwner GetSecretOwner(optional_ptr<CatalogTransaction> transaction, bool create = false);
+	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
+	SecretMatch LookupCachedSecret(const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache);
+	void FetchSecret(const string &selector, const string &type, bool match, optional_ptr<CatalogTransaction> transaction,
+	                 const shared_ptr<BoilstreamSecretCache> &expected_cache);
+	void PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision);
+
 	//! Write secret with explicit connection state (called from StoreSecret)
 	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
-	                          BoilstreamConnectionState &conn_state);
+	                          BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction);
 
 	//! Request signing result containing all required headers
 	struct SigningResult {
@@ -328,9 +342,6 @@ private:
 
 	//! Clear expiration data for a secret (uses connection state)
 	void ClearExpiration(const string &secret_name, BoilstreamConnectionState &conn_state);
-
-	//! Add or update secret in local catalog
-	void AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret, optional_ptr<CatalogTransaction> transaction);
 
 	//! Make HTTP DELETE request to REST API (uses connection state)
 	void HttpDelete(const string &url, BoilstreamConnectionState &conn_state);

@@ -3,8 +3,14 @@
 // server supplied by the runner. Never accesses a real credential file.
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "boilstream_secret_storage.hpp"
+#if __has_include("duckdb/main/tenant/active_tenant_registry.hpp")
+#include "duckdb/main/tenant/active_tenant_registry.hpp"
+#include "duckdb/main/tenant/tenant_context.hpp"
+#define TEST_TENANT_CONTEXT 1
+#endif
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -31,13 +37,19 @@ public:
   ++accesses; throw IOException("tripwire");
  }
 };
+struct MemoryConfig : DBConfig { MemoryConfig() { options.load_extensions=false; options.maximum_threads=2; } };
 struct Fixture {
- DuckDB db {nullptr};
+ MemoryConfig settings;
+ DuckDB db {nullptr,&settings};
  RestApiSecretStorage storage {*db.instance, "http://127.0.0.1:1/unused-default"};
  Connection connection {db};
  unique_ptr<FileSystem> original;
  TripwireFS *fs;
  Fixture() {
+  SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
+  Require(ExtensionHelper::LoadExtension(db,"httpfs")==ExtensionLoadResult::LOADED_EXTENSION);
+  auto transport=connection.Query("SET httpfs_client_implementation='curl'");
+  Require(transport && !transport->HasError());
   auto &config = DBConfig::GetConfig(*db.instance);
   original = std::move(config.file_system);
   auto tripwire = make_uniq<TripwireFS>(); fs = tripwire.get(); config.file_system = std::move(tripwire);
@@ -145,5 +157,28 @@ int main(int argc, char **argv) {
   Require(state->IsSessionTokenValid() && state->refresh_token == vector<uint8_t>(32, 9));
   Require(state->GetEndpointUrl() == argv[1] && state->bootstrap_token_hash == "synthetic-bootstrap-identity");
  });
+
+#ifdef TEST_TENANT_CONTEXT
+ test("tenant_switch_cannot_reuse_session_status_or_authority", [&] {
+  Fixture f;TenantContext first,second;first.SetTenantId("42");second.SetTenantId("43");
+  {ActiveTenantRegistry::Guard guard(*f.db.instance,&first);
+   BoilstreamSessionPublicationTestAccess::Publish(f.storage,*f.connection.context,Pending(argv[1]));
+   Require(f.storage.IsSessionTokenValid(*f.connection.context));}
+  {ActiveTenantRegistry::Guard guard(*f.db.instance,&second);
+   Require(!f.storage.IsSessionTokenValid(*f.connection.context));
+   Require(f.storage.GetEndpointUrl(*f.connection.context).empty());
+   Require(f.storage.GetBootstrapTokenHash(*f.connection.context).empty());
+   Require(f.storage.GetTokenExpiresAt(*f.connection.context)==std::chrono::system_clock::time_point::min());}
+ });
+ test("tenant_switch_cannot_send_another_tenants_refresh_credential", [&] {
+  Fixture f;TenantContext first,second;first.SetTenantId("42");second.SetTenantId("43");auto state=Pending(argv[1]);
+  {ActiveTenantRegistry::Guard guard(*f.db.instance,&first);
+   BoilstreamSessionPublicationTestAccess::Publish(f.storage,*f.connection.context,state);}
+  {ActiveTenantRegistry::Guard guard(*f.db.instance,&second);RejectResume(f,*f.connection.context);}
+  Require(f.storage.GetSessionForConnection(f.connection.context->GetConnectionId())==state && state->IsSessionTokenValid());
+  // The runner also requires exactly one request overall, from the earlier valid
+  // same-tenant resume control. An HTTP rejection alone does not pass this gate.
+ });
+#endif
  return failed ? 1 : 0;
 }

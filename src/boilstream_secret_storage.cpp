@@ -15,8 +15,14 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
-// TenantIsolation is optional - only available in multi-tenant DuckDB fork
-// We use bootstrap_token_hash as session key which works with vanilla DuckDB too
+// Use the fork's authoritative context, including worker-thread propagation.
+// Community DuckDB has no tenant subsystem; its extension setting remains the
+// standalone mode selector. Never interpret an absent fork setting as no tenant.
+#if __has_include("duckdb/main/tenant/active_tenant_registry.hpp")
+#include "duckdb/main/tenant/active_tenant_registry.hpp"
+#include "duckdb/main/tenant/tenant_isolation.hpp"
+#define BOILSTREAM_HAS_TENANT_CONTEXT 1
+#endif
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -342,7 +348,11 @@ RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string 
 shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSession(optional_ptr<CatalogTransaction> transaction) {
 	if (transaction && transaction->HasContext()) {
 		auto &ctx = transaction->GetContext();
-		return GetSessionForConnection(ctx.GetConnectionId());
+		auto state = GetSessionForConnection(ctx.GetConnectionId());
+		if (state && state->authenticated_tenant != GetTenantId(ctx)) {
+			throw IOException("BoilStream session belongs to a different tenant context");
+		}
+		return state;
 	}
 	return nullptr;
 }
@@ -405,26 +415,35 @@ shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForConnect
 	return (it != sessions_.end()) ? it->second : nullptr;
 }
 
+shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForContext(ClientContext &context) {
+	auto state = GetSessionForConnection(context.GetConnectionId());
+	return state && state->authenticated_tenant == GetTenantId(context) ? state : nullptr;
+}
+
 void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
 	lock_guard<mutex> lock(endpoint_lock);
 	endpoint_url = endpoint;
 }
 
 void RestApiSecretStorage::ClearSession(ClientContext &context) {
-	lock_guard<mutex> lock(sessions_lock_);
-	auto conn_id = context.GetConnectionId();
-	auto conn_it = connection_session_keys_.find(conn_id);
-	if (conn_it == connection_session_keys_.end()) {
-		return; // No session for this connection
+	shared_ptr<BoilstreamConnectionState> retired;
+	{
+		lock_guard<mutex> lock(sessions_lock_);
+		auto conn_it = connection_session_keys_.find(context.GetConnectionId());
+		if (conn_it == connection_session_keys_.end()) return;
+		auto it = sessions_.find(conn_it->second);
+		if (it != sessions_.end()) {
+			retired = it->second;
+			// Reject an exchange already in flight before dropping the registry
+			// lock. Credential/cache destruction stays outside the global lock.
+			retired->authentication_generation.fetch_add(1);
+		}
 	}
-	auto it = sessions_.find(conn_it->second);
-	if (it != sessions_.end()) {
-		it->second->ClearSession();
-	}
+	if (retired) retired->ClearSession();
 }
 
 bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
-	auto session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForContext(context);
 	if (!session) {
 		return false;
 	}
@@ -432,7 +451,7 @@ bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
 }
 
 string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
-	auto session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForContext(context);
 	if (!session) {
 		return "";
 	}
@@ -440,7 +459,7 @@ string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
 }
 
 void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const string &hash) {
-	auto session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForContext(context);
 	if (!session) {
 		return;
 	}
@@ -449,7 +468,7 @@ void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const s
 }
 
 std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt(ClientContext &context) {
-	auto session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForContext(context);
 	if (!session) {
 		return std::chrono::system_clock::time_point::min();
 	}
@@ -787,6 +806,7 @@ void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<Boi
 	const auto connection_id = context.GetConnectionId();
 	context.registered_state->GetOrCreate<BoilstreamSessionCleanup>("boilstream_session_cleanup", *this, connection_id);
 	const auto key = "@connection:" + std::to_string(connection_id);
+	pending->authenticated_tenant = GetTenantId(context);
 	// This state is still private. Retain a refresh credential only when the
 	// server supports using it; all credentials remain connection-owned memory.
 	if (!supports_resumption) {
@@ -812,6 +832,7 @@ void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<Boi
 		sessions_[key] = pending;
 		connection_session_keys_[connection_id] = key;
 	}
+	if (previous) previous->secret_cache->Close();
 }
 
 void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const string &password,
@@ -825,7 +846,7 @@ void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const stri
 }
 
 void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
-	auto previous = GetSessionForConnection(context.GetConnectionId());
+	auto previous = GetSessionForContext(context);
 	if (!previous || context.IsInterrupted()) {
 		throw IOException("Session resumption requires an authenticated connection; log in again");
 	}
@@ -883,6 +904,7 @@ string RestApiSecretStorage::GetUserContextForConnection(idx_t connection_id) {
 }
 
 void RestApiSecretStorage::ClearConnectionMapping(idx_t connection_id) {
+	shared_ptr<BoilstreamConnectionState> retired;
 	{
 		lock_guard<mutex> lock(connection_lock);
 		connection_user_map.erase(std::to_string(connection_id));
@@ -893,11 +915,16 @@ void RestApiSecretStorage::ClearConnectionMapping(idx_t connection_id) {
 		if (it != connection_session_keys_.end()) {
 			const auto owned_key = "@connection:" + std::to_string(connection_id);
 			if (it->second == owned_key) {
-				sessions_.erase(owned_key);
+				auto owned = sessions_.find(owned_key);
+				if (owned != sessions_.end()) {
+					retired = std::move(owned->second);
+					sessions_.erase(owned);
+				}
 			}
 			connection_session_keys_.erase(it);
 		}
 	}
+	if (retired) retired->secret_cache->Close();
 }
 
 string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction> transaction) {
@@ -1844,6 +1871,8 @@ RestApiSecretStorage::GetSecretExpiration(const string &secret_name, optional_pt
 		return std::chrono::system_clock::time_point();
 	}
 
+	auto generic_expiry = conn_state->secret_cache->Expiration(secret_name);
+	if (generic_expiry != BoilstreamSecretCache::Time::min()) return generic_expiry;
 	lock_guard<mutex> lock(conn_state->expiration_lock);
 
 	auto it = conn_state->secret_expiration.find(secret_name);
@@ -1861,28 +1890,24 @@ string RestApiSecretStorage::GetEndpointUrl() {
 }
 
 string RestApiSecretStorage::GetEndpointUrl(ClientContext &context) {
-	auto state = GetSessionForConnection(context.GetConnectionId());
+	auto state = GetSessionForContext(context);
 	return state ? state->GetEndpointUrl() : "";
 }
 
 bool RestApiSecretStorage::IsMultiTenantMode(ClientContext &context) {
-	Value tenant_id;
-	if (context.TryGetCurrentSetting("boilstream.tenant_id", tenant_id)) {
-		auto tenant_str = tenant_id.ToString();
-		if (!tenant_str.empty()) {
-			BOILSTREAM_LOG("IsMultiTenantMode: tenant_id=" << tenant_str << " - multi-tenant mode active");
-			return true;
-		}
-	}
-	return false;
+	return !GetTenantId(context).empty();
 }
 
 string RestApiSecretStorage::GetTenantId(ClientContext &context) {
+#ifdef BOILSTREAM_HAS_TENANT_CONTEXT
+	auto &tenant = TenantIsolation::GetTenant(context);
+	if (tenant.IsActive()) return tenant.tenant_id;
+	auto active = ActiveTenantRegistry::GetCurrentTenant(DatabaseInstance::GetDatabase(context));
+	return active && active->IsActive() ? active->tenant_id : "";
+#else
 	Value tenant_id;
-	if (context.TryGetCurrentSetting("boilstream.tenant_id", tenant_id)) {
-		return tenant_id.ToString();
-	}
-	return "";
+	return context.TryGetCurrentSetting("boilstream.tenant_id", tenant_id) ? tenant_id.ToString() : "";
+#endif
 }
 
 string RestApiSecretStorage::StripTenantPrefix(const string &name, ClientContext &context) {
@@ -1998,33 +2023,61 @@ void RestApiSecretStorage::ClearRegistrationState() {
 	BOILSTREAM_LOG("ClearRegistrationState: Registration state cleared");
 }
 
-void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret,
-                                                      optional_ptr<CatalogTransaction> transaction) {
-	auto trans = GetTransactionOrDefault(transaction);
-	auto secret_name = secret->GetName();
+namespace {
+class LocalBoilstreamSecrets : public ClientContextState {
+public:
+	explicit LocalBoilstreamSecrets(string tenant) : tenant(std::move(tenant)) {}
+	const string tenant;
+	shared_ptr<BoilstreamSecretCache> cache = make_shared_ptr<BoilstreamSecretCache>();
+	~LocalBoilstreamSecrets() override { cache->Close(); }
+};
+}
 
-	BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Adding '" << secret_name << "'");
-
-	// Check if secret already exists in catalog
-	auto existing = secrets->GetEntry(trans, secret_name);
-	if (existing) {
-		BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Dropping existing entry for '" << secret_name << "'");
-		// Drop the existing entry
-		secrets->DropEntry(trans, secret_name, false, true);
+RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(
+    optional_ptr<CatalogTransaction> transaction, bool create) {
+	if (!transaction || !transaction->HasContext()) return {};
+	auto &context = transaction->GetContext();
+	auto state = GetSession(transaction);
+	if (state) {
+		lock_guard<mutex> lock(state->session_lock);
+		if (state->access_token.empty() || state->session_key.empty() ||
+		    state->token_expires_at <= std::chrono::system_clock::now()) return {};
+		return {state, state->secret_cache};
 	}
+	// Explicit secrets without a login are local to this connection and tenant.
+	// They are never mirrored into database-wide memory storage.
+	auto local = create ? context.registered_state->GetOrCreate<LocalBoilstreamSecrets>(
+	                          "boilstream_local_secrets", GetTenantId(context))
+	                    : context.registered_state->Get<LocalBoilstreamSecrets>("boilstream_local_secrets");
+	if (local && local->tenant != GetTenantId(context)) {
+		throw IOException("Local BoilStream secrets belong to a different tenant context");
+	}
+	return {nullptr, local ? local->cache : nullptr};
+}
 
-	// Add new entry to catalog
-	auto secret_entry = make_uniq<SecretCatalogEntry>(std::move(secret), Catalog::GetSystemCatalog(db));
-	secret_entry->temporary = false;
-	secret_entry->secret->storage_mode = GetName();
-	secret_entry->secret->persist_type = SecretPersistType::PERSISTENT;
-	LogicalDependencyList l;
-	secrets->CreateEntry(trans, secret_name, std::move(secret_entry), l);
+shared_ptr<BoilstreamSecretCache> RestApiSecretStorage::GetSecretCache(
+    optional_ptr<CatalogTransaction> transaction, bool create) {
+	return GetSecretOwner(transaction, create).cache;
+}
 
-	// Verify entry was created
-	auto verify = secrets->GetEntry(trans, secret_name);
-	BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Entry created for '"
-	               << secret_name << "', verify=" << (verify ? "found" : "NOT FOUND"));
+static vector<SecretEntry> CloneSecretSnapshot(const shared_ptr<BoilstreamSecretCache> &cache) {
+	vector<SecretEntry> result;
+	if (cache) for (auto &entry : cache->Snapshot()) result.emplace_back(*entry);
+	return result;
+}
+
+SecretMatch RestApiSecretStorage::LookupCachedSecret(
+    const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache) {
+	SecretMatch best;
+	if (cache) {
+		for (auto &entry : cache->Snapshot()) {
+			if (StringUtil::CIEquals(entry->secret->GetType(), type)) {
+				SecretEntry copy(*entry);
+				best = SelectBestMatch(copy, path, tie_break_offset, best);
+			}
+		}
+	}
+	return best;
 }
 
 string RestApiSecretStorage::HttpGet(const string &url, optional_ptr<CatalogTransaction> transaction) {
@@ -2618,81 +2671,28 @@ void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionSta
 unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseSecret> secret,
                                                           OnCreateConflict on_conflict,
                                                           optional_ptr<CatalogTransaction> transaction) {
-	BOILSTREAM_LOG("StoreSecret: name=" << secret->GetName());
-
-	auto trans = GetTransactionOrDefault(transaction);
-	auto secret_name = secret->GetName();
-
-	// Check if secret exists in LOCAL CACHE ONLY (don't make HTTP request here - server will handle duplicates)
-	// This prevents recursive HTTP calls during StoreSecret
-	auto existing_local = CatalogSetSecretStorage::GetSecretByName(secret_name, transaction);
-	if (existing_local) {
-		BOILSTREAM_LOG("StoreSecret: found existing secret in local cache");
-		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
-			// Let the server handle the duplicate check - we'll send the request and it will fail if duplicate
-			BOILSTREAM_LOG("StoreSecret: ERROR_ON_CONFLICT, will let server check for duplicates");
-		} else if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
-			BOILSTREAM_LOG("StoreSecret: IGNORE_ON_CONFLICT, returning null");
-			return nullptr;
-		} else if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) {
-			throw InternalException("unknown OnCreateConflict found while registering secret");
-		} else if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
-			BOILSTREAM_LOG("StoreSecret: REPLACE_ON_CONFLICT, removing from local cache");
-			// Remove from catalog if present (best effort)
-			if (secrets->GetEntry(trans, secret_name)) {
-				secrets->DropEntry(trans, secret_name, false, true);
-			}
-			// Clear expiration
-			auto conn_state = GetSession(transaction);
-			if (conn_state) {
-				ClearExpiration(secret_name, *conn_state);
-			}
-		}
+	auto owner = GetSecretOwner(transaction, true);
+	auto state = owner.session;
+	auto cache = owner.cache;
+	if (!cache) throw IOException("A live connection is required to store a BoilStream secret");
+	if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) throw InvalidInputException("Unsupported secret conflict mode");
+	const auto revision = cache->Revision();
+	const auto name = secret->GetName();
+	auto existing = cache->Get(name, true);
+	if (existing) {
+		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) return nullptr;
+		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) throw InvalidInputException("Secret already exists");
 	}
-
-	// Persist to REST API (need connection state for authentication).
-	// When no boilstream session is active the secret stays in-process only —
-	// mirrors DuckDB's TEMPORARY secret semantics. This is the path that
-	// makes `CREATE SECRET (TYPE quack, TOKEN ..., SCOPE 'quack:host')`
-	// work from a plain DuckDB CLI session that never called
-	// `PRAGMA boilstream_bootstrap_session`. Cross-session persistence
-	// requires a live conn_state; absent one, the secret is session-local.
-	auto conn_state = GetSession(transaction);
-	if (conn_state) {
-		WriteSecretWithState(*secret, on_conflict, *conn_state);
-	} else {
-		BOILSTREAM_LOG("StoreSecret: no conn_state — skipping REST persist, storing in-memory only");
-	}
-
-	// Serialize the secret so we can deserialize it for memory storage
-	string secret_json = SerializeSecret(*secret);
-
-	// Add to local catalog first
-	auto secret_entry = make_uniq<SecretCatalogEntry>(std::move(secret), Catalog::GetSystemCatalog(db));
-	secret_entry->temporary = false;
-	secret_entry->secret->storage_mode = GetName();
-	secret_entry->secret->persist_type = SecretPersistType::PERSISTENT;
-	LogicalDependencyList l;
-	secrets->CreateEntry(trans, secret_name, std::move(secret_entry), l);
-
-	// Also cache in memory storage so DuckLake can find it
-	try {
-		BOILSTREAM_LOG("StoreSecret: Also caching in memory storage for DuckLake compatibility");
-		auto &secret_manager = SecretManager::Get(db);
-		auto secret_copy = DeserializeSecret(secret_json, secret_manager);
-		if (secret_copy) {
-			secret_manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
-			                              SecretPersistType::TEMPORARY, "memory");
-			BOILSTREAM_LOG("StoreSecret: Successfully cached in memory storage");
-		}
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("StoreSecret: Failed to cache in memory storage: " << e.what());
-		// Continue - not critical, secret is already in boilstream storage
-	}
-
-	// Return the stored entry
-	auto secret_catalog_entry = &secrets->GetEntry(trans, secret_name)->Cast<SecretCatalogEntry>();
-	return make_uniq<SecretEntry>(*secret_catalog_entry->secret);
+	const auto bytes = SerializeSecret(*secret).size();
+	// Remote writes do not establish credential expiry: refetch the authoritative
+	// server response before using them. Explicit local secrets have no remote TTL.
+	auto entry = BoilstreamSecretCache::Prepare(secret->Clone(),
+	    state ? BoilstreamSecretCache::Time::min() : BoilstreamSecretCache::Time::max(), bytes);
+	auto result = make_uniq<SecretEntry>(*entry.secret);
+	cache->ValidatePut(entry, revision);
+	if (state) WriteSecretWithState(*secret, on_conflict, *state, transaction);
+	cache->Put(std::move(entry), revision);
+	return result;
 }
 
 void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) {
@@ -2704,7 +2704,7 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 }
 
 void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
-                                                BoilstreamConnectionState &conn_state) {
+                                                BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction) {
 	BOILSTREAM_LOG("WriteSecretWithState: name=" << secret.GetName());
 
 	// Check if endpoint is configured
@@ -2743,575 +2743,142 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 
 	BOILSTREAM_LOG("WriteSecretWithState: about to POST, body_len=" << body.size());
 	// Make HTTP POST request with connection state for authentication
-	HttpPostWithState(url, body, conn_state);
+	HttpPostWithState(AppendPlatformParams(url, transaction), body, conn_state);
 	BOILSTREAM_LOG("WriteSecretWithState: POST successful");
 }
 
 SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string &type,
                                                optional_ptr<CatalogTransaction> transaction) {
-#ifdef __EMSCRIPTEN__
-	// WASM: Return cached secrets only, don't trigger HTTP fetch
-	// Secrets are stored in DuckDB's "memory" storage during bootstrap
-	return CatalogSetSecretStorage::LookupSecret(path, type, transaction);
-#endif
-
-	// ---------- Quack auto-vend dispatch (Phase 2.2) ----------
-	// For catalog-qualified TYPE quack lookups, bypass the generic /match endpoint
-	// and call the dedicated GET /secrets/quack/credentials endpoint through the
-	// authenticated OPAQUE channel.
-	// The server returns a catalog-scoped capability plus public server trust
-	// that we materialise into one KeyValueSecret. Cached secrets
-	// are refreshed when within 30s of expiry (tighter than the generic 5min buffer
-	// used by IsExpired, because Quack JWTs are short-lived).
-	if (StringUtil::Lower(type) == "quack") {
-		const bool managed_scope_candidate = path.find("/catalog/") != string::npos;
-		auto match = LookupQuackSecret(path, transaction);
-		if (match.HasMatch() || managed_scope_candidate) {
-			return match;
-		}
-		// Only an unqualified endpoint may fall through to an explicitly
-		// user-managed secret. A catalog-qualified managed lookup always fails
-		// closed: expiry, revocation, malformed scope, or vending failure must
-		// never broaden authority to an endpoint-scoped credential.
+	if (StringUtil::Lower(type) == "quack" && path.find("/catalog/") != string::npos) {
+		return LookupQuackSecret(path, transaction); // Managed scopes always fail closed.
 	}
-	// ---------- end Quack dispatch ----------
-
-	// Get connection state FIRST - needed for recursion guard
-	auto conn_state = GetSession(transaction);
-
-	// CRITICAL: Use atomic recursion guard to prevent stack overflow
-	// This must happen before ANY other operations that could trigger secret lookups
-	// In WASM, the async event loop can cause re-entrant calls even in single-threaded mode
-	// NOTE: Using optional to avoid heap allocation (unique_ptr) for stack-constrained WASM
-	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
-	if (conn_state) {
-		guard.emplace(*conn_state);
-		if (!guard->Acquired()) {
-			BOILSTREAM_LOG("LookupSecret EXIT: BLOCKED by atomic recursion guard (already in lookup), returning local "
-			               "match for path="
-			               << path);
-			return CatalogSetSecretStorage::LookupSecret(path, type, transaction);
-		}
-	}
-
-	// VERIFICATION: Detect potential infinite loop with our own endpoint
-	static thread_local uint64_t lookup_call_count = 0;
-	static thread_local std::chrono::steady_clock::time_point last_lookup_time;
-	static thread_local string last_lookup_path;
-
-	lookup_call_count++;
-	auto now = std::chrono::steady_clock::now();
-	auto ms_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_lookup_time).count();
-
-	BOILSTREAM_LOG("LookupSecret ENTER: path=" << path << ", type=" << type << ", call_count=" << lookup_call_count
-	                                           << ", ms_since_last=" << ms_since_last
-	                                           << ", in_http_op=" << (in_http_operation ? "true" : "false"));
-
-	// Check if this path matches our own endpoint (potential loop indicator)
-	string our_endpoint = conn_state ? conn_state->GetEndpointUrl() : "";
-	if (!our_endpoint.empty() && path.find(our_endpoint) != string::npos) {
-		BOILSTREAM_LOG("LookupSecret: WARNING - Looking up secret for OUR OWN ENDPOINT: " << path);
-	}
-
-	// Detect rapid repeated calls (potential busy loop)
-	if (ms_since_last < 10 && path == last_lookup_path) {
-		BOILSTREAM_LOG("LookupSecret: ALERT - Rapid repeated lookup for same path! Potential loop detected.");
-	}
-
-	last_lookup_time = now;
-	last_lookup_path = path;
-
-	// Prevent recursive lookups during HTTP operations
-	if (in_http_operation) {
-		BOILSTREAM_LOG("LookupSecret EXIT: BLOCKED by in_http_operation guard");
-		return SecretMatch();
-	}
-
-	// First, check local catalog for matching secret using parent's implementation
-	auto local_match = CatalogSetSecretStorage::LookupSecret(path, type, transaction);
-
-	// Determine if we have an expired cached version
-	bool has_expired_cache = false;
-	// conn_state already retrieved above
-	if (local_match.HasMatch() && conn_state) {
-		auto &secret_ref = local_match.GetSecret();
-		if (!IsExpired(secret_ref.GetName(), *conn_state)) {
-			// Not expired, use cached version
-			BOILSTREAM_LOG("LookupSecret EXIT: cached, not expired, name=" << secret_ref.GetName());
-			return local_match;
-		}
-		// Cached version is expired
-		has_expired_cache = true;
-	} else if (local_match.HasMatch()) {
-		// No connection state, but we have a match - return it
-		BOILSTREAM_LOG("LookupSecret EXIT: cached, no conn_state");
-		return local_match;
-	}
-
-	// No match in cache or expired - fetch from REST API
-	string url = conn_state ? conn_state->GetEndpointUrl() : "";
-
-	// If endpoint not configured, return no match
-	if (url.empty()) {
-		BOILSTREAM_LOG("LookupSecret EXIT: no endpoint configured");
-		return SecretMatch();
-	}
-
-	url += "/match";
-
-	// Append platform parameters (multitenant, wasm)
-	url = AppendPlatformParams(url, transaction);
-
-	// Prepare request body with path, type, and expired flag using yyjson (safe from injection)
-	auto doc = yyjson_mut_doc_new(nullptr);
-	auto obj = yyjson_mut_obj(doc);
-	yyjson_mut_doc_set_root(doc, obj);
-
-	yyjson_mut_obj_add_strcpy(doc, obj, "path", path.c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "type", StringUtil::Lower(type).c_str());
-	yyjson_mut_obj_add_bool(doc, obj, "expired", has_expired_cache);
-
-	string body = SafeJsonSerialize(doc);
-	yyjson_mut_doc_free(doc);
-
-	// Make HTTP POST request (need connection state for authentication)
-	if (!conn_state) {
-		BOILSTREAM_LOG("LookupSecret EXIT: No connection state, returning local match or empty");
-		return local_match;
-	}
-
-	string response;
-	try {
-		response = HttpPostWithState(url, body, *conn_state);
-	} catch (...) {
-		// If request fails, return no match
-		BOILSTREAM_LOG("LookupSecret EXIT: HTTP request failed");
-		return SecretMatch();
-	}
-
-	if (response.empty() || response == "null" || response == "{}") {
-		BOILSTREAM_LOG("LookupSecret EXIT: empty/null response");
-		return SecretMatch();
-	}
-
-	// Parse response to extract expires_at before deserializing secret
-	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
-	if (!response_doc) {
-		BOILSTREAM_LOG("LookupSecret EXIT: JSON parse failure");
-		return SecretMatch();
-	}
-
-	auto response_root = yyjson_doc_get_root(response_doc);
-	string expires_at_str;
-	if (response_root && yyjson_is_obj(response_root)) {
-		expires_at_str = SafeGetStr(yyjson_obj_get(response_root, "expires_at"));
-	}
-	yyjson_doc_free(response_doc);
-
-	// Deserialize the secret
-	auto &manager = SecretManager::Get(db);
-	auto secret = DeserializeSecret(response, manager);
-	if (!secret) {
-		BOILSTREAM_LOG("LookupSecret EXIT: deserialize failure");
-		return SecretMatch();
-	}
-
-	auto secret_name = secret->GetName();
-
-	// Store expiration if provided
-	if (!expires_at_str.empty() && conn_state) {
-		StoreExpiration(secret_name, expires_at_str, *conn_state);
-	}
-
-	// Add or update secret in local catalog
-	AddOrUpdateSecretInCatalog(std::move(secret), transaction);
-
-	// Return the match from catalog
-	BOILSTREAM_LOG("LookupSecret EXIT: success, fetched from server, name=" << secret_name);
-	return CatalogSetSecretStorage::LookupSecret(path, type, transaction);
+	auto cache = GetSecretCache(transaction);
+	auto cached = LookupCachedSecret(path, type, cache);
+	if (cached.HasMatch() || IsWasmMode()) return cached;
+	FetchSecret(path, type, true, transaction, cache);
+	if (GetSecretCache(transaction) != cache) return SecretMatch();
+	return LookupCachedSecret(path, type, cache);
 }
 
-unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name,
-                                                              optional_ptr<CatalogTransaction> transaction) {
-#ifdef __EMSCRIPTEN__
-	// WASM: Return cached secrets only, don't trigger HTTP fetch
-	// Secrets are stored in DuckDB's "memory" storage during bootstrap
-	return CatalogSetSecretStorage::GetSecretByName(name, transaction);
-#endif
+unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(
+    const string &name, optional_ptr<CatalogTransaction> transaction) {
+	auto cache = GetSecretCache(transaction);
+	auto owned_entry = cache ? cache->Get(name) : nullptr;
+	auto cached = owned_entry ? make_uniq<SecretEntry>(*owned_entry) : nullptr;
+	if (cached || IsWasmMode()) return cached;
+	FetchSecret(name, "", false, transaction, cache);
+	if (GetSecretCache(transaction) != cache) return nullptr;
+	auto entry = cache ? cache->Get(name) : nullptr;
+	return entry ? make_uniq<SecretEntry>(*entry) : nullptr;
+}
 
-	// Get connection state FIRST - needed for recursion guard
-	auto conn_state = GetSession(transaction);
-
-	// CRITICAL: Use atomic recursion guard to prevent stack overflow
-	// This must happen before ANY other operations that could trigger secret lookups
-	// NOTE: Using optional to avoid heap allocation for stack-constrained WASM
-	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
-	if (conn_state) {
-		guard.emplace(*conn_state);
-		if (!guard->Acquired()) {
-			// Always-on: recursion guard blocking GetSecretByName mid-ATTACH is the
-			// primary suspect for the staging "Secret with name X not found" error
-			// when the inner postgres SECRET lookup happens while the outer DuckLake
-			// meta-secret lookup is still active. Surface it.
-			BOILSTREAM_WARN("GetSecretByName: BLOCKED by atomic recursion guard for name='"
-			                << name << "' — falling back to local catalog (will likely return nullptr)");
-			return CatalogSetSecretStorage::GetSecretByName(name, transaction);
-		}
-	}
-
-	BOILSTREAM_LOG("GetSecretByName ENTER: name=" << name << ", in_http_op=" << (in_http_operation ? "true" : "false"));
-
-	// Prevent recursive lookups during HTTP operations
-	// This can happen when httpfs looks up credentials while we're making HTTP requests
-	if (in_http_operation) {
-		// Always-on: same staging-suspect class as above. Without this log we cannot
-		// distinguish "secret never fetched" from "secret fetch silently dropped".
-		BOILSTREAM_WARN("GetSecretByName: BLOCKED by in_http_operation guard for name='"
-		                << name << "' — returning nullptr; downstream SECRET lookup will fail");
-		return nullptr;
-	}
-
-	// First, check local catalog using parent's implementation
-	auto local_entry = CatalogSetSecretStorage::GetSecretByName(name, transaction);
-
-	// conn_state already retrieved above
-
-	// Determine if we have an expired cached version
-	bool has_expired_cache = false;
-	if (local_entry && local_entry->secret && conn_state) {
-		if (!IsExpired(local_entry->secret->GetName(), *conn_state)) {
-			// Not expired, use cached version
-			BOILSTREAM_LOG("GetSecretByName EXIT: cached, not expired, name=" << name);
-			return local_entry;
-		}
-		// Cached version is expired
-		has_expired_cache = true;
-	}
-
-	// Not in cache or expired - fetch from REST API
-	string url = conn_state ? conn_state->GetEndpointUrl() : "";
-
-	// If endpoint not configured, return null
-	if (url.empty()) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: no endpoint configured");
-		return nullptr;
-	}
-
-	url += "/get";
-
-	// Append platform parameters (multitenant, wasm)
-	url = AppendPlatformParams(url, transaction);
-
-	// Prepare request body with name and expired flag using yyjson
+void RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bool match,
+                                       optional_ptr<CatalogTransaction> transaction,
+                                       const shared_ptr<BoilstreamSecretCache> &expected_cache) {
+	auto owner = GetSecretOwner(transaction);
+	auto state = owner.session;
+	auto cache = owner.cache;
+	if (!state || !cache || cache != expected_cache || state->GetEndpointUrl().empty() || in_http_operation) return;
+	BoilstreamConnectionState::SecretLookupGuard guard(*state);
+	if (!guard.Acquired()) return;
+	const auto revision = cache->Revision();
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
-
-	yyjson_mut_obj_add_strcpy(doc, obj, "name", name.c_str());
-	yyjson_mut_obj_add_bool(doc, obj, "expired", has_expired_cache);
-
+	yyjson_mut_obj_add_strcpy(doc, obj, match ? "path" : "name", selector.c_str());
+	if (match) yyjson_mut_obj_add_strcpy(doc, obj, "type", StringUtil::Lower(type).c_str());
+	bool expired = !match && cache->Get(selector, true) != nullptr;
+	if (match) {
+		for (auto &entry : cache->Snapshot(true)) {
+			if (StringUtil::CIEquals(entry->secret->GetType(), type) &&
+			    entry->secret->MatchScore(selector) != NumericLimits<int64_t>::Minimum()) { expired = true; break; }
+		}
+	}
+	yyjson_mut_obj_add_bool(doc, obj, "expired", expired);
 	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
-
-	// Make HTTP POST request (need connection state for authentication)
-	if (!conn_state) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: no connection state, returning local entry or null");
-		return local_entry;
-	}
-
-	string response;
 	try {
-		response = HttpPostWithState(url, body, *conn_state);
-	} catch (const std::exception &e) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: HttpPost exception: " << e.what());
-		return nullptr;
+		auto response = HttpPostWithState(AppendPlatformParams(state->GetEndpointUrl() +
+		    (match ? "/match" : "/get"), transaction), body, *state);
+		if (response.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) throw IOException("Oversized secret response");
+		auto parsed = unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(
+		    yyjson_read(response.c_str(), response.size(), 0), yyjson_doc_free);
+		if (!parsed) return;
+		auto root = yyjson_doc_get_root(parsed.get());
+		if (!yyjson_is_obj(root)) return;
+		auto expires = ParseExpiresAt(SafeGetStr(yyjson_obj_get(root, "expires_at")));
+		if (expires == BoilstreamSecretCache::Time::min()) return;
+		auto secret = DeserializeSecret(response, SecretManager::Get(db));
+		if (!secret || (!match && !StringUtil::CIEquals(secret->GetName(), selector))) return;
+		// The captured owner must still be current after network/deserialization.
+		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted()) return;
+		cache->Put(BoilstreamSecretCache::Prepare(std::move(secret), expires, response.size()), revision);
 	} catch (...) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: HttpPost unknown exception");
-		return nullptr;
+		// Failed, malformed, expired or superseded requests cannot broaden access.
+		// A still-fresh owned entry may be used by the caller; no global fallback.
 	}
-
-	if (response.empty() || response == "null" || response == "{}") {
-		BOILSTREAM_LOG("GetSecretByName EXIT: empty/null response");
-		return nullptr;
-	}
-
-	// Parse response to extract expires_at before deserializing secret
-	auto response_doc = yyjson_read(response.c_str(), response.size(), 0);
-	if (!response_doc) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: JSON parse failure");
-		return nullptr;
-	}
-
-	auto response_root = yyjson_doc_get_root(response_doc);
-	string expires_at_str;
-	if (response_root && yyjson_is_obj(response_root)) {
-		expires_at_str = SafeGetStr(yyjson_obj_get(response_root, "expires_at"));
-	}
-	yyjson_doc_free(response_doc);
-
-	// Deserialize the secret
-	auto &manager = SecretManager::Get(db);
-	auto secret = DeserializeSecret(response, manager);
-	if (!secret) {
-		BOILSTREAM_LOG("GetSecretByName EXIT: deserialize failure");
-		return nullptr;
-	}
-
-	// Store expiration if provided
-	if (!expires_at_str.empty() && conn_state) {
-		StoreExpiration(name, expires_at_str, *conn_state);
-	}
-
-	// Add or update secret in local catalog
-	AddOrUpdateSecretInCatalog(std::move(secret), transaction);
-
-	// Return from catalog
-	BOILSTREAM_LOG("GetSecretByName EXIT: success, fetched from server, name=" << name);
-	return CatalogSetSecretStorage::GetSecretByName(name, transaction);
 }
 
 vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransaction> transaction) {
-#ifdef __EMSCRIPTEN__
-	// WASM: Return empty to avoid triggering HTTP fetches during secret enumeration
-	// Secrets are stored in DuckDB's "memory" storage during bootstrap
-	return vector<SecretEntry>();
-#else
-	return FetchAllSecretsFromServer(transaction);
-#endif
+	return IsWasmMode() ? GetCachedSecrets(transaction) : FetchAllSecretsFromServer(transaction);
 }
 
-vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
-                                                                    shared_ptr<BoilstreamConnectionState> explicit_conn_state) {
-	// Bootstrap callers (PRAGMA boilstream_bootstrap_session) must force the HTTP
-	// fetch even when guards/caches that protect re-entrant httpfs callers would
-	// short-circuit it. They pass the just-established conn_state directly so we
-	// don't have to discover it through the CatalogTransaction.
-	const bool force_fetch = explicit_conn_state != nullptr;
-
-	// Get connection state FIRST - needed for recursion guard
-	auto conn_state = force_fetch ? explicit_conn_state : GetSession(transaction);
-
-	// CRITICAL: Use atomic recursion guard to prevent stack overflow
-	// This must happen before ANY other operations that could trigger secret lookups
-	// In WASM, the async event loop can cause re-entrant calls even in single-threaded mode
-	// NOTE: Using optional to avoid heap allocation for stack-constrained WASM
-	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
-	if (conn_state && !force_fetch) {
-		guard.emplace(*conn_state);
-		if (!guard->Acquired()) {
-			BOILSTREAM_LOG("AllSecrets EXIT: BLOCKED by atomic recursion guard (already in lookup)");
-			return CatalogSetSecretStorage::AllSecrets(transaction);
-		}
-	}
-
-	// VERIFICATION: Detect potential infinite loop
-	static thread_local uint64_t all_secrets_call_count = 0;
-	static thread_local std::chrono::steady_clock::time_point last_all_secrets_time;
-
-	all_secrets_call_count++;
-	auto now = std::chrono::steady_clock::now();
-	auto ms_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_all_secrets_time).count();
-
-	BOILSTREAM_LOG("AllSecrets ENTER: call_count=" << all_secrets_call_count << ", ms_since_last=" << ms_since_last
-	                                               << ", in_http_op=" << (in_http_operation ? "true" : "false")
-	                                               << ", force_fetch=" << (force_fetch ? "true" : "false"));
-
-	// Prevent recursive lookups during HTTP operations
-	// This can happen when httpfs looks up credentials while we're making HTTP requests
-	if (in_http_operation && !force_fetch) {
-		BOILSTREAM_LOG("AllSecrets EXIT: BLOCKED by in_http_operation guard, returning local catalog only");
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	// Detect rapid repeated calls (potential busy loop)
-	if (ms_since_last < 100 && all_secrets_call_count > 2) {
-		BOILSTREAM_LOG("AllSecrets: ALERT - Rapid repeated calls! call_count=" << all_secrets_call_count);
-	}
-
-	last_all_secrets_time = now;
-
-	// Check if we recently fetched all secrets (10 second cache).
-	// Bootstrap (force_fetch) bypasses the cache: a fresh user has zero secrets in
-	// "memory" yet, and ducklake's hard-coded memory/local_file lookup runs before
-	// AllSecrets() can refill it on demand.
-	if (!force_fetch && conn_state &&
-	    conn_state->last_all_secrets_fetch != std::chrono::steady_clock::time_point::min()) {
-		auto fetch_now = std::chrono::steady_clock::now();
-		auto seconds_since_fetch =
-		    std::chrono::duration_cast<std::chrono::seconds>(fetch_now - conn_state->last_all_secrets_fetch).count();
-		if (seconds_since_fetch >= 0 &&
-		    seconds_since_fetch < BoilstreamConnectionState::ALL_SECRETS_CACHE_TTL_SECONDS) {
-			BOILSTREAM_LOG("AllSecrets EXIT: using cached result (fetched "
-			               << seconds_since_fetch
-			               << "s ago, TTL=" << BoilstreamConnectionState::ALL_SECRETS_CACHE_TTL_SECONDS << "s)");
-			auto cached_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
-			BOILSTREAM_LOG("AllSecrets: CatalogSetSecretStorage::AllSecrets returned " << cached_secrets.size()
-			                                                                           << " secrets");
-			return cached_secrets;
-		}
-	}
-
-	// Check catalog versions (rate-limited to 60 seconds)
-	if (conn_state) {
-		CheckCatalogVersions(*conn_state);
-	}
-
-	// No ambient credentials or automatic restart login. Only this connection's
-	// authenticated state can supply the authority for a secret request.
-	string url = conn_state ? conn_state->GetEndpointUrl() : "";
-
-	// If endpoint not configured, return what's in local catalog
-	if (url.empty()) {
-		BOILSTREAM_LOG("AllSecrets EXIT: endpoint empty, returning local catalog");
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	// Append platform parameters (multitenant, wasm)
-	url = AppendPlatformParams(url, transaction);
-	BOILSTREAM_LOG("AllSecrets: final url=" << url);
-
-	// Make HTTP GET request to fetch all secrets from REST API
-	// Need connection state for authenticated request
-	if (!conn_state) {
-		BOILSTREAM_LOG("AllSecrets EXIT: No connection state, returning local catalog");
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	string response;
-	try {
-		response = HttpGetWithState(url, *conn_state);
-	} catch (...) {
-		// On error, return what's in local catalog
-		BOILSTREAM_LOG("AllSecrets EXIT: HTTP request failed, returning local catalog");
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	// Parse JSON array using yyjson
-	// NOTE: HttpGet() should have already decrypted the response if it was encrypted
-	BOILSTREAM_LOG("AllSecrets: Parsing " << response.size() << " bytes of JSON response");
-	auto doc = yyjson_read(response.c_str(), response.size(), 0);
-	if (!doc) {
-		BOILSTREAM_LOG("AllSecrets EXIT: ERROR - Failed to parse JSON");
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	auto root = yyjson_doc_get_root(doc);
-	if (!root || !yyjson_is_arr(root)) {
-		BOILSTREAM_LOG("AllSecrets EXIT: ERROR - Root is not an array");
-		yyjson_doc_free(doc);
-		return CatalogSetSecretStorage::AllSecrets(transaction);
-	}
-
-	BOILSTREAM_LOG("AllSecrets: JSON array parsed successfully");
-
-	auto &manager = SecretManager::Get(db);
-
-	// Iterate through array elements and add/update in catalog
+void RestApiSecretStorage::PublishSecretList(const string &response, BoilstreamConnectionState &state,
+                                             uint64_t revision) {
+	if (response.size() > BoilstreamSecretCache::MAX_BYTES) throw IOException("Oversized secret list");
+	auto doc = unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(
+	    yyjson_read(response.c_str(), response.size(), 0), yyjson_doc_free);
+	if (!doc) throw IOException("Invalid secret list JSON");
+	auto root = yyjson_doc_get_root(doc.get());
+	if (!yyjson_is_arr(root) || yyjson_arr_size(root) > BoilstreamSecretCache::MAX_ENTRIES)
+		throw IOException("Invalid secret list");
+	BoilstreamSecretCache::Entries staged;
 	size_t idx, max;
 	yyjson_val *val;
-	size_t secrets_added = 0;
 	yyjson_arr_foreach(root, idx, max, val) {
-		if (!yyjson_is_obj(val)) {
-			BOILSTREAM_LOG("AllSecrets: Skipping non-object element at index " << idx);
-			continue;
-		}
-
-		// Extract expires_at field
-		string expires_at_str = SafeGetStr(yyjson_obj_get(val, "expires_at"));
-
-		// Convert object to JSON string for DeserializeSecret
-		auto obj_str = yyjson_val_write(val, 0, nullptr);
-		if (obj_str) {
-			// Save JSON string before freeing for memory cache later
-			string secret_json_for_cache(obj_str);
-			BOILSTREAM_LOG("AllSecrets: Processing secret JSON: " << secret_json_for_cache.substr(0, 100) << "...");
-			auto secret = DeserializeSecret(secret_json_for_cache, manager);
-			free(obj_str);
-
-			if (secret) {
-				auto secret_name = secret->GetName();
-				BOILSTREAM_LOG("AllSecrets: Adding secret '" << secret_name << "' to catalog");
-
-				// Store expiration if provided
-				if (!expires_at_str.empty() && conn_state) {
-					StoreExpiration(secret_name, expires_at_str, *conn_state);
-				}
-
-				// Add or update secret in local catalog
-				AddOrUpdateSecretInCatalog(std::move(secret), transaction);
-				BOILSTREAM_LOG("AllSecrets: Added '" << secret_name << "' to local catalog");
-
-				// Also cache in memory storage for DuckLake
-				try {
-					auto trans = GetTransactionOrDefault(transaction);
-					BOILSTREAM_LOG("AllSecrets: Attempting to cache '" << secret_name << "' in memory storage");
-					BOILSTREAM_LOG("AllSecrets: trans.HasContext()=" << (trans.HasContext() ? "true" : "false"));
-					auto secret_copy = DeserializeSecret(secret_json_for_cache, manager);
-					if (secret_copy) {
-						BOILSTREAM_LOG("AllSecrets: Deserialized '" << secret_name
-						                                            << "', type=" << secret_copy->GetType());
-						auto registered =
-						    manager.RegisterSecret(trans, std::move(secret_copy), OnCreateConflict::REPLACE_ON_CONFLICT,
-						                           SecretPersistType::TEMPORARY, "memory");
-						if (registered) {
-							BOILSTREAM_LOG("AllSecrets: Registered in memory as '" << registered->secret->GetName()
-							                                                       << "'");
-						} else {
-							// Always-on: registration silently returning null is a primary
-							// suspect for the staging "Secret not found" failure (downstream
-							// SECRET lookups expect this in memory). Surface so kubectl logs
-							// captures it.
-							BOILSTREAM_WARN("AllSecrets: RegisterSecret returned null for '"
-							                << secret_name << "' — downstream SECRET lookup will miss");
-						}
-					} else {
-						BOILSTREAM_WARN("AllSecrets: DeserializeSecret returned null for memory cache of '"
-						                << secret_name << "' — secret will not be available for downstream lookups");
-					}
-				} catch (const std::exception &e) {
-					BOILSTREAM_WARN("AllSecrets: EXCEPTION caching '" << secret_name << "' in memory: " << e.what()
-					                                                  << " — downstream SECRET lookup will miss");
-				} catch (...) {
-					BOILSTREAM_WARN("AllSecrets: UNKNOWN EXCEPTION caching '"
-					                << secret_name << "' in memory — downstream SECRET lookup will miss");
-				}
-
-				secrets_added++;
-			} else {
-				BOILSTREAM_LOG("AllSecrets: WARNING - DeserializeSecret returned null");
-			}
-		} else {
-			BOILSTREAM_LOG("AllSecrets: WARNING - Failed to serialize object to JSON string");
-		}
+		if (!yyjson_is_obj(val)) throw IOException("Invalid secret list entry");
+		auto expires = ParseExpiresAt(SafeGetStr(yyjson_obj_get(val, "expires_at")));
+		if (expires == BoilstreamSecretCache::Time::min()) throw IOException("Invalid secret expiry");
+		auto encoded = unique_ptr<char, decltype(&free)>(yyjson_val_write(val, 0, nullptr), free);
+		if (!encoded) throw IOException("Cannot serialize secret list entry");
+		string json(encoded.get());
+		if (json.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) throw IOException("Oversized secret list entry");
+		auto secret = DeserializeSecret(json, SecretManager::Get(db));
+		if (!secret) throw IOException("Invalid serialized secret");
+		auto name = secret->GetName();
+		auto entry = BoilstreamSecretCache::Prepare(std::move(secret), expires, json.size());
+		if (!staged.emplace(name, std::move(entry)).second) throw IOException("Duplicate secret name");
 	}
+	// One complete validated response replaces the old snapshot, including deletions.
+	state.secret_cache->Replace(std::move(staged), revision);
+}
 
-	// Always-on summary: number of secrets fetched from server vs how many made it
-	// to memory after registration. If `secrets_added` < server-returned count,
-	// there are silent failures we surfaced at the per-secret BOILSTREAM_WARN
-	// sites above. Track both the fetched count (from server) and the
-	// catalog-resolved count (post-RegisterSecret) so the staging diagnostic
-	// timeline is unambiguous in pod stderr.
-	BOILSTREAM_WARN("AllSecrets: cached " << secrets_added << " secret(s) from server response; "
-	                                      << "force_fetch=" << (force_fetch ? "true" : "false"));
-
-	yyjson_doc_free(doc);
-
-	// Update last fetch timestamp for caching
-	if (conn_state) {
-		conn_state->last_all_secrets_fetch = std::chrono::steady_clock::now();
+vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(
+    optional_ptr<CatalogTransaction> transaction, shared_ptr<BoilstreamConnectionState> explicit_conn_state) {
+	auto owner = GetSecretOwner(transaction);
+	auto state = owner.session;
+	if (explicit_conn_state && explicit_conn_state != state) throw IOException("Secret owner was superseded");
+	auto cache = owner.cache;
+	if (!state || !cache || state->GetEndpointUrl().empty() || in_http_operation ||
+	    (!explicit_conn_state && cache->RecentlyFetched())) return CloneSecretSnapshot(cache);
+	BoilstreamConnectionState::SecretLookupGuard guard(*state);
+	if (!guard.Acquired()) return CloneSecretSnapshot(cache);
+	CheckCatalogVersions(*state);
+	const auto revision = cache->Revision();
+	try {
+		auto response = HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl(), transaction), *state);
+		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted())
+			throw IOException("Secret fetch was superseded");
+		PublishSecretList(response, *state, revision);
+	} catch (...) {
+		if (explicit_conn_state) throw;
+		// Keep only this owner's previously validated, unexpired snapshot.
 	}
-
-	// Return all secrets from local catalog (now includes REST API secrets)
-	auto final_secrets = CatalogSetSecretStorage::AllSecrets(transaction);
-	BOILSTREAM_WARN("AllSecrets EXIT: registered " << secrets_added << " in memory; local catalog now has "
-	                                               << final_secrets.size() << " secret(s)");
-	return final_secrets;
+	return CloneSecretSnapshot(cache);
 }
 
 vector<SecretEntry> RestApiSecretStorage::GetCachedSecrets(optional_ptr<CatalogTransaction> transaction) {
-	// Return only cached secrets without any server fetch.
-	// This is used by boilstream_secrets() table function in WASM to avoid stack overflow.
-	return CatalogSetSecretStorage::AllSecrets(transaction);
+	return CloneSecretSnapshot(GetSecretCache(transaction));
 }
 
 void RestApiSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {
@@ -3323,51 +2890,22 @@ void RestApiSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_e
 
 void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
                                             optional_ptr<CatalogTransaction> transaction) {
-	BOILSTREAM_LOG("DropSecretByName: name=" << name);
-
-	// Get connection state
-	auto conn_state = GetSession(transaction);
-
-	// Check if endpoint is configured
-	string url = conn_state ? conn_state->GetEndpointUrl() : "";
-
-	if (url.empty()) {
-		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
-		                            "boilstream_bootstrap_session('https://host/path/:TOKEN') to set it.");
+	auto owner = GetSecretOwner(transaction);
+	auto state = owner.session;
+	auto cache = owner.cache;
+	if (!cache) {
+		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) throw CatalogException("Secret not found");
+		return;
 	}
-
-	// Build full URL with URL-encoded name
-	string delete_url = url + "/" + StringUtil::URLEncode(name);
-
-	// Append platform parameters (multitenant, wasm)
-	delete_url = AppendPlatformParams(delete_url, transaction);
-
-	// Delete from REST API first (source of truth)
-	if (conn_state) {
-		try {
-			HttpDelete(delete_url, *conn_state);
-		} catch (...) {
-			if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
-				throw CatalogException("Secret '%s' not found", name);
-			}
-		}
-	} else {
-		BOILSTREAM_LOG("DropSecretByName: No connection state, skipping HTTP DELETE");
-		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
-			throw IOException("No active session for this connection");
-		}
+	const auto revision = cache->Revision();
+	if (state) {
+		if (state->GetEndpointUrl().empty()) throw IOException("Secret endpoint is not configured");
+		// HTTP failure must leave the last valid cache untouched, even for IF EXISTS.
+		HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name), transaction), *state);
+	} else if (!cache->Get(name, true) && on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
+		throw CatalogException("Secret not found");
 	}
-
-	// Clean up local cache if present (best effort - ignore if not cached)
-	auto trans = GetTransactionOrDefault(transaction);
-	if (secrets->GetEntry(trans, name)) {
-		secrets->DropEntry(trans, name, false, true);
-	}
-
-	// Clear expiration metadata
-	if (conn_state) {
-		ClearExpiration(name, *conn_state);
-	}
+	cache->Remove(name, revision);
 }
 
 case_insensitive_map_t<RestApiSecretStorage::CatalogVersionInfo>
@@ -3587,7 +3125,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 	string catalog_id;
 	if (!ParseManagedCatalogSecretScope(path, catalog_id)) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: missing canonical catalog scope");
-		return CatalogSetSecretStorage::LookupSecret(path, "quack", transaction);
+		return LookupCachedSecret(path, "quack", GetSecretCache(transaction));
 	}
 
 	// Managed credentials are cached in the authenticated connection state,
@@ -3640,6 +3178,8 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
                                                      BoilstreamConnectionState &conn_state) {
 	BOILSTREAM_LOG("RefreshCatalogCredentials: Refreshing credentials for catalog " << catalog_name);
+
+	conn_state.secret_cache->SetExpiration(catalog_name, std::chrono::system_clock::time_point::min());
 
 	// Force expiration by setting expires_at to past
 	// The secret name matches the catalog_name from the version response

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "duckdb/main/client_context_state.hpp"
+#include "boilstream_secret_cache.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include <chrono>
@@ -56,7 +57,7 @@ public:
 	explicit BoilstreamConnectionState(string endpoint = "")
 	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()),
-	      last_all_secrets_fetch(std::chrono::steady_clock::time_point::min()), authentication_endpoint(std::move(endpoint)) {
+	      authentication_endpoint(std::move(endpoint)) {
 	}
 
 	//! Prevent copying (contains mutex)
@@ -108,12 +109,6 @@ public:
 
 	//! Last time catalog versions were checked
 	std::chrono::system_clock::time_point last_version_check;
-
-	//! Last time AllSecrets was fetched from server (for caching)
-	std::chrono::steady_clock::time_point last_all_secrets_fetch;
-
-	//! AllSecrets cache TTL in seconds
-	static constexpr int ALL_SECRETS_CACHE_TTL_SECONDS = 10;
 
 	//! Recursion guard flag - prevents re-entrant secret lookups that cause stack overflow
 	//! Uses atomic for thread safety (especially important in WASM async context)
@@ -215,11 +210,20 @@ public:
 	//! Authority is assigned only while authentication state is private.
 	string GetEndpointUrl() const { return authentication_endpoint; }
 
+	//! Set while unpublished, then immutable. Empty denotes standalone, not a wildcard.
+	string authenticated_tenant;
+	shared_ptr<BoilstreamSecretCache> secret_cache = make_shared_ptr<BoilstreamSecretCache>();
+
 	//! Detect logout while a replacement exchange is in flight.
 	std::atomic<uint64_t> authentication_generation {0};
 
 	//! Clear session state (on error or logout)
 	void ClearSession() {
+		secret_cache->Close();
+		{
+			lock_guard<mutex> lock(expiration_lock);
+			secret_expiration.clear();
+		}
 		{
 			authentication_generation.fetch_add(1);
 			lock_guard<mutex> lock(session_lock);
@@ -314,6 +318,7 @@ public:
 	void StoreExpiration(const string &secret_name, std::chrono::system_clock::time_point expiration) {
 		lock_guard<mutex> lock(expiration_lock);
 		secret_expiration[secret_name] = expiration;
+		secret_cache->SetExpiration(secret_name, expiration);
 	}
 
 	//! Get expiration timestamp for a secret (returns min time_point if not found)
