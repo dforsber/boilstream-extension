@@ -231,7 +231,11 @@ public:
 	BoilstreamRegistrationSnapshot BeginMfaVerification(ClientContext &context);
 	void StoreRegistrationState(ClientContext &context, uint64_t generation, const string &session_token,
 	                            const string &totp_uri);
-	void CompleteRegistration(ClientContext &context, uint64_t generation);
+	uint64_t CompleteRegistration(ClientContext &context, uint64_t generation,
+	                              unique_ptr<BoilstreamRegistrationOutput> output = nullptr);
+	uint64_t PublishRegistrationOutput(ClientContext &context, uint64_t generation,
+	                                   unique_ptr<BoilstreamRegistrationOutput> output);
+	unique_ptr<BoilstreamRegistrationOutput> TakeRegistrationOutput(ClientContext &context, uint64_t id);
 	//! Release a failed operation; cancellation/failed signup discard its state.
 	void EndRegistrationOperation(ClientContext &context, uint64_t generation) noexcept;
 

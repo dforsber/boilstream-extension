@@ -35,8 +35,15 @@ class Reply(http.server.BaseHTTPRequestHandler):
         elif route == "/auth/api/mfa/enroll/totp":
             result = {"secret":"JBSWY3DPEHPK3PXP"}
         elif route == "/auth/api/mfa/verify-enrollment":
-            ok = data.get("code") == "123456" and cookie == "session=synthetic-b"
-            result = {"success":ok,"backup_codes":["backup-b"] if ok else []}
+            code = data.get("code")
+            if cookie == "session=synthetic-validation":
+                cases = {"111111":{}, "222222":[1], "333333":[""], "444444":["bad\0code"],
+                         "555555":["x"*8193], "666666":["x"]*129, "777777":[],
+                         "888888":["line\nbreak"], "999999":["'); SELECT 'synthetic"]}
+                result = {"success":True, "backup_codes":cases[code]}
+            else:
+                ok = code == "123456" and cookie == "session=synthetic-b"
+                result = {"success":ok,"backup_codes":["backup-b"] if ok else []}
         else:
             status=404;result={"error":"unexpected synthetic route"}
         payload = json.dumps(result).encode()
@@ -54,9 +61,9 @@ def main():
         result=subprocess.run([sys.argv[1],f"http://127.0.0.1:{server.server_port}"],env={**os.environ,"QUERY_FARM_TELEMETRY_OPT_OUT":"1"},timeout=30)
     finally:
         server.shutdown();server.server_close();worker.join()
-    expected={"/auth/csrf":5,"/auth/email/signup":5,"/auth/email/login":4,"/auth/api/mfa/enroll/totp":4,"/auth/api/mfa/verify-enrollment":2}
+    expected={"/auth/csrf":5,"/auth/email/signup":5,"/auth/email/login":4,"/auth/api/mfa/enroll/totp":4,"/auth/api/mfa/verify-enrollment":11}
     counts_ok=dict(server.counts)==expected
-    owners_ok=server.verification_cookies==["session=synthetic-b","session=synthetic-b"]
+    owners_ok=server.verification_cookies==["session=synthetic-b","session=synthetic-b"]+["session=synthetic-validation"]*9
     print("HTTP_COUNTS", "PASS" if counts_ok else "FAIL",dict(server.counts))
     print("HTTP_COOKIE_OWNERS", "PASS" if owners_ok else "FAIL")
     return result.returncode or int(not(counts_ok and owners_ok))

@@ -1897,9 +1897,24 @@ public:
 	}
 	mutex lock;
 	uint64_t generation = 0;
+	uint64_t output_id = 0;
+	unique_ptr<BoilstreamRegistrationOutput> output;
 	bool bound = false, ready = false, busy = false, verifying = false;
 	string tenant, base_url, email, session_token, totp_uri;
+	void ClearOutput() {
+		output.reset();
+		output_id = 0;
+	}
+	void ClearEnrollment() {
+		generation = 0;
+		ready = busy = verifying = false;
+		for (auto value : {&base_url, &email, &session_token, &totp_uri}) {
+			BoilstreamConnectionState::SecureZeroString(*value);
+			value->clear();
+		}
+	}
 	void Reset() {
+		ClearOutput();
 		generation = 0;
 		authentication.reset();
 		had_authentication = false;
@@ -1920,8 +1935,11 @@ public:
 		if (bound && (current != tenant || !MatchesAuthentication(current_auth) || context.IsInterrupted()))
 			Reset();
 	}
-	void QueryEnd(ClientContext &context, optional_ptr<ErrorData>) override {
-		if (context.IsInterrupted()) {
+	void QueryEnd(ClientContext &context, optional_ptr<ErrorData> error) override {
+		// Executor::PushError also sets interrupted for ordinary query failures.
+		// Only cancellation retires a pending result; a stale query must not erase
+		// its replacement. Taken payloads are wiped by the executing query's owner.
+		if ((error && error->Type() == ExceptionType::INTERRUPT) || (!error && context.IsInterrupted())) {
 			lock_guard<mutex> guard(lock);
 			Reset();
 		}
@@ -1999,6 +2017,7 @@ BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginRegistration(ClientCon
 		owner->had_authentication = bool(current_auth);
 		owner->authentication_generation = current_auth ? current_auth->authentication_generation.load() : 0;
 	}
+	owner->ClearOutput();
 	auto snapshot = owner->Snapshot(); // A failed allocation must not strand busy=true.
 	snapshot.generation = NextRegistrationOperation();
 	owner->generation = snapshot.generation;
@@ -2014,6 +2033,7 @@ BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginMfaVerification(Client
 	lock_guard<mutex> guard(owner->lock);
 	if (!owner->ready || owner->busy)
 		throw IOException("Registration is unavailable or already in progress for this connection");
+	owner->ClearOutput();
 	auto snapshot = owner->Snapshot();
 	snapshot.generation = NextRegistrationOperation();
 	owner->generation = snapshot.generation;
@@ -2039,7 +2059,38 @@ void RestApiSecretStorage::StoreRegistrationState(ClientContext &context, uint64
 	owner->ready = true;
 }
 
-void RestApiSecretStorage::CompleteRegistration(ClientContext &context, uint64_t generation) {
+static void ValidateRegistrationOutput(const BoilstreamRegistrationOutput &output) {
+	if (output.rows.empty() || output.rows.size() > 128)
+		throw InvalidInputException("Invalid authentication result row count");
+	for (const auto &row : output.rows) {
+		if (!ValidRegistrationField(row.value, 8192))
+			throw InvalidInputException("Invalid authentication result value");
+	}
+}
+
+uint64_t RestApiSecretStorage::PublishRegistrationOutput(ClientContext &context, uint64_t generation,
+                                                         unique_ptr<BoilstreamRegistrationOutput> output) {
+	if (!output)
+		throw InvalidInputException("Missing authentication result");
+	ValidateRegistrationOutput(*output);
+	auto id = NextRegistrationOperation();
+	auto owner = RegistrationOwner(context, false);
+	if (!owner)
+		throw IOException("No pending registration operation");
+	lock_guard<mutex> guard(owner->lock);
+	owner->Check(generation);
+	if (!owner->ready || owner->verifying)
+		throw IOException("Registration result is unavailable");
+	owner->output = std::move(output);
+	owner->output_id = id;
+	return id;
+}
+
+uint64_t RestApiSecretStorage::CompleteRegistration(ClientContext &context, uint64_t generation,
+                                                    unique_ptr<BoilstreamRegistrationOutput> output) {
+	if (output)
+		ValidateRegistrationOutput(*output);
+	const auto id = output ? NextRegistrationOperation() : 0;
 	auto owner = RegistrationOwner(context, false);
 	if (!owner)
 		throw IOException("No pending registration operation");
@@ -2047,7 +2098,26 @@ void RestApiSecretStorage::CompleteRegistration(ClientContext &context, uint64_t
 	owner->Check(generation);
 	if (!owner->ready || !owner->verifying)
 		throw IOException("Registration is not ready for verification");
-	owner->Reset();
+	if (output) {
+		// Retain only the tenant/account binding for the one-shot recovery result.
+		owner->ClearEnrollment();
+		owner->output = std::move(output);
+		owner->output_id = id;
+	} else
+		owner->Reset();
+	return id;
+}
+
+unique_ptr<BoilstreamRegistrationOutput> RestApiSecretStorage::TakeRegistrationOutput(ClientContext &context,
+                                                                                      uint64_t id) {
+	auto owner = RegistrationOwner(context, false);
+	if (!owner)
+		throw IOException("Authentication result is unavailable");
+	lock_guard<mutex> guard(owner->lock);
+	if (!id || owner->output_id != id || !owner->output || owner->busy)
+		throw IOException("Authentication result is unavailable or already consumed");
+	owner->output_id = 0;
+	return std::move(owner->output);
 }
 
 void RestApiSecretStorage::EndRegistrationOperation(ClientContext &context, uint64_t generation) noexcept {

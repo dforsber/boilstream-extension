@@ -574,7 +574,7 @@ endif()
 
 # Actual connection ownership plus loopback registration/MFA handlers.
 if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  foreach(kind IN ITEMS ownership http)
+  foreach(kind IN ITEMS ownership http output)
     add_executable(registration_${kind}_test test_registration_${kind}.cpp
       ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
     target_include_directories(registration_${kind}_test PRIVATE
@@ -585,9 +585,10 @@ if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hp
       "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
   endforeach()
   add_test(NAME RegistrationOwnership COMMAND registration_ownership_test)
+  add_test(NAME RegistrationOutput COMMAND registration_output_test)
   add_test(NAME RegistrationHttp COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py $<TARGET_FILE:registration_http_test>)
-  set_tests_properties(RegistrationOwnership RegistrationHttp PROPERTIES TIMEOUT 40
+  set_tests_properties(RegistrationOwnership RegistrationHttp RegistrationOutput PROPERTIES TIMEOUT 40
     ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
 

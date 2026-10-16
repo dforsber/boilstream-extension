@@ -1024,9 +1024,83 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 //! Usage: PRAGMA boilstream_register_user('https://localhost/email@example.com', 'SecurePassword123!');
 //! Format: URL/path/email@domain.com where URL part is the endpoint and last part is email
 //! Returns multi-statement SQL that displays:
-//! 1. Registration status
-//! 2. QR code via tp_qr() for TOTP enrollment
-//! 3. Session ID for the next verification step
+//! Manual-entry secret, verification command and QR code; credentials stay out of SQL.
+// Bind data deliberately contains no credential: prepared/explained plans only
+// retain an ID. The payload is moved out of its owner at execution initialization.
+struct RegistrationOutputBindData : TableFunctionData {
+	explicit RegistrationOutputBindData(uint64_t id) : id(id) {
+	}
+	uint64_t id;
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<RegistrationOutputBindData>(id);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return id == other.Cast<RegistrationOutputBindData>().id;
+	}
+};
+struct RegistrationOutputState : GlobalTableFunctionState {
+	unique_ptr<BoilstreamRegistrationOutput> output;
+	idx_t offset = 0;
+};
+static unique_ptr<FunctionData> RegistrationOutputBind(ClientContext &, TableFunctionBindInput &input,
+                                                       vector<LogicalType> &types, vector<string> &names) {
+	if (input.inputs[0].IsNull())
+		throw InvalidInputException("Authentication result ID is required");
+	types = {LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::BOOLEAN};
+	names = {"ordinal", "value", "encode_qr"};
+	return make_uniq<RegistrationOutputBindData>(input.inputs[0].GetValue<uint64_t>());
+}
+static unique_ptr<GlobalTableFunctionState> RegistrationOutputInit(ClientContext &context,
+                                                                   TableFunctionInitInput &input) {
+	auto storage = GetStorageFromContext(context);
+	if (!storage)
+		throw IOException("Authentication result is unavailable");
+	auto state = make_uniq<RegistrationOutputState>();
+	state->output = storage->TakeRegistrationOutput(context, input.bind_data->Cast<RegistrationOutputBindData>().id);
+	return std::move(state);
+}
+static void RegistrationOutputScan(ClientContext &, TableFunctionInput &input, DataChunk &chunk) {
+	auto &state = input.global_state->Cast<RegistrationOutputState>();
+	const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.output->rows.size() - state.offset);
+	for (idx_t i = 0; i < count; ++i) {
+		const auto &row = state.output->rows[state.offset + i];
+		chunk.SetValue(0, i, Value::UBIGINT(state.offset + i));
+		chunk.SetValue(1, i, Value(row.value));
+		chunk.SetValue(2, i, Value::BOOLEAN(row.encode_qr));
+	}
+	state.offset += count;
+	chunk.SetCardinality(count);
+}
+static string RegistrationQrResult(ClientContext &context, RestApiSecretStorage &storage, uint64_t generation,
+                                   const string &uri) {
+	const auto start = uri.find("secret=");
+	if (start == string::npos)
+		throw IOException("TOTP secret is missing");
+	const auto begin = start + 7;
+	const auto end = uri.find('&', begin);
+	const auto length = (end == string::npos ? uri.size() : end) - begin;
+	if (!length || length > 8192)
+		throw IOException("Invalid TOTP secret length");
+	auto output = make_uniq<BoilstreamRegistrationOutput>();
+	output->rows.reserve(3);
+	output->rows.push_back({"", false});
+	auto &formatted = output->rows.back().value;
+	// Build directly in the wiping owner, including allocation-failure paths.
+	formatted.reserve(length + (length - 1) / 4);
+	for (size_t i = 0; i < length; i += 4) {
+		if (i)
+			formatted += " ";
+		formatted.append(uri, begin + i, std::min(size_t(4), length - i));
+	}
+	output->rows.push_back({"PRAGMA boilstream_verify_mfa('123456');", false});
+	output->rows.push_back({uri, true});
+	const auto id = storage.PublishRegistrationOutput(context, generation, std::move(output));
+	return "INSTALL textplot FROM community;\nLOAD textplot;\n"
+	       "SELECT unnest(CASE WHEN encode_qr THEN string_split(tp_qr(value), chr(10)) ELSE [value] END) AS qr_code "
+	       "FROM boilstream_auth_result(" +
+	       std::to_string(id) + "::UBIGINT) ORDER BY ordinal;";
+}
+
 class RegistrationOperationGuard {
 public:
 	RegistrationOperationGuard(RestApiSecretStorage &storage, ClientContext &context, uint64_t generation)
@@ -1116,34 +1190,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	if (!cached_totp_uri.empty()) {
 		BOILSTREAM_LOG("RegisterUser: Found cached registration state, returning cached QR code");
 
-		// Extract secret from TOTP URI for manual entry
-		string secret_key;
-		size_t secret_pos = cached_totp_uri.find("secret=");
-		if (secret_pos != string::npos) {
-			size_t secret_start = secret_pos + 7;
-			size_t secret_end = cached_totp_uri.find('&', secret_start);
-			if (secret_end == string::npos) {
-				secret_end = cached_totp_uri.length();
-			}
-			secret_key = cached_totp_uri.substr(secret_start, secret_end - secret_start);
-		}
-
-		// Format secret in groups of 4 characters for readability
-		string formatted_secret;
-		for (size_t i = 0; i < secret_key.length(); i += 4) {
-			if (i > 0)
-				formatted_secret += " ";
-			formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
-		}
-
-		// Return cached QR code response
-		string result_sql = "INSTALL textplot FROM community;\n";
-		result_sql += "LOAD textplot;\n";
-		result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
-		              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
-		              EscapeSqlLiteral(cached_totp_uri) + "'), chr(10))) as qr_code;";
-
-		return result_sql;
+		return RegistrationQrResult(context, *storage, registration.generation, cached_totp_uri);
 	}
 
 	// Helper: Make unauthenticated HTTP GET request (for public registration APIs)
@@ -1437,39 +1484,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	storage->StoreRegistrationState(context, registration.generation, session_token, totp_uri);
 	BOILSTREAM_LOG("RegisterUser: Registration state stored successfully");
 
-	// Extract secret from TOTP URI for manual entry
-	// URI format: otpauth://totp/email?secret=BASE32SECRET&issuer=BoilStream&algorithm=SHA256&digits=6&period=30
-	string secret_key;
-	size_t secret_pos = totp_uri.find("secret=");
-	if (secret_pos != string::npos) {
-		size_t secret_start = secret_pos + 7; // Length of "secret="
-		size_t secret_end = totp_uri.find('&', secret_start);
-		if (secret_end == string::npos) {
-			secret_end = totp_uri.length();
-		}
-		secret_key = totp_uri.substr(secret_start, secret_end - secret_start);
-	}
-
-	// Format secret in groups of 4 characters for readability
-	string formatted_secret;
-	for (size_t i = 0; i < secret_key.length(); i += 4) {
-		if (i > 0)
-			formatted_secret += " ";
-		formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
-	}
-
-	// Return QR code split into rows for scanning
-	// In .mode csv, the full QR code will display without truncation
-	// First row: formatted secret for manual entry (groups of 4, uppercase)
-	// Second row: verification command
-	// Remaining rows: QR code
-	string result_sql = "INSTALL textplot FROM community;\n";
-	result_sql += "LOAD textplot;\n";
-	result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
-	              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
-	              EscapeSqlLiteral(totp_uri) + "'), chr(10))) as qr_code;";
-
-	return result_sql;
+	return RegistrationQrResult(context, *storage, registration.generation, totp_uri);
 }
 
 //! PRAGMA function to verify MFA enrollment and complete registration
@@ -1589,54 +1604,46 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	}
 
 	// Parse verification response
-	auto verify_resp_doc = duckdb_yyjson::yyjson_read(verify_response.c_str(), verify_response.size(), 0);
+	auto verify_resp_doc = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>(
+	    duckdb_yyjson::yyjson_read(verify_response.c_str(), verify_response.size(), 0), duckdb_yyjson::yyjson_doc_free);
 	if (!verify_resp_doc) {
 		throw IOException("Failed to parse verification response");
 	}
-	auto verify_resp_root = duckdb_yyjson::yyjson_doc_get_root(verify_resp_doc);
+	auto verify_resp_root = duckdb_yyjson::yyjson_doc_get_root(verify_resp_doc.get());
 	auto success_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "success");
 	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
 
 	if (!success) {
-		duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
 		throw IOException("MFA verification failed");
 	}
 
-	// Extract backup codes
+	// Keep recovery codes in runtime data, never in generated SQL or plan literals.
+	auto output = make_uniq<BoilstreamRegistrationOutput>();
 	auto backup_codes_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "backup_codes");
-	vector<string> backup_codes;
-	if (backup_codes_val && duckdb_yyjson::yyjson_is_arr(backup_codes_val)) {
-		size_t arr_size = duckdb_yyjson::yyjson_arr_size(backup_codes_val);
-		for (size_t i = 0; i < arr_size; i++) {
-			auto code_val = duckdb_yyjson::yyjson_arr_get(backup_codes_val, i);
-			if (code_val && duckdb_yyjson::yyjson_is_str(code_val)) {
-				string code = SafeYyjsonGetStr(code_val);
-				if (!code.empty()) {
-					backup_codes.push_back(code);
-				}
+	if (backup_codes_val && !duckdb_yyjson::yyjson_is_arr(backup_codes_val))
+		throw IOException("Invalid recovery-code response");
+	if (backup_codes_val) {
+		const auto count = duckdb_yyjson::yyjson_arr_size(backup_codes_val);
+		if (count > 128) {
+			throw IOException("Invalid recovery-code count");
+		}
+		for (size_t i = 0; i < count; ++i) {
+			auto value = duckdb_yyjson::yyjson_arr_get(backup_codes_val, i);
+			if (!duckdb_yyjson::yyjson_is_str(value) || duckdb_yyjson::yyjson_get_len(value) == 0 ||
+			    duckdb_yyjson::yyjson_get_len(value) > 8192) {
+				throw IOException("Invalid recovery-code value");
 			}
+			output->rows.push_back(
+			    {string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value)), false});
 		}
 	}
-	duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
-
-	// Clear registration state after successful verification
-	storage->CompleteRegistration(context, registration.generation);
-
-	// Build result SQL showing backup codes (one per row)
-	string result_sql;
-	if (!backup_codes.empty()) {
-		result_sql = "SELECT unnest(['";
-		for (size_t i = 0; i < backup_codes.size(); i++) {
-			if (i > 0)
-				result_sql += "', '";
-			result_sql += EscapeSqlLiteral(backup_codes[i]);
-		}
-		result_sql += "']) as backup_code;";
-	} else {
-		result_sql = "SELECT 'MFA enrollment complete - no backup codes provided' as status;";
+	if (output->rows.empty()) {
+		storage->CompleteRegistration(context, registration.generation);
+		return "SELECT 'MFA enrollment complete - no backup codes provided' as status;";
 	}
-
-	return result_sql;
+	const auto id = storage->CompleteRegistration(context, registration.generation, std::move(output));
+	return "SELECT value AS backup_code FROM boilstream_auth_result(" + std::to_string(id) +
+	       "::UBIGINT) ORDER BY ordinal;";
 }
 
 //! PRAGMA function to login with email/password + MFA code
@@ -2209,6 +2216,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// managed lookup (RestApiSecretStorage::LookupQuackSecret) materializes a
 	// connection-local KeyValueSecret of type "quack" as a SecretMatch; it never
 	// publishes authentication material into DuckDB's catalog-global secret set.
+
+	TableFunction auth_result("boilstream_auth_result", {LogicalType::UBIGINT}, RegistrationOutputScan,
+	                          RegistrationOutputBind, RegistrationOutputInit);
+	loader.RegisterFunction(auth_result);
 
 	// Register PRAGMA function with PragmaCall to accept parameters
 	// Use temporary LogicalType objects to avoid ODR violations with static const members

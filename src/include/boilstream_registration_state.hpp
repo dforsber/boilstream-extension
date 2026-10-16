@@ -18,5 +18,21 @@ struct BoilstreamRegistrationSnapshot {
 		BoilstreamConnectionState::SecureZeroString(totp_uri);
 	}
 };
+// Runtime result data is owned by one connection, then one executing query.
+// Plans and SQL carry only the non-reused result ID, never these strings.
+struct BoilstreamRegistrationOutput {
+	struct Row {
+		string value;
+		bool encode_qr = false;
+	};
+	vector<Row> rows;
+	BoilstreamRegistrationOutput() = default;
+	BoilstreamRegistrationOutput(const BoilstreamRegistrationOutput &) = delete;
+	BoilstreamRegistrationOutput &operator=(const BoilstreamRegistrationOutput &) = delete;
+	~BoilstreamRegistrationOutput() {
+		for (auto &row : rows)
+			BoilstreamConnectionState::SecureZeroString(row.value);
+	}
+};
 class BoilstreamRegistrationContext;
 } // namespace duckdb
