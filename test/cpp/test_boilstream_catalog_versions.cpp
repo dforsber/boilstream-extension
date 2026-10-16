@@ -80,7 +80,7 @@ struct TestFixture {
 	duckdb::unique_ptr<RestApiSecretStorage> storage;
 	BoilstreamConnectionState conn_state;
 
-	TestFixture() {
+	explicit TestFixture(string endpoint = "https://localhost/secrets") : conn_state(endpoint) {
 		db = duckdb::make_uniq<DuckDB>(nullptr);
 		storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
 	}
@@ -122,9 +122,10 @@ TEST_CASE("Catalog version polling uses the authenticated product route", "[boil
 	for (const auto &base : {"https://localhost", "https://catalog.example:8443", "https://[::1]:8443",
 	                         "https://gateway.example/product"}) {
 		DYNAMIC_SECTION(base) {
-			TestFixture fixture;
+			TestFixture fixture(string(base) + "/secrets");
 			auto http = RecordCatalogVersionRequests(fixture);
-			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, string(base) + "/secrets");
+			// A database default change must not redirect this authenticated session.
+			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, "https://other.example/secrets");
 			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
 			REQUIRE(http->requests.size() == 1);
 			REQUIRE(http->requests[0].url == string(base) + "/catalog-versions");
@@ -144,9 +145,8 @@ TEST_CASE("Catalog version polling rejects a noncanonical secrets endpoint", "[b
 	for (const auto &endpoint : {"https://catalog.example", "https://catalog.example/secrets/other",
 	                             "https://catalog.example/secrets?other=value"}) {
 		DYNAMIC_SECTION(endpoint) {
-			TestFixture fixture;
+			TestFixture fixture(endpoint);
 			auto http = RecordCatalogVersionRequests(fixture);
-			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, endpoint);
 			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
 			REQUIRE(http->requests.empty());
 			REQUIRE(fixture.conn_state.client_sequence == 0);

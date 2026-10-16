@@ -136,6 +136,7 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Managed catalog forced expiration 
                  "[input_validation][expiry_regression]") {
 	Connection connection(*db);
 	connection.BeginTransaction();
+	storage->SetEndpoint("");
 	auto &state = storage->GetOrCreateSession("expiry-test");
 	storage->SetActiveSessionKeyForConnection(connection.context->GetConnectionId(), "expiry-test");
 	const string catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";

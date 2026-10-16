@@ -383,7 +383,7 @@ RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string 
 //! Get active session (for secret operations like AllSecrets, LookupSecret)
 //! Routes through per-connection session lookup. Returns nullptr for system
 //! transactions without context (no authenticated session exists without a connection).
-BoilstreamConnectionState *RestApiSecretStorage::GetSession(optional_ptr<CatalogTransaction> transaction) {
+shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSession(optional_ptr<CatalogTransaction> transaction) {
 	if (transaction && transaction->HasContext()) {
 		auto &ctx = transaction->GetContext();
 		return GetSessionForConnection(ctx.GetConnectionId());
@@ -393,10 +393,11 @@ BoilstreamConnectionState *RestApiSecretStorage::GetSession(optional_ptr<Catalog
 
 //! Get or create session for a specific session key (bootstrap_token_hash)
 BoilstreamConnectionState &RestApiSecretStorage::GetOrCreateSession(const string &session_key) {
+	auto endpoint = GetEndpointUrl();
 	lock_guard<mutex> lock(sessions_lock_);
 	auto &session = sessions_[session_key];
 	if (!session) {
-		session = make_shared_ptr<BoilstreamConnectionState>();
+		session = make_shared_ptr<BoilstreamConnectionState>(endpoint);
 	}
 	return *session;
 }
@@ -408,11 +409,11 @@ bool RestApiSecretStorage::HasSession(const string &session_key) {
 }
 
 //! Get session by key (returns nullptr if not found)
-BoilstreamConnectionState *RestApiSecretStorage::GetSessionByKey(const string &session_key) {
+shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionByKey(const string &session_key) {
 	lock_guard<mutex> lock(sessions_lock_);
 	auto it = sessions_.find(session_key);
 	if (it != sessions_.end()) {
-		return it->second.get();
+		return it->second;
 	}
 	return nullptr;
 }
@@ -438,14 +439,14 @@ void RestApiSecretStorage::SetActiveSessionKeyForConnection(idx_t connection_id,
 }
 
 //! Get session by connection ID (returns nullptr if not found)
-BoilstreamConnectionState *RestApiSecretStorage::GetSessionForConnection(idx_t connection_id) {
+shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForConnection(idx_t connection_id) {
 	lock_guard<mutex> lock(sessions_lock_);
 	auto conn_it = connection_session_keys_.find(connection_id);
 	if (conn_it == connection_session_keys_.end()) {
 		return nullptr;
 	}
 	auto it = sessions_.find(conn_it->second);
-	return (it != sessions_.end()) ? it->second.get() : nullptr;
+	return (it != sessions_.end()) ? it->second : nullptr;
 }
 
 void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
@@ -467,7 +468,7 @@ void RestApiSecretStorage::ClearSession(ClientContext &context) {
 }
 
 bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
-	auto *session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return false;
 	}
@@ -475,7 +476,7 @@ bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
 }
 
 string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
-	auto *session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return "";
 	}
@@ -483,7 +484,7 @@ string RestApiSecretStorage::GetBootstrapTokenHash(ClientContext &context) {
 }
 
 void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const string &hash) {
-	auto *session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return;
 	}
@@ -492,7 +493,7 @@ void RestApiSecretStorage::SetBootstrapTokenHash(ClientContext &context, const s
 }
 
 std::chrono::system_clock::time_point RestApiSecretStorage::GetTokenExpiresAt(ClientContext &context) {
-	auto *session = GetSessionForConnection(context.GetConnectionId());
+	auto session = GetSessionForConnection(context.GetConnectionId());
 	if (!session) {
 		return std::chrono::system_clock::time_point::min();
 	}
@@ -535,10 +536,7 @@ void RestApiSecretStorage::SaveRefreshToken(BoilstreamConnectionState &conn_stat
 		data.refresh_token = conn_state.refresh_token;
 		data.region = conn_state.region;
 		data.expires_at = conn_state.token_expires_at;
-	}
-	{
-		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
-		data.endpoint_url = endpoint_url;
+		data.endpoint_url = conn_state.GetEndpointUrl();
 	}
 
 	// Serialize data to JSON (unencrypted, protected by file permissions on native / localStorage sandboxing on WASM)
@@ -727,10 +725,7 @@ bool RestApiSecretStorage::LoadRefreshToken(BoilstreamConnectionState &conn_stat
 		conn_state.refresh_token.assign(refresh_token_bytes_str.begin(), refresh_token_bytes_str.end());
 		conn_state.region = region_str;
 		conn_state.token_expires_at = expires_at;
-	}
-	{
-		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
-		endpoint_url = endpoint;
+		conn_state.authentication_endpoint = endpoint;
 	}
 
 	BOILSTREAM_LOG("LoadRefreshToken: Successfully loaded refresh token");
@@ -776,30 +771,12 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 	}
 }
 
-void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume,
-                                                    const string &session_key) {
-	BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
-	               << ": starting OPAQUE " << (is_resume ? "resume" : "login"));
-
-	// context is used by callers (PerformOpaqueLogin/PerformOpaqueResume) after this returns
-	// for SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key)
-	(void)context;
-
-	// Get or create session for this session_key
-	auto &conn_state = GetOrCreateSession(session_key);
-
-	// Mark exchange as in progress
-	{
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.is_exchanging = true;
-	}
-
-	// Build login URL
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
+bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool is_resume,
+                                                     BoilstreamConnectionState &conn_state) {
+	// This state is private until the complete exchange succeeds. It cannot
+	// overwrite an active session's key, sequence, endpoint or exchange flag.
+	conn_state.is_exchanging = true;
+	string url = conn_state.GetEndpointUrl();
 
 	if (url.empty()) {
 		lock_guard<mutex> lock(conn_state.session_lock);
@@ -1085,176 +1062,122 @@ void RestApiSecretStorage::PerformOpaqueLoginCommon(ClientContext &context, cons
 		               << ": X-Boilstream-Session-Resumption header not present, assuming disabled");
 	}
 
-	// Save refresh token to disk if resumption is enabled
-	if (resumption_enabled) {
-		try {
-			SaveRefreshToken(conn_state, true);
-			BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
-			               << ": Refresh token saved for session resumption");
+	return resumption_enabled;
+}
 
-			// Store trusted mapping: hash(refresh_token) -> session_key
-			// This mapping is in database-level storage, NOT in tenant-controlled files
-			// It allows resume to find the correct session without trusting disk data
-			vector<uint8_t> refresh_token_copy;
-			{
-				lock_guard<mutex> lock(conn_state.session_lock);
-				refresh_token_copy = conn_state.refresh_token;
-			}
-			if (!refresh_token_copy.empty()) {
-				uint8_t refresh_hash[32];
-				opaque_client_sha256(refresh_token_copy.data(), refresh_token_copy.size(), refresh_hash);
+// ClientContext retains its database until after registered state destruction,
+// so the database-owned storage outlives this connection cleanup callback.
+class BoilstreamSessionCleanup : public ClientContextState {
+public:
+	BoilstreamSessionCleanup(RestApiSecretStorage &storage, idx_t connection_id)
+	    : storage(storage), connection_id(connection_id) {}
+	~BoilstreamSessionCleanup() override { storage.ClearConnectionMapping(connection_id); }
+private:
+	RestApiSecretStorage &storage;
+	idx_t connection_id;
+};
 
-				string refresh_hash_hex;
-				refresh_hash_hex.reserve(64);
-				const char *hex_chars = "0123456789abcdef";
-				for (size_t i = 0; i < 32; i++) {
-					refresh_hash_hex += hex_chars[(refresh_hash[i] >> 4) & 0xF];
-					refresh_hash_hex += hex_chars[refresh_hash[i] & 0xF];
-				}
-
-				// Store mapping in trusted database-level storage
-				{
-					lock_guard<mutex> sessions_guard(sessions_lock_);
-					refresh_to_session_[refresh_hash_hex] = session_key;
-				}
-				BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
-				               << ": Stored refresh->session mapping for " << refresh_hash_hex.substr(0, 16) << "...");
-			}
-		} catch (const std::exception &e) {
-			// Log but don't fail the login if we can't persist the token
-			BOILSTREAM_LOG((is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
-			               << ": WARNING - Failed to save refresh token: " << e.what());
+void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<BoilstreamConnectionState> pending,
+                                          const shared_ptr<BoilstreamConnectionState> &previous,
+                                          uint64_t generation, bool persist_refresh) {
+	const auto connection_id = context.GetConnectionId();
+	context.registered_state->GetOrCreate<BoilstreamSessionCleanup>("boilstream_session_cleanup", *this, connection_id);
+	const auto key = "@connection:" + std::to_string(connection_id);
+	string refresh_hash;
+	if (persist_refresh && !pending->refresh_token.empty()) {
+		uint8_t bytes[32];
+		opaque_client_sha256(pending->refresh_token.data(), pending->refresh_token.size(), bytes);
+		const char *hex = "0123456789abcdef";
+		for (auto byte : bytes) {
+			refresh_hash += hex[byte >> 4];
+			refresh_hash += hex[byte & 15];
 		}
 	}
-
-	BOILSTREAM_LOG(
-	    (is_resume ? "PerformOpaqueResume" : "PerformOpaqueLogin")
-	    << ": SUCCESS, token expires in "
-	    << std::chrono::duration_cast<std::chrono::hours>(new_expires_at - std::chrono::system_clock::now()).count()
-	    << " hours");
+	{
+		lock_guard<mutex> lock(sessions_lock_);
+		auto current_mapping = connection_session_keys_.find(connection_id);
+		shared_ptr<BoilstreamConnectionState> current;
+		if (current_mapping != connection_session_keys_.end()) {
+			auto found = sessions_.find(current_mapping->second);
+			if (found != sessions_.end()) current = found->second;
+		}
+		if (context.IsInterrupted() || current != previous ||
+		    (previous && previous->authentication_generation.load() != generation)) {
+			throw IOException("Authentication was interrupted or superseded");
+		}
+		if (current_mapping == connection_session_keys_.end() && connection_session_keys_.size() >= 10000) {
+			throw IOException("Authenticated connection capacity exhausted");
+		}
+		// Never evict another live connection to admit a new one. Refresh aliases
+		// for the replaced connection do not retain stale credentials indefinitely.
+		for (auto it = refresh_to_session_.begin(); it != refresh_to_session_.end();) {
+			if (it->second == key) it = refresh_to_session_.erase(it);
+			else ++it;
+		}
+		sessions_[key] = pending;
+		connection_session_keys_[connection_id] = key;
+		if (!refresh_hash.empty()) refresh_to_session_[refresh_hash] = key;
+	}
+	if (persist_refresh) {
+		try {
+			SaveRefreshToken(*pending, true);
+		} catch (...) {
+			// Session authentication succeeded; persistence remains best effort.
+			BOILSTREAM_LOG("Failed to persist authenticated refresh token");
+		}
+	}
 }
 
 void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const string &password,
-                                              const string &session_key) {
-	PerformOpaqueLoginCommon(context, password, false, session_key);
-
-	// After successful login, set this as the active session (both global and per-connection)
-	SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key);
+                                              const string &token_hash, const string &endpoint) {
+	auto previous = GetSessionForConnection(context.GetConnectionId());
+	auto generation = previous ? previous->authentication_generation.load() : 0;
+	auto pending = make_shared_ptr<BoilstreamConnectionState>(endpoint);
+	pending->bootstrap_token_hash = token_hash;
+	auto persist_refresh = PerformOpaqueLoginCommon(password, false, *pending);
+	PublishSession(context, std::move(pending), previous, generation, persist_refresh);
 }
 
 void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
-	BOILSTREAM_LOG("PerformOpaqueResume: Loading refresh token from disk");
-
-	// Create a temporary session state to load refresh token into
-	BoilstreamConnectionState temp_state;
-
-	// Load refresh token from disk into temporary state
-	if (!LoadRefreshToken(temp_state)) {
+	auto previous = GetSessionForConnection(context.GetConnectionId());
+	auto generation = previous ? previous->authentication_generation.load() : 0;
+	auto pending = make_shared_ptr<BoilstreamConnectionState>();
+	if (!LoadRefreshToken(*pending) || pending->refresh_token.empty()) {
 		throw IOException("Session resumption failed: No valid refresh token found");
 	}
-
-	// Extract refresh token as password for OPAQUE
-	string refresh_token_password;
-	{
-		lock_guard<mutex> lock(temp_state.session_lock);
-		if (temp_state.refresh_token.empty()) {
-			throw IOException("Session resumption failed: Refresh token is empty");
-		}
-		refresh_token_password.assign(reinterpret_cast<const char *>(temp_state.refresh_token.data()),
-		                              temp_state.refresh_token.size());
+	string password(pending->refresh_token.begin(), pending->refresh_token.end());
+	// Wipe on both successful and exceptional exits.
+	struct PasswordGuard {
+		string &value;
+		~PasswordGuard() { BoilstreamConnectionState::SecureZeroString(value); }
+	} password_guard {password};
+	uint8_t bytes[32];
+	opaque_client_sha256(pending->refresh_token.data(), pending->refresh_token.size(), bytes);
+	string hash;
+	const char *hex = "0123456789abcdef";
+	for (auto byte : bytes) {
+		hash += hex[byte >> 4];
+		hash += hex[byte & 15];
 	}
-
-	// Compute hash of refresh token to look up session_key from trusted mapping
-	uint8_t hash_bytes[32];
-	opaque_client_sha256(reinterpret_cast<const uint8_t *>(refresh_token_password.c_str()),
-	                     refresh_token_password.size(), hash_bytes);
-
-	string refresh_hash_hex;
-	refresh_hash_hex.reserve(64);
-	const char *hex_chars = "0123456789abcdef";
-	for (size_t i = 0; i < 32; i++) {
-		refresh_hash_hex += hex_chars[(hash_bytes[i] >> 4) & 0xF];
-		refresh_hash_hex += hex_chars[hash_bytes[i] & 0xF];
-	}
-
-	// Look up session_key from trusted database-level mapping
-	// This prevents malicious tenants from hijacking sessions by modifying their refresh token file
-	string session_key;
+	shared_ptr<BoilstreamConnectionState> trusted;
 	{
-		lock_guard<mutex> sessions_guard(sessions_lock_);
-		auto it = refresh_to_session_.find(refresh_hash_hex);
-		if (it != refresh_to_session_.end()) {
-			session_key = it->second;
-			BOILSTREAM_LOG("PerformOpaqueResume: Found session mapping for refresh token");
+		lock_guard<mutex> lock(sessions_lock_);
+		auto alias = refresh_to_session_.find(hash);
+		if (alias != refresh_to_session_.end()) {
+			auto found = sessions_.find(alias->second);
+			if (found != sessions_.end()) trusted = found->second;
 		}
 	}
-
-	// If no mapping found, this refresh token is unknown (possibly from a previous database instance)
-	// In this case, we use the refresh_hash_hex as a new session_key
-	if (session_key.empty()) {
-		BOILSTREAM_LOG("PerformOpaqueResume: No session mapping found, creating new session for this refresh token");
-		session_key = refresh_hash_hex;
-	}
-
-	BOILSTREAM_LOG("PerformOpaqueResume: Loaded refresh token, starting OPAQUE resume");
-
-	// Copy loaded data (endpoint, region) to the proper session
-	auto &conn_state = GetOrCreateSession(session_key);
-	{
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.refresh_token = temp_state.refresh_token;
-		conn_state.region = temp_state.region;
-	}
-
-	// Set endpoint from loaded token
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		if (endpoint_url.empty()) {
-			endpoint_url = temp_state.region; // temp_state stores endpoint in region during load
+	if (trusted) {
+		if (trusted->GetEndpointUrl() != pending->GetEndpointUrl()) {
+			throw IOException("Refresh token authority does not match its session");
 		}
+		pending->bootstrap_token_hash = trusted->GetBootstrapTokenHash();
 	}
-
-	// Use the common login flow with the refresh token
-	try {
-		PerformOpaqueLoginCommon(context, refresh_token_password, true, session_key);
-
-		// After successful resume, set this as the active session (both global and per-connection)
-		SetActiveSessionKeyForConnection(context.GetConnectionId(), session_key);
-
-		// On successful resume, the old refresh token is now invalid
-		// The new one has been saved by PerformOpaqueLoginCommon
-		BOILSTREAM_LOG("PerformOpaqueResume: Session resumed successfully");
-	} catch (const std::exception &e) {
-		// Only delete token if it's actually invalid (not transient network/httpfs errors)
-		string error_msg = e.what();
-		bool is_transient_error = (error_msg.find("scheme is not supported") != string::npos) || // httpfs not loaded
-		                          (error_msg.find("not implemented") != string::npos) ||         // missing HTTP support
-		                          (error_msg.find("Connection refused") != string::npos) ||      // server down
-		                          (error_msg.find("Could not connect") != string::npos) ||       // network issue
-		                          (error_msg.find("Failed to connect") != string::npos) ||       // network issue
-		                          (error_msg.find("Timeout") != string::npos) ||                 // network timeout
-		                          (error_msg.find("timed out") != string::npos);                 // network timeout
-
-		if (is_transient_error) {
-			// Keep token AND endpoint for transient errors - user can retry later
-			BOILSTREAM_LOG(
-			    "PerformOpaqueResume: Resume failed due to transient error, keeping token and endpoint: " << error_msg);
-			// Don't clear endpoint - it's still valid, just couldn't connect right now
-		} else {
-			// Delete token for authentication failures (invalid/expired token)
-			BOILSTREAM_LOG("PerformOpaqueResume: Resume failed, deleting invalid token: " << error_msg);
-			DeleteRefreshToken();
-
-			// Clear endpoint since token is invalid
-			// This ensures tests expecting "endpoint not configured" work correctly
-			SetEndpoint("");
-		}
-
-		throw;
-	}
-
-	// Securely zero the refresh token password
-	SECURE_ZERO_MEMORY(const_cast<char *>(refresh_token_password.data()), refresh_token_password.size());
+	// A failed exchange never clears another session, its endpoint, or a newer
+	// persisted token. A rejected token can be replaced by explicit login.
+	auto persist_refresh = PerformOpaqueLoginCommon(password, true, *pending);
+	PublishSession(context, std::move(pending), previous, generation, persist_refresh);
 }
 
 void RestApiSecretStorage::SetUserContextForConnection(idx_t connection_id, const string &user_id) {
@@ -1294,7 +1217,18 @@ void RestApiSecretStorage::ClearConnectionMapping(idx_t connection_id) {
 	}
 	{
 		lock_guard<mutex> lock(sessions_lock_);
-		connection_session_keys_.erase(connection_id);
+		auto it = connection_session_keys_.find(connection_id);
+		if (it != connection_session_keys_.end()) {
+			const auto owned_key = "@connection:" + std::to_string(connection_id);
+			if (it->second == owned_key) {
+				sessions_.erase(owned_key);
+				for (auto alias = refresh_to_session_.begin(); alias != refresh_to_session_.end();) {
+					if (alias->second == owned_key) alias = refresh_to_session_.erase(alias);
+					else ++alias;
+				}
+			}
+			connection_session_keys_.erase(it);
+		}
 	}
 }
 
@@ -2236,7 +2170,7 @@ void RestApiSecretStorage::ClearExpiration(const string &secret_name, Boilstream
 
 std::chrono::system_clock::time_point
 RestApiSecretStorage::GetSecretExpiration(const string &secret_name, optional_ptr<CatalogTransaction> transaction) {
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (!conn_state) {
 		// No connection state available
 		return std::chrono::system_clock::time_point();
@@ -2256,6 +2190,11 @@ RestApiSecretStorage::GetSecretExpiration(const string &secret_name, optional_pt
 string RestApiSecretStorage::GetEndpointUrl() {
 	lock_guard<mutex> lock(endpoint_lock);
 	return endpoint_url;
+}
+
+string RestApiSecretStorage::GetEndpointUrl(ClientContext &context) {
+	auto state = GetSessionForConnection(context.GetConnectionId());
+	return state ? state->GetEndpointUrl() : "";
 }
 
 bool RestApiSecretStorage::IsMultiTenantMode(ClientContext &context) {
@@ -2421,7 +2360,7 @@ void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> sec
 }
 
 string RestApiSecretStorage::HttpGet(const string &url, optional_ptr<CatalogTransaction> transaction) {
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (!conn_state) {
 		throw IOException("HttpGet: No connection state available. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -2641,7 +2580,7 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 
 string RestApiSecretStorage::HttpPost(const string &url, const string &body,
                                       optional_ptr<CatalogTransaction> transaction, HTTPHeaders *out_headers) {
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (!conn_state) {
 		throw IOException("HttpPost: No connection state available. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -3036,7 +2975,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 				secrets->DropEntry(trans, secret_name, false, true);
 			}
 			// Clear expiration
-			auto *conn_state = GetSession(transaction);
+			auto conn_state = GetSession(transaction);
 			if (conn_state) {
 				ClearExpiration(secret_name, *conn_state);
 			}
@@ -3050,7 +2989,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	// work from a plain DuckDB CLI session that never called
 	// `PRAGMA boilstream_bootstrap_session`. Cross-session persistence
 	// requires a live conn_state; absent one, the secret is session-local.
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (conn_state) {
 		WriteSecretWithState(*secret, on_conflict, *conn_state);
 	} else {
@@ -3101,11 +3040,7 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	BOILSTREAM_LOG("WriteSecretWithState: name=" << secret.GetName());
 
 	// Check if endpoint is configured
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
+	string url = conn_state.GetEndpointUrl();
 
 	BOILSTREAM_LOG("WriteSecretWithState: endpoint_url=" << url);
 
@@ -3174,7 +3109,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	// ---------- end Quack dispatch ----------
 
 	// Get connection state FIRST - needed for recursion guard
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 
 	// CRITICAL: Use atomic recursion guard to prevent stack overflow
 	// This must happen before ANY other operations that could trigger secret lookups
@@ -3205,11 +3140,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	                                           << ", in_http_op=" << (in_http_operation ? "true" : "false"));
 
 	// Check if this path matches our own endpoint (potential loop indicator)
-	string our_endpoint;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		our_endpoint = endpoint_url;
-	}
+	string our_endpoint = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (!our_endpoint.empty() && path.find(our_endpoint) != string::npos) {
 		BOILSTREAM_LOG("LookupSecret: WARNING - Looking up secret for OUR OWN ENDPOINT: " << path);
 	}
@@ -3250,11 +3181,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	}
 
 	// No match in cache or expired - fetch from REST API
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
+	string url = conn_state ? conn_state->GetEndpointUrl() : "";
 
 	// If endpoint not configured, return no match
 	if (url.empty()) {
@@ -3345,7 +3272,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 #endif
 
 	// Get connection state FIRST - needed for recursion guard
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 
 	// CRITICAL: Use atomic recursion guard to prevent stack overflow
 	// This must happen before ANY other operations that could trigger secret lookups
@@ -3394,11 +3321,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	}
 
 	// Not in cache or expired - fetch from REST API
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
+	string url = conn_state ? conn_state->GetEndpointUrl() : "";
 
 	// If endpoint not configured, return null
 	if (url.empty()) {
@@ -3490,7 +3413,7 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 }
 
 vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
-                                                                    BoilstreamConnectionState *explicit_conn_state) {
+                                                                    shared_ptr<BoilstreamConnectionState> explicit_conn_state) {
 	// Bootstrap callers (PRAGMA boilstream_bootstrap_session) must force the HTTP
 	// fetch even when guards/caches that protect re-entrant httpfs callers would
 	// short-circuit it. They pass the just-established conn_state directly so we
@@ -3498,7 +3421,7 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	const bool force_fetch = explicit_conn_state != nullptr;
 
 	// Get connection state FIRST - needed for recursion guard
-	auto *conn_state = force_fetch ? explicit_conn_state : GetSession(transaction);
+	auto conn_state = force_fetch ? explicit_conn_state : GetSession(transaction);
 
 	// CRITICAL: Use atomic recursion guard to prevent stack overflow
 	// This must happen before ANY other operations that could trigger secret lookups
@@ -3566,14 +3489,11 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 	}
 
 	// Build URL using the endpoint URL
-	string url;
-	bool has_endpoint = false;
+	// The default can trigger explicit resumption for an unbound connection;
+	// authenticated requests always use the resumed/session-owned endpoint.
+	string url = conn_state ? conn_state->GetEndpointUrl() : GetEndpointUrl();
+	bool has_endpoint = !url.empty();
 	bool has_session = false;
-	{
-		lock_guard<mutex> endpoint_lock_guard(endpoint_lock);
-		url = endpoint_url;
-		has_endpoint = !endpoint_url.empty();
-	}
 	if (conn_state) {
 		lock_guard<mutex> session_lock_guard(conn_state->session_lock);
 		has_session = !conn_state->access_token.empty();
@@ -3589,15 +3509,9 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 			PerformOpaqueResume(context);
 			BOILSTREAM_LOG("AllSecrets: Resume successful");
 
-			// Re-capture endpoint URL after resume (it may have been updated from refresh token)
-			{
-				lock_guard<mutex> lock(endpoint_lock);
-				url = endpoint_url;
-			}
-			BOILSTREAM_LOG("AllSecrets: endpoint_url after resume=" << url);
-
-			// Re-fetch connection state after resume (it was created during resume)
+			// Refresh both the owning handle and its authority after publication.
 			conn_state = GetSession(transaction);
+			url = conn_state ? conn_state->GetEndpointUrl() : "";
 			BOILSTREAM_LOG("AllSecrets: Re-fetched conn_state after resume, ptr=" << (void *)conn_state);
 		} catch (const std::exception &e) {
 			BOILSTREAM_LOG("AllSecrets: Resume failed: " << e.what());
@@ -3771,14 +3685,10 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 	BOILSTREAM_LOG("DropSecretByName: name=" << name);
 
 	// Get connection state
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 
 	// Check if endpoint is configured
-	string url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		url = endpoint_url;
-	}
+	string url = conn_state ? conn_state->GetEndpointUrl() : "";
 
 	if (url.empty()) {
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
@@ -3833,11 +3743,7 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 		}
 	}
 
-	string base_url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		base_url = endpoint_url;
-	}
+	string base_url = conn_state.GetEndpointUrl();
 
 	if (base_url.empty()) {
 		return versions;
@@ -3944,11 +3850,7 @@ static bool ParseManagedCatalogSecretScope(const string &path, string &catalog_i
 ManagedCatalogCredentialEnvelope
 RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, BoilstreamConnectionState &conn_state,
                                                     optional_ptr<CatalogTransaction> transaction) {
-	string base_url;
-	{
-		lock_guard<mutex> lock(endpoint_lock);
-		base_url = endpoint_url;
-	}
+	string base_url = conn_state.GetEndpointUrl();
 	if (base_url.empty()) {
 		throw IOException("Managed DuckDB credential vending requires an active Boilstream endpoint");
 	}
@@ -4004,7 +3906,7 @@ RestApiSecretStorage::VendManagedCatalogCredential(const string &catalog_id,
 	if (!UUID::FromString(catalog_id, parsed_catalog_id, true) || UUID::ToString(parsed_catalog_id) != catalog_id) {
 		throw InvalidInputException("Managed DuckDB catalog_id must be a canonical UUID");
 	}
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (!conn_state) {
 		throw IOException("Managed DuckDB credential vending requires an active Boilstream session");
 	}
@@ -4023,7 +3925,7 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 
 	// Need an active session for authenticated GET — quack credentials are gated
 	// behind the same OPAQUE-authenticated REST API as everything else.
-	auto *conn_state = GetSession(transaction);
+	auto conn_state = GetSession(transaction);
 	if (!conn_state) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: no connection state");
 		return SecretMatch();

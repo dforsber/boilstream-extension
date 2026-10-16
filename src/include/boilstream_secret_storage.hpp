@@ -22,6 +22,7 @@ class BoilstreamConformanceTestAccess;
 class BoilstreamEncryptionTestAccess;
 class BoilstreamCatalogVersionTestAccess;
 class BoilstreamInputValidationTestAccess;
+class BoilstreamSessionPublicationTestAccess;
 
 namespace duckdb {
 
@@ -53,6 +54,7 @@ class RestApiSecretStorage : public CatalogSetSecretStorage {
 	friend class ::BoilstreamEncryptionTestAccess;
 	friend class ::BoilstreamCatalogVersionTestAccess;
 	friend class ::BoilstreamInputValidationTestAccess;
+	friend class ::BoilstreamSessionPublicationTestAccess;
 
 public:
 	//! Use CatalogVersionInfo from BoilstreamConnectionState
@@ -64,30 +66,31 @@ public:
 	void SetEndpoint(const string &endpoint);
 
 	//! Get active session from transaction context
-	//! Looks up session by endpoint_url (there's typically one active session per endpoint)
+	//! Returns an owning handle retained through each authenticated operation
 	//! Returns nullptr if no active session exists
-	BoilstreamConnectionState *GetSession(optional_ptr<CatalogTransaction> transaction);
+	shared_ptr<BoilstreamConnectionState> GetSession(optional_ptr<CatalogTransaction> transaction);
 
 	//! Get or create session for a specific session key (bootstrap_token_hash)
 	//! Creates new session if none exists for this key
-	//! This is the primary method for PRAGMA to establish/retrieve sessions
+	//! Explicit storage clients use this helper; PRAGMA authenticates private state
 	BoilstreamConnectionState &GetOrCreateSession(const string &session_key);
 
 	//! Check if a session exists for a session key
 	bool HasSession(const string &session_key);
 
 	//! Get session by key (returns nullptr if not found)
-	BoilstreamConnectionState *GetSessionByKey(const string &session_key);
+	shared_ptr<BoilstreamConnectionState> GetSessionByKey(const string &session_key);
 
 	//! Set the active session key for a specific connection (concurrent-safe)
 	void SetActiveSessionKeyForConnection(idx_t connection_id, const string &session_key);
 
 	//! Get session by connection ID (returns nullptr if not found)
-	BoilstreamConnectionState *GetSessionForConnection(idx_t connection_id);
+	shared_ptr<BoilstreamConnectionState> GetSessionForConnection(idx_t connection_id);
 
 	//! Perform OPAQUE login with password
-	//! session_key is the bootstrap_token_hash, used to store/retrieve session
-	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &session_key);
+	//! Authenticate private state, then publish it for this connection
+	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
+	                        const string &endpoint);
 
 	//! Perform OPAQUE session resumption with stored refresh token
 	void PerformOpaqueResume(ClientContext &context);
@@ -96,9 +99,8 @@ public:
 	void ClearSession(ClientContext &context);
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
-	//! session_key identifies which session to use
-	void PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume,
-	                              const string &session_key);
+	//! Only receives unpublished state; returns whether refresh persistence is enabled
+	bool PerformOpaqueLoginCommon(const string &password, bool is_resume, BoilstreamConnectionState &pending);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -139,7 +141,7 @@ public:
 	//! be observable through the just-built CatalogTransaction, so GetSession()
 	//! cannot be relied on to find it.
 	vector<SecretEntry> FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
-	                                              BoilstreamConnectionState *explicit_conn_state = nullptr);
+	                                              shared_ptr<BoilstreamConnectionState> explicit_conn_state = nullptr);
 
 	//! Override to lookup secrets from REST API
 	SecretMatch LookupSecret(const string &path, const string &type,
@@ -188,6 +190,8 @@ public:
 
 	//! Get the endpoint URL (for constructing API URLs in table functions)
 	string GetEndpointUrl();
+	//! Authenticated routing never falls back to the database default.
+	string GetEndpointUrl(ClientContext &context);
 
 	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
 	static bool IsMultiTenantMode(ClientContext &context);
@@ -389,6 +393,10 @@ private:
 	// Shared State (across all connections)
 	//========================================================================
 
+	void PublishSession(ClientContext &context, shared_ptr<BoilstreamConnectionState> pending,
+	                    const shared_ptr<BoilstreamConnectionState> &previous, uint64_t generation,
+	                    bool persist_refresh);
+
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
 
@@ -420,7 +428,10 @@ private:
 
 	//========================================================================
 	// Session Storage (database-level, shared across all ClientContexts)
-	// Sessions are keyed by bootstrap_token_hash which provides:
+	// Authenticated sessions are published under connection-owned keys.
+	// Legacy explicit keys remain available for direct storage/test clients.
+	// Owning handles preserve in-flight request lifetimes during replacement.
+	// Historical explicit-key semantics provide:
 	// - Session reuse: same token = same session (across connections)
 	// - Isolation: different tokens = different sessions
 	// - Works with vanilla DuckDB (no TenantIsolation dependency)

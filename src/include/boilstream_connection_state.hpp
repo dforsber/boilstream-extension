@@ -53,10 +53,10 @@ public:
 		bool has_session_key;
 	};
 
-	BoilstreamConnectionState()
+	explicit BoilstreamConnectionState(string endpoint = "")
 	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()),
-	      last_all_secrets_fetch(std::chrono::steady_clock::time_point::min()) {
+	      last_all_secrets_fetch(std::chrono::steady_clock::time_point::min()), authentication_endpoint(std::move(endpoint)) {
 	}
 
 	//! Prevent copying (contains mutex)
@@ -212,9 +212,16 @@ public:
 		}
 	}
 
+	//! Authority is assigned only while authentication state is private.
+	string GetEndpointUrl() const { return authentication_endpoint; }
+
+	//! Detect logout while a replacement exchange is in flight.
+	std::atomic<uint64_t> authentication_generation {0};
+
 	//! Clear session state (on error or logout)
 	void ClearSession() {
 		{
+			authentication_generation.fetch_add(1);
 			lock_guard<mutex> lock(session_lock);
 			// Secure memory wiping using volatile to prevent compiler optimization
 			SecureZeroString(access_token);
@@ -348,6 +355,10 @@ public:
 
 	//! Version check interval in seconds (default 60)
 	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
+private:
+	friend class RestApiSecretStorage;
+	string authentication_endpoint;
+
 };
 
 } // namespace duckdb

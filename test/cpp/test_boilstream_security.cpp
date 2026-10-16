@@ -239,14 +239,14 @@ TEST_CASE("Session Management via Storage", "[boilstream][security]") {
 
 	SECTION("GetSessionByKey returns session pointer") {
 		fixture.storage->GetOrCreateSession("ptr_test");
-		auto *ptr = fixture.storage->GetSessionByKey("ptr_test");
+		auto ptr = fixture.storage->GetSessionByKey("ptr_test");
 		REQUIRE(ptr != nullptr);
 	}
 
 	SECTION("GetOrCreateSession and GetSessionByKey work together") {
 		fixture.storage->GetOrCreateSession("active_test");
 
-		auto *session = fixture.storage->GetSessionByKey("active_test");
+		auto session = fixture.storage->GetSessionByKey("active_test");
 		REQUIRE(session != nullptr);
 	}
 }

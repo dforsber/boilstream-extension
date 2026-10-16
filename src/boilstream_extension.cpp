@@ -190,7 +190,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: Fetching ducklakes from API");
 
 	// Get the endpoint URL and validate it's configured
-	string endpoint_url = storage->GetEndpointUrl();
+	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException(
 		    "boilstream_ducklakes: No endpoint configured. Call PRAGMA boilstream_bootstrap_session first.");
@@ -206,8 +207,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: ducklakes_url=" << ducklakes_url);
 
-	// Get active session for authenticated request (per-connection routing)
-	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -435,7 +435,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 	}
 
 	// Validate endpoint is configured
-	string endpoint_url = storage->GetEndpointUrl();
+	string endpoint_url = storage->GetEndpointUrl(context);
 	if (endpoint_url.empty()) {
 		throw InvalidInputException(
 		    "boilstream_secrets: No endpoint configured. Call PRAGMA boilstream_bootstrap_session first.");
@@ -580,7 +580,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: Fetching buckets from API");
 
 	// Get the endpoint URL and validate it's configured
-	string endpoint_url = storage->GetEndpointUrl();
+	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException(
 		    "boilstream_buckets: No endpoint configured. Call PRAGMA boilstream_bootstrap_session first.");
@@ -591,8 +592,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	BOILSTREAM_LOG("BoilstreamBucketsInit: buckets_url=" << buckets_url);
 
-	// Get active session for authenticated request (per-connection routing)
-	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -758,7 +758,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	}
 
 	// Get endpoint URL
-	string endpoint_url = storage->GetEndpointUrl();
+	auto conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	string endpoint_url = conn_state ? conn_state->GetEndpointUrl() : "";
 	if (endpoint_url.empty()) {
 		throw InvalidInputException("boilstream_create_ducklake: No endpoint configured. Call PRAGMA "
 		                            "boilstream_bootstrap_session first.");
@@ -790,8 +791,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	BOILSTREAM_LOG("CreateDucklake: Making POST request, body_len=" << body.size());
 
-	// Get active session for authenticated request (per-connection routing)
-	auto *conn_state = storage->GetSessionForConnection(context.GetConnectionId());
+	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
 	}
@@ -967,12 +967,14 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 13: Hash complete");
 
 	// Check if this is the same bootstrap token from an existing valid session
-	if (storage->GetBootstrapTokenHash(context) == incoming_token_hash && !incoming_token_hash.empty() &&
-	    storage->IsSessionTokenValid(context)) {
+	auto existing_session = storage->GetSessionForConnection(context.GetConnectionId());
+	if (existing_session && existing_session->GetBootstrapTokenHash() == incoming_token_hash &&
+	    !incoming_token_hash.empty() && existing_session->IsSessionTokenValid() &&
+	    existing_session->GetEndpointUrl() == endpoint_url) {
 		BOILSTREAM_LOG("SetEndpoint: Bootstrap token matches existing session, skipping exchange");
 
 		// Get expiration timestamp and format it
-		auto expires_at = storage->GetTokenExpiresAt(context);
+		auto expires_at = existing_session->GetTokenExpiresAt();
 		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 		std::tm tm_utc;
 #ifdef _WIN32
@@ -986,31 +988,24 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		return "SELECT 'Session already active' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at;";
 	}
 
-	// Clear any existing session before attempting new token exchange
-	// This ensures clean state and prevents sending old access_token during bootstrap exchange
-	storage->ClearSession(context);
+	// Authenticate private state; a failed replacement preserves the active session.
 
-	// Perform OPAQUE login BEFORE setting endpoint (for consistent state on failure)
+	// Perform OPAQUE with a private endpoint and credential state
 	// All crypto now handled by Rust - works on all platforms including WASM
 	BOILSTREAM_LOG("Step 12: Starting OPAQUE login");
 
 	try {
-		// Temporarily set endpoint for exchange (will be cleared on failure)
-		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: endpoint_url=" << endpoint_url);
 
-		// Pass the token hash as session key - this creates/retrieves the session
-		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash);
+		// Bind this bootstrap identity to the newly authenticated session
+		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login successful");
 
-		// Store bootstrap token hash for reuse detection
-		storage->SetBootstrapTokenHash(context, incoming_token_hash);
+		// The bootstrap identity was published with the authenticated state.
 		BOILSTREAM_LOG("SetEndpoint: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
-		// Rollback endpoint on failure - ensure consistent state
-		storage->SetEndpoint("");
-		storage->ClearSession(context);
-		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed, rolled back: " << e.what());
+		// The failed pending exchange never changed the active session.
+		BOILSTREAM_LOG("SetEndpoint: OPAQUE login failed: " << e.what());
 
 		// Normalize network-related errors to "Token exchange failed" for consistent test behavior
 		// This prevents exposing internal error details when the server is unreachable
@@ -1044,7 +1039,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto *bootstrap_conn_state = storage->GetSessionByKey(incoming_token_hash);
+		auto bootstrap_conn_state = storage->GetSessionForConnection(context.GetConnectionId());
 		// Use FetchAllSecretsFromServer to always fetch (AllSecrets returns empty in WASM)
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("SetEndpoint: Successfully fetched " << secrets.size() << " secrets");
@@ -2108,12 +2103,14 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Check if this is the same bootstrap token from an existing valid session
-	if (storage->GetBootstrapTokenHash(context) == incoming_token_hash && !incoming_token_hash.empty() &&
-	    storage->IsSessionTokenValid(context)) {
+	auto existing_session = storage->GetSessionForConnection(context.GetConnectionId());
+	if (existing_session && existing_session->GetBootstrapTokenHash() == incoming_token_hash &&
+	    !incoming_token_hash.empty() && existing_session->IsSessionTokenValid() &&
+	    existing_session->GetEndpointUrl() == endpoint_url) {
 		BOILSTREAM_LOG("Login: Bootstrap token matches existing session, skipping exchange");
 
 		// Get expiration timestamp and format it
-		auto expires_at = storage->GetTokenExpiresAt(context);
+		auto expires_at = existing_session->GetTokenExpiresAt();
 		auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 		std::tm tm_utc;
 #ifdef _WIN32
@@ -2127,26 +2124,21 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		return "SELECT 'Session already active' as status, TIMESTAMP '" + string(expires_str) + "' as expires_at;";
 	}
 
-	// Clear any existing session before attempting new token exchange
-	storage->ClearSession(context);
+	// Authenticate private state; a failed replacement preserves the active session.
 
 	// Perform OPAQUE login
 	try {
-		storage->SetEndpoint(endpoint_url);
 		BOILSTREAM_LOG("Login: endpoint_url=" << endpoint_url);
 
-		// Pass the token hash as session key
-		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash);
+		// Bind the bootstrap identity and endpoint together
+		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
 		BOILSTREAM_LOG("Login: OPAQUE login successful");
 
-		// Store bootstrap token hash for reuse detection
-		storage->SetBootstrapTokenHash(context, incoming_token_hash);
+		// The bootstrap identity was published with the authenticated state.
 		BOILSTREAM_LOG("Login: Stored bootstrap token hash");
 	} catch (const std::exception &e) {
-		// Rollback endpoint on failure - ensure consistent state
-		storage->SetEndpoint("");
-		storage->ClearSession(context);
-		BOILSTREAM_LOG("Login: OPAQUE login failed, rolled back: " << e.what());
+		// The failed pending exchange never changed the active session.
+		BOILSTREAM_LOG("Login: OPAQUE login failed: " << e.what());
 		throw IOException("OPAQUE login failed: %s", e.what());
 	}
 
@@ -2161,7 +2153,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	vector<string> ducklake_names;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto *bootstrap_conn_state = storage->GetSessionByKey(incoming_token_hash);
+		auto bootstrap_conn_state = storage->GetSessionForConnection(context.GetConnectionId());
 		auto secrets = storage->FetchAllSecretsFromServer(transaction, bootstrap_conn_state);
 		BOILSTREAM_LOG("Login: Successfully fetched and cached secrets");
 

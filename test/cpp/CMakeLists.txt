@@ -485,3 +485,13 @@ add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
 add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)
 add_test(NAME QuackBridgeTests COMMAND quack_bridge_test)
+
+# Session publication ownership, rejection and real ClientContext teardown.
+add_executable(session_publication_test test_session_publication.cpp
+               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+target_include_directories(session_publication_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(session_publication_test PRIVATE ${DUCKDB_LIBS})
+link_rust_dependencies(session_publication_test)
+add_test(NAME SessionPublication COMMAND session_publication_test)
