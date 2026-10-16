@@ -12,6 +12,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "boilstream_connection_state.hpp"
+#include "boilstream_registration_state.hpp"
 #include <string>
 #include <chrono>
 #include <unordered_map>
@@ -175,12 +176,6 @@ public:
 	string HttpPostWithState(const string &url, const string &body, BoilstreamConnectionState &conn_state,
 	                         HTTPHeaders *out_headers = nullptr);
 
-	//! Set session cookie for authenticated requests (used for email/password registration flow)
-	void SetSessionCookie(const string &session_id);
-
-	//! Clear session cookie
-	void ClearSessionCookie();
-
 	//! Get expiration timestamp for a secret from connection state (for table functions)
 	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name,
 	                                                          optional_ptr<CatalogTransaction> transaction);
@@ -229,15 +224,16 @@ public:
 	//! Append platform query parameters using transaction context
 	string AppendPlatformParams(const string &url, optional_ptr<CatalogTransaction> transaction);
 
-	//! Store registration state (base_url, session_token, and totp_uri) for MFA verification
-	void StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri);
-
-	//! Get registration state (returns base_url, session_token, and totp_uri)
-	//! Throws IOException if no registration state is stored
-	std::tuple<string, string, string> GetRegistrationState();
-
-	//! Clear registration state after successful MFA verification
-	void ClearRegistrationState();
+	//! Begin one exclusive registration/MFA operation for this connection and tenant.
+	//! A ready registration is reusable only for the same authority and email.
+	BoilstreamRegistrationSnapshot BeginRegistration(ClientContext &context, const string &base_url,
+	                                                 const string &email);
+	BoilstreamRegistrationSnapshot BeginMfaVerification(ClientContext &context);
+	void StoreRegistrationState(ClientContext &context, uint64_t generation, const string &session_token,
+	                            const string &totp_uri);
+	void CompleteRegistration(ClientContext &context, uint64_t generation);
+	//! Release a failed operation; cancellation/failed signup discard its state.
+	void EndRegistrationOperation(ClientContext &context, uint64_t generation) noexcept;
 
 protected:
 	//! Override WriteSecret to persist to REST API
@@ -399,19 +395,7 @@ private:
 	//! Lock for connection user map
 	mutex connection_lock;
 
-	//! Session cookie for email/password authentication flow (shared for registration)
-	string session_cookie;
-
-	//! Lock for session cookie
-	mutex cookie_lock;
-
-	//! Registration state (stored during email/password registration for MFA verification)
-	string registration_base_url;
-	string registration_session_token;
-	string registration_totp_uri;
-
-	//! Lock for registration state
-	mutex registration_lock;
+	shared_ptr<BoilstreamRegistrationContext> RegistrationOwner(ClientContext &context, bool create);
 
 	//! Version check interval in seconds (default 60)
 	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;

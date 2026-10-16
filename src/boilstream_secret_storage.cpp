@@ -1892,40 +1892,191 @@ string RestApiSecretStorage::AppendPlatformParams(const string &url, ClientConte
 	return result;
 }
 
-void RestApiSecretStorage::SetSessionCookie(const string &session_id) {
-	lock_guard<mutex> lock(cookie_lock);
-	session_cookie = "session_id=" + session_id;
-	BOILSTREAM_LOG("SetSessionCookie: Session cookie set");
-}
-
-void RestApiSecretStorage::ClearSessionCookie() {
-	lock_guard<mutex> lock(cookie_lock);
-	session_cookie.clear();
-	BOILSTREAM_LOG("ClearSessionCookie: Session cookie cleared");
-}
-
-void RestApiSecretStorage::StoreRegistrationState(const string &base_url, const string &session_token,
-                                                  const string &totp_uri) {
-	lock_guard<mutex> lock(registration_lock);
-	registration_base_url = base_url;
-	registration_session_token = session_token;
-	registration_totp_uri = totp_uri;
-}
-
-std::tuple<string, string, string> RestApiSecretStorage::GetRegistrationState() {
-	lock_guard<mutex> lock(registration_lock);
-	if (registration_base_url.empty() || registration_session_token.empty()) {
-		throw IOException("No registration state found. Please run PRAGMA boilstream_register_user() first.");
+// Pending enrollment has no database-global credentials or connection-id map.
+// Only the real ClientContext owns this state; no API exposes an owning handle.
+class BoilstreamRegistrationContext : public ClientContextState {
+public:
+	explicit BoilstreamRegistrationContext(RestApiSecretStorage &storage) : storage(storage) {
 	}
-	return std::make_tuple(registration_base_url, registration_session_token, registration_totp_uri);
+	RestApiSecretStorage &storage;
+	weak_ptr<BoilstreamConnectionState> authentication;
+	bool had_authentication = false;
+	uint64_t authentication_generation = 0;
+	bool MatchesAuthentication(const shared_ptr<BoilstreamConnectionState> &current) const {
+		auto previous = authentication.lock();
+		return had_authentication ? previous && previous == current &&
+		                                current->authentication_generation.load() == authentication_generation
+		                          : !current;
+	}
+	mutex lock;
+	uint64_t generation = 0;
+	bool bound = false, ready = false, busy = false, verifying = false;
+	string tenant, base_url, email, session_token, totp_uri;
+	void Reset() {
+		generation = 0;
+		authentication.reset();
+		had_authentication = false;
+		authentication_generation = 0;
+		bound = ready = busy = verifying = false;
+		for (auto value : {&tenant, &base_url, &email, &session_token, &totp_uri}) {
+			BoilstreamConnectionState::SecureZeroString(*value);
+			value->clear();
+		}
+	}
+	~BoilstreamRegistrationContext() override {
+		Reset();
+	}
+	void QueryBegin(ClientContext &context) override {
+		const auto current = RestApiSecretStorage::GetTenantId(context);
+		const auto current_auth = storage.GetSessionForConnection(context.GetConnectionId());
+		lock_guard<mutex> guard(lock);
+		if (bound && (current != tenant || !MatchesAuthentication(current_auth) || context.IsInterrupted()))
+			Reset();
+	}
+	void QueryEnd(ClientContext &context, optional_ptr<ErrorData>) override {
+		if (context.IsInterrupted()) {
+			lock_guard<mutex> guard(lock);
+			Reset();
+		}
+	}
+	BoilstreamRegistrationSnapshot Snapshot() const {
+		return {generation, base_url, email, session_token, totp_uri};
+	}
+	void Check(uint64_t expected) const {
+		if (!bound || !busy || generation != expected || expected == 0)
+			throw IOException("Registration operation was interrupted or superseded");
+	}
+};
+
+// IDs carry no identity or credentials. Never reuse an operation ID, including
+// across connections, so a foreign or delayed completion cannot match a lease.
+static uint64_t NextRegistrationOperation() {
+	static std::atomic<uint64_t> next {1};
+	auto value = next.load(std::memory_order_relaxed);
+	do {
+		if (value == NumericLimits<uint64_t>::Maximum())
+			throw IOException("Registration operation limit reached");
+	} while (!next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed));
+	return value;
 }
 
-void RestApiSecretStorage::ClearRegistrationState() {
-	lock_guard<mutex> lock(registration_lock);
-	registration_base_url.clear();
-	registration_session_token.clear();
-	registration_totp_uri.clear();
-	BOILSTREAM_LOG("ClearRegistrationState: Registration state cleared");
+shared_ptr<BoilstreamRegistrationContext> RestApiSecretStorage::RegistrationOwner(ClientContext &context, bool create) {
+	if (&DatabaseInstance::GetDatabase(context) != &db)
+		throw IOException("Registration belongs to a different database");
+	const auto tenant = GetTenantId(context);
+	auto owner =
+	    create ? context.registered_state->GetOrCreate<BoilstreamRegistrationContext>("boilstream_registration", *this)
+	           : context.registered_state->Get<BoilstreamRegistrationContext>("boilstream_registration");
+	const auto current_auth = GetSessionForConnection(context.GetConnectionId());
+	if (owner) {
+		lock_guard<mutex> guard(owner->lock);
+		if (owner->bound &&
+		    (owner->tenant != tenant || !owner->MatchesAuthentication(current_auth) || context.IsInterrupted()))
+			owner->Reset();
+	}
+	if (tenant.size() > 4096)
+		throw InvalidInputException("Registration tenant identity is too long");
+	if (context.IsInterrupted())
+		throw IOException("Registration was interrupted");
+	return owner;
+}
+
+static bool ValidRegistrationField(const string &value, size_t limit) {
+	if (value.empty() || value.size() > limit)
+		return false;
+	for (unsigned char c : value)
+		if (c < 32 || c == 127)
+			return false;
+	return true;
+}
+
+BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginRegistration(ClientContext &context, const string &base_url,
+                                                                       const string &email) {
+	if (!ValidRegistrationField(base_url, 4096) || !ValidRegistrationField(email, 320))
+		throw InvalidInputException("Invalid registration authority or account length");
+	auto owner = RegistrationOwner(context, true);
+	const auto tenant = GetTenantId(context);
+	const auto current_auth = GetSessionForConnection(context.GetConnectionId());
+	// Allocate identity copies before invalidating any ready registration.
+	string new_base = base_url, new_email = email, new_tenant = tenant;
+	lock_guard<mutex> guard(owner->lock);
+	if (owner->busy)
+		throw IOException("A registration operation is already in progress for this connection");
+	if (!owner->ready || owner->base_url != base_url || owner->email != email) {
+		owner->Reset();
+		owner->base_url.swap(new_base);
+		owner->email.swap(new_email);
+		owner->tenant.swap(new_tenant);
+		owner->bound = true;
+		owner->authentication = current_auth;
+		owner->had_authentication = bool(current_auth);
+		owner->authentication_generation = current_auth ? current_auth->authentication_generation.load() : 0;
+	}
+	auto snapshot = owner->Snapshot(); // A failed allocation must not strand busy=true.
+	snapshot.generation = NextRegistrationOperation();
+	owner->generation = snapshot.generation;
+	owner->verifying = false;
+	owner->busy = true;
+	return snapshot;
+}
+
+BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginMfaVerification(ClientContext &context) {
+	auto owner = RegistrationOwner(context, false);
+	if (!owner)
+		throw IOException("No registration state found for this connection; register first");
+	lock_guard<mutex> guard(owner->lock);
+	if (!owner->ready || owner->busy)
+		throw IOException("Registration is unavailable or already in progress for this connection");
+	auto snapshot = owner->Snapshot();
+	snapshot.generation = NextRegistrationOperation();
+	owner->generation = snapshot.generation;
+	owner->verifying = true;
+	owner->busy = true;
+	return snapshot;
+}
+
+void RestApiSecretStorage::StoreRegistrationState(ClientContext &context, uint64_t generation,
+                                                  const string &session_token, const string &totp_uri) {
+	if (!ValidRegistrationField(session_token, 4096) || !ValidRegistrationField(totp_uri, 4096))
+		throw InvalidInputException("Invalid registration credential length");
+	string token_copy = session_token, uri_copy = totp_uri;
+	auto owner = RegistrationOwner(context, false);
+	if (!owner)
+		throw IOException("No pending registration operation");
+	lock_guard<mutex> guard(owner->lock);
+	owner->Check(generation);
+	if (owner->ready || owner->verifying)
+		throw IOException("Registration was already published");
+	owner->session_token.swap(token_copy);
+	owner->totp_uri.swap(uri_copy);
+	owner->ready = true;
+}
+
+void RestApiSecretStorage::CompleteRegistration(ClientContext &context, uint64_t generation) {
+	auto owner = RegistrationOwner(context, false);
+	if (!owner)
+		throw IOException("No pending registration operation");
+	lock_guard<mutex> guard(owner->lock);
+	owner->Check(generation);
+	if (!owner->ready || !owner->verifying)
+		throw IOException("Registration is not ready for verification");
+	owner->Reset();
+}
+
+void RestApiSecretStorage::EndRegistrationOperation(ClientContext &context, uint64_t generation) noexcept {
+	try {
+		auto owner = RegistrationOwner(context, false);
+		if (!owner)
+			return;
+		lock_guard<mutex> guard(owner->lock);
+		if (owner->generation != generation)
+			return; // A late cleanup cannot erase its successor.
+		if (!owner->ready)
+			owner->Reset();
+		else
+			owner->busy = false; // A rejected MFA code may be retried by the same owner.
+	} catch (...) {              /* Cancellation already invalidates state in RegistrationOwner. */
+	}
 }
 
 namespace {
@@ -2042,15 +2193,6 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 			} catch (const IOException &e) {
 				// No active session - proceed without authentication
 				BOILSTREAM_LOG("HttpGetWithState: No active session, proceeding unauthenticated");
-			}
-
-			// Add session cookie if set (for email/password authentication flow)
-			{
-				lock_guard<mutex> lock(cookie_lock);
-				if (!session_cookie.empty()) {
-					headers.Insert("Cookie", session_cookie);
-					BOILSTREAM_LOG("HttpGet: Adding session cookie header");
-				}
 			}
 
 			string response_body;
@@ -2236,15 +2378,6 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 			if (!is_exchanging_now) {
 				// Normal API request - add authenticated headers
 				headers = BuildAuthenticatedHeaders("POST", url, body, conn_state);
-			}
-
-			// Add session cookie if set (for email/password authentication flow)
-			{
-				lock_guard<mutex> lock(cookie_lock);
-				if (!session_cookie.empty()) {
-					headers.Insert("Cookie", session_cookie);
-					BOILSTREAM_LOG("HttpPost: Adding session cookie header");
-				}
 			}
 
 			// Add idempotency key (same for all retries - prevents duplicate operations)

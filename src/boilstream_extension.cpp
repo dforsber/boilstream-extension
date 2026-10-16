@@ -82,19 +82,6 @@ static inline string SafeYyjsonGetStr(duckdb_yyjson::yyjson_val *val) {
 	return str ? string(str) : "";
 }
 
-// Helper: Clear query logs to remove sensitive data (passwords, TOTP secrets, backup codes)
-// This only clears DuckDB's query logs - shell history (~/.duckdb_history) must be cleared manually
-static void ClearQueryLogs(ClientContext &context) {
-	try {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		auto &log_manager = db.GetLogManager();
-		log_manager.TruncateLogStorage();
-		BOILSTREAM_LOG("ClearQueryLogs: Query logs truncated successfully");
-	} catch (const std::exception &e) {
-		// Don't throw - log clearing is a security best-effort, shouldn't fail the operation
-	}
-}
-
 //! Helper to get the boilstream storage for the given context's DatabaseInstance.
 //! Each DatabaseInstance has its own RestApiSecretStorage registered during extension load.
 static RestApiSecretStorage *GetStorageFromContext(ClientContext &context) {
@@ -1040,6 +1027,23 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 //! 1. Registration status
 //! 2. QR code via tp_qr() for TOTP enrollment
 //! 3. Session ID for the next verification step
+class RegistrationOperationGuard {
+public:
+	RegistrationOperationGuard(RestApiSecretStorage &storage, ClientContext &context, uint64_t generation)
+	    : storage(storage), context(context), generation(generation) {
+	}
+	~RegistrationOperationGuard() {
+		storage.EndRegistrationOperation(context, generation);
+	}
+	RegistrationOperationGuard(const RegistrationOperationGuard &) = delete;
+	RegistrationOperationGuard &operator=(const RegistrationOperationGuard &) = delete;
+
+private:
+	RestApiSecretStorage &storage;
+	ClientContext &context;
+	uint64_t generation;
+};
+
 static string RegisterUser(ClientContext &context, const FunctionParameters &params) {
 	BOILSTREAM_LOG("RegisterUser: Function called");
 
@@ -1106,45 +1110,40 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		throw IOException("No boilstream storage available");
 	}
 
-	try {
-		auto [cached_base_url, cached_session_token, cached_totp_uri] = storage->GetRegistrationState();
+	auto registration = storage->BeginRegistration(context, base_url, email);
+	RegistrationOperationGuard registration_guard(*storage, context, registration.generation);
+	const auto &cached_totp_uri = registration.totp_uri;
+	if (!cached_totp_uri.empty()) {
+		BOILSTREAM_LOG("RegisterUser: Found cached registration state, returning cached QR code");
 
-		// Only return cached response if it matches the current registration attempt
-		if (cached_base_url == base_url && !cached_totp_uri.empty()) {
-			BOILSTREAM_LOG("RegisterUser: Found cached registration state, returning cached QR code");
-
-			// Extract secret from TOTP URI for manual entry
-			string secret_key;
-			size_t secret_pos = cached_totp_uri.find("secret=");
-			if (secret_pos != string::npos) {
-				size_t secret_start = secret_pos + 7;
-				size_t secret_end = cached_totp_uri.find('&', secret_start);
-				if (secret_end == string::npos) {
-					secret_end = cached_totp_uri.length();
-				}
-				secret_key = cached_totp_uri.substr(secret_start, secret_end - secret_start);
+		// Extract secret from TOTP URI for manual entry
+		string secret_key;
+		size_t secret_pos = cached_totp_uri.find("secret=");
+		if (secret_pos != string::npos) {
+			size_t secret_start = secret_pos + 7;
+			size_t secret_end = cached_totp_uri.find('&', secret_start);
+			if (secret_end == string::npos) {
+				secret_end = cached_totp_uri.length();
 			}
-
-			// Format secret in groups of 4 characters for readability
-			string formatted_secret;
-			for (size_t i = 0; i < secret_key.length(); i += 4) {
-				if (i > 0)
-					formatted_secret += " ";
-				formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
-			}
-
-			// Return cached QR code response
-			string result_sql = "INSTALL textplot FROM community;\n";
-			result_sql += "LOAD textplot;\n";
-			result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
-			              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
-			              EscapeSqlLiteral(cached_totp_uri) + "'), chr(10))) as qr_code;";
-
-			return result_sql;
+			secret_key = cached_totp_uri.substr(secret_start, secret_end - secret_start);
 		}
-	} catch (const IOException &) {
-		// No cached state found, continue with normal registration flow
-		BOILSTREAM_LOG("RegisterUser: No cached registration state, proceeding with normal registration");
+
+		// Format secret in groups of 4 characters for readability
+		string formatted_secret;
+		for (size_t i = 0; i < secret_key.length(); i += 4) {
+			if (i > 0)
+				formatted_secret += " ";
+			formatted_secret += secret_key.substr(i, std::min(size_t(4), secret_key.length() - i));
+		}
+
+		// Return cached QR code response
+		string result_sql = "INSTALL textplot FROM community;\n";
+		result_sql += "LOAD textplot;\n";
+		result_sql += "SELECT unnest(['" + EscapeSqlLiteral(formatted_secret) +
+		              "', 'PRAGMA boilstream_verify_mfa(''123456'');'] || string_split(tp_qr('" +
+		              EscapeSqlLiteral(cached_totp_uri) + "'), chr(10))) as qr_code;";
+
+		return result_sql;
 	}
 
 	// Helper: Make unauthenticated HTTP GET request (for public registration APIs)
@@ -1435,7 +1434,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Store registration state for MFA verification step
 
-	storage->StoreRegistrationState(base_url, session_token, totp_uri);
+	storage->StoreRegistrationState(context, registration.generation, session_token, totp_uri);
 	BOILSTREAM_LOG("RegisterUser: Registration state stored successfully");
 
 	// Extract secret from TOTP URI for manual entry
@@ -1500,7 +1499,10 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	if (!storage) {
 		throw IOException("No boilstream storage available");
 	}
-	auto [base_url, session_token, totp_uri] = storage->GetRegistrationState();
+	auto registration = storage->BeginMfaVerification(context);
+	RegistrationOperationGuard registration_guard(*storage, context, registration.generation);
+	const auto &base_url = registration.base_url;
+	const auto &session_token = registration.session_token;
 
 	// Helper: Make unauthenticated HTTP POST request with cookie
 	// Note: Fails fast on non-2xx status to prevent automatic retries
@@ -1618,7 +1620,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	duckdb_yyjson::yyjson_doc_free(verify_resp_doc);
 
 	// Clear registration state after successful verification
-	storage->ClearRegistrationState();
+	storage->CompleteRegistration(context, registration.generation);
 
 	// Build result SQL showing backup codes (one per row)
 	string result_sql;
