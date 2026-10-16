@@ -232,6 +232,21 @@ int main(int argc, char **argv) {
 			Require(r.error.find(expected.at(scenario)) != string::npos);
 		});
 	}
+
+	test("sql_login_json_status_private", [&] {
+		Require(!connection.Query("SET errors_as_json=true")->HasError());
+		auto result = connection.Query("PRAGMA boilstream_login('" + string(argv[1]) + "/csrf-http/" + MARKER +
+		                               "@example.com','" + MARKER + "','123456')");
+		auto reset = connection.Query("SET errors_as_json=false");
+		Require(reset && !reset->HasError());
+		Require(result && result->HasError());
+		Captured captured;
+		captured.error = result->GetError();
+		Private(captured);
+		Require(captured.error.find("HTTP 403") != string::npos);
+		Require(captured.error.find("exception_type") != string::npos);
+		Require(captured.error.find("error_location") == string::npos);
+	});
 	for (auto status : {400, 429, 501}) {
 		const auto name = "http_post_" + std::to_string(status) + "_keeps_body_private";
 		test(name.c_str(), [&] {

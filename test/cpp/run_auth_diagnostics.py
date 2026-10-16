@@ -68,7 +68,7 @@ def main():
         scenario = path.split("/")[1]
         counts[scenario] = counts.get(scenario, 0) + count
     print(f"HTTP_REQUESTS {counts}")
-    expected = {"200":2,"403":3,"400":1,"429":4,"501":1,"csrf-invalid":1,"csrf-missing":1,"csrf-http":1,
+    expected = {"200":2,"403":3,"400":1,"429":4,"501":1,"csrf-invalid":1,"csrf-missing":1,"csrf-http":2,
                 "login-http":2,"login-cookie":2,"login-malformed-cookie":2,"mfa-invalid":3,"mfa-rejected":3,"bootstrap-invalid":4,"register-csrf-invalid":1,"register-csrf-http":1,"register-signup-rejected":2}
     return result.returncode or int(counts != expected)
 

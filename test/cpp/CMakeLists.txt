@@ -607,3 +607,14 @@ if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hp
   set_tests_properties(RequiredResponseSignature PROPERTIES TIMEOUT 40
     ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
+
+# Scanner-based authentication diagnostic policy; linked to the matching core.
+if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  add_executable(query_privacy_test test_query_privacy.cpp)
+  target_include_directories(query_privacy_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include)
+  target_link_libraries(query_privacy_test PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads)
+  add_test(NAME AuthQueryPrivacy COMMAND query_privacy_test)
+  set_tests_properties(AuthQueryPrivacy PROPERTIES TIMEOUT 40
+    ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+endif()
