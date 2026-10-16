@@ -897,14 +897,14 @@ Content-Type: application/json
 
 ### Client Response Verification
 
-Client MUST verify response signatures when received:
+Once a session key exists, the client MUST require and verify response signatures, including the login-finish reply:
 
-1. **Check for signature header**: If `X-Boilstream-Response-Signature` present, verify it
-2. **Derive integrity key**: `integrity_key = HKDF-Expand(session_key, "response-integrity-v1", 32)`
+1. **Require signature header**: Reject a missing or empty `X-Boilstream-Response-Signature`
+2. **Derive integrity key**: `prk = HKDF-Extract("boilstream-session-v1", session_key)`, then `integrity_key = HKDF-Expand(prk, "response-integrity-v1", 32)`
 3. **Hash response body**: `payload_hash = lowercase_hex(SHA256(response_body))`
 4. **Reconstruct canonical response**: Build same canonical response as server (status code + headers + hashed payload)
 5. **Verify signature**: `HMAC-SHA256(integrity_key, canonical_response) == base64_decode(received_signature)` (constant-time comparison)
-6. **Validate timestamp**: `|now() - parse_iso8601(X-Boilstream-Date)| <= 60 seconds`
+6. **Validate timestamp**: Require exact ASCII `YYYYMMDDTHHMMSSZ`, a valid calendar date and time, and `|now() - parse_iso8601(X-Boilstream-Date)| <= 60 seconds`
 7. **On failure**: Treat as tampering, reject response, terminate session
 
 **Constant-Time Comparison**: MUST use cryptographic library's constant-time comparison function to prevent timing attacks.

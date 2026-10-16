@@ -28,6 +28,8 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/random_engine.hpp"
@@ -975,7 +977,7 @@ case_insensitive_map_t<string> RestApiSecretStorage::ExtractBoilstreamHeaders(co
 }
 
 HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-                                                            BoilstreamConnectionState &conn_state) {
+                                                            BoilstreamConnectionState &conn_state, vector<uint8_t> *response_key) {
 	// Get session snapshot from connection state (thread-safe, increments sequence)
 	auto snapshot = conn_state.GetSessionSnapshot();
 
@@ -1002,6 +1004,11 @@ HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method
 	headers.Insert("X-Boilstream-Ciphers", "0x0001,0x0002");
 	headers.Insert("X-Boilstream-Cipher-Version", "1");
 
+	// Bind verification to the same snapshot used to sign this request. A concurrent
+	// logout must not turn an authenticated in-flight reply into an unsigned one.
+	if (response_key) {
+		*response_key = snapshot.session_key;
+	}
 	return headers;
 }
 
@@ -1022,9 +1029,8 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	// Check if response has signature header
 	auto sig_it = headers.find("x-boilstream-response-signature");
 	if (sig_it == headers.end()) {
-		// No signature header - this might be a login-start response (before session_key available)
-		BOILSTREAM_LOG("VerifyResponseSignature: No signature header present (OK for login-start)");
-		return;
+		// Pre-key login-start bypasses this verifier at the HTTP boundary.
+		throw IOException("Response signature verification failed: missing signature");
 	}
 
 	string received_signature_b64 = sig_it->second;
@@ -1125,52 +1131,33 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	if (date_it == headers.end()) {
 		throw IOException("Response signature verification failed: missing x-boilstream-date header");
 	}
-	{
-		string timestamp_str = date_it->second;
-		// Parse ISO8601 timestamp: YYYYMMDDTHHMMSSZ
-		// Manual parsing (std::get_time not available in C++11)
-		if (timestamp_str.length() == 16 && timestamp_str[8] == 'T' && timestamp_str[15] == 'Z') {
-			time_t response_time = -1;
-			try {
-				int year = std::stoi(timestamp_str.substr(0, 4));
-				int month = std::stoi(timestamp_str.substr(4, 2));
-				int day = std::stoi(timestamp_str.substr(6, 2));
-				int hour = std::stoi(timestamp_str.substr(9, 2));
-				int minute = std::stoi(timestamp_str.substr(11, 2));
-				int second = std::stoi(timestamp_str.substr(13, 2));
-
-				std::tm tm = {};
-				tm.tm_year = year - 1900;
-				tm.tm_mon = month - 1;
-				tm.tm_mday = day;
-				tm.tm_hour = hour;
-				tm.tm_min = minute;
-				tm.tm_sec = second;
-				tm.tm_isdst = 0;
-
-#ifdef _WIN32
-				response_time = _mkgmtime(&tm);
-#else
-				response_time = timegm(&tm);
-#endif
-			} catch (...) {
-				// stoi can throw std::invalid_argument or std::out_of_range
-				BOILSTREAM_LOG("VerifyResponseSignature: Failed to parse timestamp");
-			}
-
-			// Timestamp window check is outside the try/catch so it always propagates
-			if (response_time != -1) {
-				auto response_tp = std::chrono::system_clock::from_time_t(response_time);
-				auto now = std::chrono::system_clock::now();
-				auto diff_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-				                        now > response_tp ? now - response_tp : response_tp - now)
-				                        .count();
-
-				if (diff_seconds > 60) {
-					throw IOException("Response signature verification failed: timestamp outside 60-second window");
-				}
-			}
+	const auto &timestamp = date_it->second;
+	if (timestamp.size() != 16 || timestamp[8] != 'T' || timestamp[15] != 'Z') {
+		throw IOException("Response signature verification failed: invalid timestamp");
+	}
+	for (idx_t i = 0; i < timestamp.size(); ++i) {
+		if (i != 8 && i != 15 && (timestamp[i] < '0' || timestamp[i] > '9')) {
+			throw IOException("Response signature verification failed: invalid timestamp");
 		}
+	}
+	auto decimal = [&](idx_t start, idx_t length) {
+		int32_t value = 0;
+		for (idx_t i = start; i < start + length; ++i) {
+			value = value * 10 + timestamp[i] - '0';
+		}
+		return value;
+	};
+	date_t date;
+	const auto hour = decimal(9, 2), minute = decimal(11, 2), second = decimal(13, 2);
+	if (!Date::TryFromDate(decimal(0, 4), decimal(4, 2), decimal(6, 2), date) ||
+	    hour > 23 || minute > 59 || second > 59) {
+		throw IOException("Response signature verification failed: invalid timestamp");
+	}
+	const auto response_time = Timestamp::GetEpochSeconds(Timestamp::FromDatetime(date, Time::FromTime(hour, minute, second)));
+	const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+	                     std::chrono::system_clock::now().time_since_epoch()).count();
+	if (response_time < now - 60 || response_time > now + 60) {
+		throw IOException("Response signature verification failed: timestamp outside 60-second window");
 	}
 
 	BOILSTREAM_LOG("VerifyResponseSignature: Signature verified successfully");
@@ -2180,20 +2167,8 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 			// Build authenticated headers INSIDE retry loop - each attempt needs fresh sequence number
 			HTTPHeaders headers(db);
 			vector<uint8_t> current_session_key;
-			bool has_session_key = false;
-
-			try {
-				headers = BuildAuthenticatedHeaders("GET", url, "", conn_state);
-				// Save session key for response verification
-				{
-					lock_guard<mutex> lock(conn_state.session_lock);
-					current_session_key = conn_state.session_key;
-					has_session_key = !conn_state.session_key.empty();
-				}
-			} catch (const IOException &e) {
-				// No active session - proceed without authentication
-				BOILSTREAM_LOG("HttpGetWithState: No active session, proceeding unauthenticated");
-			}
+			headers = BuildAuthenticatedHeaders("GET", url, "", conn_state, &current_session_key);
+			const bool has_session_key = true;
 
 			string response_body;
 			HTTPHeaders response_headers_captured(db);
@@ -2234,6 +2209,7 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 					                            current_session_key);
 					BOILSTREAM_LOG("HttpGet: Response signature verified successfully");
 				} catch (const std::exception &e) {
+					conn_state.ClearSession();
 					BoilstreamRethrowSafe("Response integrity check failed", e);
 				}
 
@@ -2377,7 +2353,8 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 
 			if (!is_exchanging_now) {
 				// Normal API request - add authenticated headers
-				headers = BuildAuthenticatedHeaders("POST", url, body, conn_state);
+				headers = BuildAuthenticatedHeaders("POST", url, body, conn_state, &current_session_key);
+				has_session_key = true;
 			}
 
 			// Add idempotency key (same for all retries - prevents duplicate operations)
@@ -2410,6 +2387,7 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 					                            current_session_key);
 					BOILSTREAM_LOG("HttpPost: Response signature verified successfully");
 				} catch (const std::exception &e) {
+					conn_state.ClearSession();
 					BoilstreamRethrowSafe("Response integrity check failed", e);
 				}
 
@@ -2530,16 +2508,9 @@ void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionSta
 
 		for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
 			// Build authenticated headers INSIDE retry loop - each attempt needs fresh sequence number
-			HTTPHeaders headers = BuildAuthenticatedHeaders("DELETE", url, "", conn_state);
-
-			// Save session key for response verification
 			vector<uint8_t> current_session_key;
-			bool has_session_key = false;
-			{
-				lock_guard<mutex> lock(conn_state.session_lock);
-				current_session_key = conn_state.session_key;
-				has_session_key = !conn_state.session_key.empty();
-			}
+			HTTPHeaders headers = BuildAuthenticatedHeaders("DELETE", url, "", conn_state, &current_session_key);
+			const bool has_session_key = true;
 
 			DeleteRequestInfo request(url, headers, *params);
 			auto response = http_util.Request(request);
@@ -2569,6 +2540,7 @@ void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionSta
 					VerifyAuthenticatedResponse(response_body, status_code, response->headers, current_session_key);
 					BOILSTREAM_LOG("HttpDelete: Response signature verified successfully");
 				} catch (const std::exception &e) {
+					conn_state.ClearSession();
 					BoilstreamRethrowSafe("Response integrity check failed", e);
 				}
 

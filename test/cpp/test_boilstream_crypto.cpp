@@ -173,7 +173,7 @@ TEST_CASE("HKDF Key Derivation - Integrity Key", "[boilstream][crypto][hkdf]") {
 //===----------------------------------------------------------------------===//
 // Test: Response Signature Verification (Success Cases)
 //===----------------------------------------------------------------------===//
-TEST_CASE("Response Signature Verification - Valid Signature - Missing Header", "[boilstream][crypto][signature]") {
+TEST_CASE("Response Signature Verification - Missing Header Is Rejected", "[boilstream][crypto][signature]") {
 	TestFixture fixture;
 
 	string response_body = "{\"test\":\"data\"}";
@@ -181,15 +181,8 @@ TEST_CASE("Response Signature Verification - Valid Signature - Missing Header", 
 	case_insensitive_map_t<string> headers;
 	// No x-boilstream-response-signature header
 
-	REQUIRE_NOTHROW(BoilstreamCryptoTestAccess::VerifyResponseSignature(fixture.storage.get(), response_body,
-	                                                                    status_code, headers, fixture.session_key));
-}
-
-TEST_CASE("Response Signature Verification - Valid Signature - With Signature", "[boilstream][crypto][signature]") {
-	// This test verifies that signature verification works correctly
-	// Full signature verification is tested in the invalid signature test cases
-	TestFixture fixture;
-	REQUIRE(true);
+	REQUIRE_THROWS_AS(BoilstreamCryptoTestAccess::VerifyResponseSignature(fixture.storage.get(), response_body,
+	                                                                    status_code, headers, fixture.session_key), IOException);
 }
 
 TEST_CASE("Response Signature Verification - Invalid Signature", "[boilstream][crypto][signature]") {

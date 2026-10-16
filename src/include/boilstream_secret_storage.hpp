@@ -273,7 +273,7 @@ private:
 
 	//! Build authenticated request headers with signature (uses connection state)
 	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-	                                      BoilstreamConnectionState &conn_state);
+	                                      BoilstreamConnectionState &conn_state, vector<uint8_t> *response_key = nullptr);
 
 	//! Verify authenticated response signature and timestamp
 	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,

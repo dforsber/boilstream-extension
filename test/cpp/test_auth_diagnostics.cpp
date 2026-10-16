@@ -248,7 +248,10 @@ int main(int argc, char **argv) {
 
 	test("http_get_error_clears_recursion_guard", [&] {
 		BoilstreamConnectionState pending;
-		pending.is_exchanging = true;
+		pending.session_key.assign(32, 9);
+		pending.region = MARKER;
+		pending.access_token = TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX;
+		pending.token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(1);
 		string body;
 		auto r = Capture([&] { body = storage.HttpGetWithState(string(argv[1]) + "/403/" + MARKER, pending); });
 		Require(!r.failed && body.empty());

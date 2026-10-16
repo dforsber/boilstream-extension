@@ -590,3 +590,19 @@ if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hp
   set_tests_properties(RegistrationOwnership RegistrationHttp PROPERTIES TIMEOUT 40
     ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
+
+# Independently signed replies exercise actual HTTP verification and session retirement.
+if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  add_executable(required_response_signature_test test_required_response_signature.cpp
+    ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+  target_include_directories(required_response_signature_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
+    ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+  target_link_libraries(required_response_signature_test PRIVATE
+    ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+    "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+  add_test(NAME RequiredResponseSignature COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py $<TARGET_FILE:required_response_signature_test>)
+  set_tests_properties(RequiredResponseSignature PROPERTIES TIMEOUT 40
+    ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+endif()

@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+from run_required_response_signature import sign, now
 
 class Reply(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -45,6 +46,10 @@ class Reply(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         if cookie: self.send_header("Set-Cookie", ("unexpected=" if scenario == "login-malformed-cookie" else "session=") + marker + "; HttpOnly")
+        if self.command == "GET" and status == 200:
+            headers = {"x-boilstream-date": now()}
+            headers["x-boilstream-response-signature"] = sign(body.decode(), status, headers, bytes([9]) * 32)
+            for name, value in headers.items(): self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
