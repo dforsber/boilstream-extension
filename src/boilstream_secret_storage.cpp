@@ -2732,7 +2732,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	const auto revision = cache->Revision();
 	const auto name = secret->GetName();
 	auto existing = cache->Get(name, true);
-	if (existing) {
+	if (!state && existing) {
 		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) return nullptr;
 		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) throw InvalidInputException("Secret already exists");
 	}
@@ -2741,9 +2741,22 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	// server response before using them. Explicit local secrets have no remote TTL.
 	auto entry = BoilstreamSecretCache::Prepare(secret->Clone(),
 	    state ? BoilstreamSecretCache::Time::min() : BoilstreamSecretCache::Time::max(), bytes);
-	auto result = make_uniq<SecretEntry>(*entry.secret);
 	cache->ValidatePut(entry, revision);
-	if (state) WriteSecretWithState(*secret, on_conflict, *state, transaction);
+	if (state) {
+		// Conflict decisions belong to the server, not a possibly stale cache.
+		// A successful Ignore may preserve a different credential. Never publish
+		// the proposed value as though it were the result of the server write.
+		WriteSecretWithState(*secret, on_conflict, *state, transaction);
+		cache->Remove(name, revision);
+		FetchSecret(name, "", false, transaction, cache);
+		auto current = GetSecretOwner(transaction);
+		if (current.session != state || current.cache != cache || transaction->GetContext().IsInterrupted())
+			throw IOException("Secret write owner changed during readback");
+		auto stored = cache->Get(name, true);
+		if (!stored) throw IOException("Secret write completed but authoritative readback failed");
+		return make_uniq<SecretEntry>(*stored);
+	}
+	auto result = make_uniq<SecretEntry>(*entry.secret);
 	cache->Put(std::move(entry), revision);
 	return result;
 }
@@ -2787,7 +2800,8 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	yyjson_doc_free(secret_doc);
 
 	yyjson_mut_obj_add_strcpy(doc, obj, "on_conflict",
-	                          on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT ? "replace" : "error");
+	                          on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT ? "replace" :
+	                          on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT ? "ignore" : "error");
 
 	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
