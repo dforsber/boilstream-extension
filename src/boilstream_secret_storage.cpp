@@ -2446,12 +2446,12 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 			throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 		}
 		MaybeDisableTlsVerificationFromEnv(*params);
+		// This layer owns retries: lower-level replays reuse signed sequence numbers.
+		params->retries = 0;
 
-		// Generate idempotency key for safe retries (prevents duplicate secret creation)
-		// Use a hash of the request body - same content always gets same key for idempotency
-		// Note: Hash collisions are unlikely for typical secret payloads but theoretically possible
-		// Backend should validate secret name matches to detect collisions
-		auto idempotency_key = std::to_string(std::hash<string> {}(body));
+		// One key per logical call, retained across its transport retries. A
+		// body-derived key aliases later independent writes of the same value.
+		const auto idempotency_key = UUID::ToString(UUIDv4::GenerateRandomUUID());
 
 		// Retry configuration: 3 retries with short exponential backoff
 		// Total attempts: 4 (1 initial + 3 retries)
@@ -2485,6 +2485,7 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 			headers.Insert("Idempotency-Key", idempotency_key);
 
 			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			request.try_request = true; // Return failures to the authenticated retry loop.
 			auto response = http_util.Request(request);
 
 			// Check if we should retry (only on transient errors)
