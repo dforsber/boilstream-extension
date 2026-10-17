@@ -1587,20 +1587,22 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 	string data_str((const char *)data, stream.GetPosition());
 	auto encoded = Blob::ToBase64(string_t(data_str));
 
-	// Create JSON with metadata using yyjson (safe from injection)
+	// Preserve exact metadata bytes, including embedded zeroes. The binary
+	// secret retains them too; truncating only JSON changes identity/scope.
+	// Use yyjson rather than interpolating values into JSON.
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
 
-	yyjson_mut_obj_add_strcpy(doc, obj, "name", secret.GetName().c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "type", secret.GetType().c_str());
-	yyjson_mut_obj_add_strcpy(doc, obj, "provider", secret.GetProvider().c_str());
+	yyjson_mut_obj_add_strncpy(doc, obj, "name", secret.GetName().data(), secret.GetName().size());
+	yyjson_mut_obj_add_strncpy(doc, obj, "type", secret.GetType().data(), secret.GetType().size());
+	yyjson_mut_obj_add_strncpy(doc, obj, "provider", secret.GetProvider().data(), secret.GetProvider().size());
 
 	// Add scope array
 	auto scope_arr = yyjson_mut_arr(doc);
 	auto &scope = secret.GetScope();
 	for (idx_t i = 0; i < scope.size(); i++) {
-		yyjson_mut_arr_add_strcpy(doc, scope_arr, scope[i].c_str());
+		yyjson_mut_arr_add_strncpy(doc, scope_arr, scope[i].data(), scope[i].size());
 	}
 	yyjson_mut_obj_add_val(doc, obj, "scope", scope_arr);
 
