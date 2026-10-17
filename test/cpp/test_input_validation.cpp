@@ -620,26 +620,22 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Extension handles malicious JSON p
 		std::string long_value(1000000, 'a'); // 1MB string
 		std::string json = R"({"data": ")" + long_value + R"("})";
 
-		// Should not crash - may throw due to invalid base64
-		try {
-			auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-			// Either nullptr or valid result - both acceptable
-		} catch (const std::exception &) {
-			// Throwing is acceptable for malformed input
-		}
-		REQUIRE(true); // Test passes if we reach here without crash
+		// The base64 decodes to invalid serialized secret bytes. A successful
+		// object, or silently swallowing the decoding error, must fail this test.
+		REQUIRE_THROWS_AS(
+		    BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager), IOException);
 	}
 
 	SECTION("Unicode and special characters are handled") {
 		std::string json = R"({"data": "🔐\u0000\x00\r\n\t"})";
 		auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-		// Should not crash
+		REQUIRE(result == nullptr);
 	}
 
 	SECTION("Control characters in JSON strings are handled") {
 		std::string json = "{\"data\": \"\x01\x02\x03\x04\x05\"}";
 		auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-		// Should not crash
+		REQUIRE(result == nullptr);
 	}
 }
 
