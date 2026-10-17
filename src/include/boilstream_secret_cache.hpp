@@ -23,7 +23,7 @@ public:
 	static constexpr idx_t MAX_BYTES = 10 * 1024 * 1024;
 	static constexpr idx_t MAX_ENTRY_BYTES = 1024 * 1024;
 
-	static Entry Prepare(unique_ptr<const BaseSecret> secret, Time expires, idx_t bytes) {
+	static shared_ptr<const SecretEntry> PrepareSecret(unique_ptr<const BaseSecret> secret, idx_t bytes) {
 		if (!secret || secret->GetName().empty() || (bytes == 0 || bytes > MAX_ENTRY_BYTES)) {
 			throw InvalidInputException("Invalid or oversized BoilStream secret");
 		}
@@ -32,7 +32,10 @@ public:
 		// PERSISTENT denotes the REST backend, not a local credential file.
 		entry->persist_type = SecretPersistType::PERSISTENT;
 		entry->storage_mode = "boilstream";
-		return {std::move(entry), expires, bytes};
+		return entry;
+	}
+	static Entry Prepare(unique_ptr<const BaseSecret> secret, Time expires, idx_t bytes) {
+		return {PrepareSecret(std::move(secret), bytes), expires, bytes};
 	}
 
 	uint64_t Revision() {
@@ -45,7 +48,8 @@ public:
 	}
 	bool RecentlyFetched() {
 		lock_guard<mutex> guard(lock);
-		return !closed && fetched != std::chrono::steady_clock::time_point::min() &&
+		return !closed && complete_snapshot && earliest_expiry > std::chrono::system_clock::now() + std::chrono::minutes(5) &&
+		       fetched != std::chrono::steady_clock::time_point::min() &&
 		       std::chrono::steady_clock::now() - fetched < std::chrono::seconds(10);
 	}
 
@@ -93,13 +97,15 @@ public:
 			fetched = std::chrono::steady_clock::time_point::min();
 		}
 	}
-	void Replace(Entries replacement, uint64_t expected) {
+	void Replace(Entries replacement, uint64_t expected, bool complete = true) {
 		idx_t total = 0;
+		auto earliest = Time::max();
 		if (replacement.size() > MAX_ENTRIES) throw IOException("Too many BoilStream secrets");
 		for (const auto &it : replacement) {
 			if (it.second.bytes > MAX_ENTRY_BYTES || it.second.bytes > MAX_BYTES - total)
 				throw IOException("BoilStream secret cache capacity exhausted");
 			total += it.second.bytes;
+			earliest = std::min(earliest, it.second.expires);
 		}
 		{
 			lock_guard<mutex> guard(lock);
@@ -108,6 +114,8 @@ public:
 			bytes = total;
 			++revision;
 			fetched = std::chrono::steady_clock::now();
+			complete_snapshot = complete;
+			earliest_expiry = earliest;
 		}
 	}
 	void Remove(const string &name, uint64_t expected) {
@@ -165,6 +173,9 @@ private:
 	idx_t bytes = 0;
 	uint64_t revision = 0;
 	bool closed = false;
+	// A recent list is reusable only while every returned credential is reusable.
+	bool complete_snapshot = false;
+	Time earliest_expiry = Time::min();
 	std::chrono::steady_clock::time_point fetched = std::chrono::steady_clock::time_point::min();
 };
 } // namespace duckdb

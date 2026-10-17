@@ -1,3 +1,4 @@
+#include "secret_response_fixture.hpp"
 // Exercise actual native storage and secret-manager paths. Authentication is
 // seeded, never represented as a successful OPAQUE/live-service qualification.
 #include "duckdb.hpp"
@@ -46,7 +47,7 @@ public:
   return state;
  }
  static string Encode(RestApiSecretStorage &s, const string &name, const string &value) {
-  return s.SerializeSecret(*Secret(name, value));
+  return WithFixtureExpiry(s.SerializeSecret(*Secret(name, value)));
  }
  static void List(RestApiSecretStorage &s, BoilstreamConnectionState &state, const string &json, uint64_t revision) {
   s.PublishSecretList(json, state, revision);
@@ -54,7 +55,7 @@ public:
  static void Cache(RestApiSecretStorage &s, Connection &c, const string &name, const string &value) {
   auto tx = CatalogTransaction::GetSystemCatalogTransaction(*c.context);
   auto state = s.GetSession(&tx);
-  s.PublishSecretList("["+s.SerializeSecret(*Secret(name,value))+"]",*state,state->secret_cache->Revision());
+  s.PublishSecretList("["+WithFixtureExpiry(s.SerializeSecret(*Secret(name,value)))+"]",*state,state->secret_cache->Revision());
  }
 };
 struct TestConfig : DBConfig { TestConfig() { options.load_extensions=false; options.maximum_threads=2; } };

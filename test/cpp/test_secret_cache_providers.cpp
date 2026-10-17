@@ -1,3 +1,4 @@
+#include "secret_response_fixture.hpp"
 // Actual DuckLake named-secret ATTACH plus Postgres/S3 secret-reader routing.
 // Uses synthetic credentials and isolated local DuckLake data, never a live cloud account.
 #include "duckdb.hpp"
@@ -29,7 +30,7 @@ public:
   pg->secret_map["password"]=Value(identity);pg->secret_map["host"]=Value("127.0.0.1");
   auto s3=make_uniq<KeyValueSecret>(vector<string>{"s3://owned-provider-test/"},"s3","config","owned_s3");
   s3->secret_map["key_id"]=Value(identity);s3->secret_map["secret"]=Value("synthetic-secret");
-  s.PublishSecretList("["+s.SerializeSecret(*lake)+","+s.SerializeSecret(*pg)+","+s.SerializeSecret(*s3)+"]",
+  s.PublishSecretList("["+WithFixtureExpiry(s.SerializeSecret(*lake))+","+WithFixtureExpiry(s.SerializeSecret(*pg))+","+WithFixtureExpiry(s.SerializeSecret(*s3))+"]",
                       *state,state->secret_cache->Revision());
  }
 };

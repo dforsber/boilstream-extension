@@ -16,6 +16,9 @@
 #include <string>
 #include <chrono>
 #include <unordered_map>
+#include <optional>
+
+namespace duckdb_yyjson { struct yyjson_val; }
 
 // Forward declarations for test friend access (outside namespace)
 class BoilstreamCryptoTestAccess;
@@ -260,9 +263,14 @@ private:
 	SecretOwner GetSecretOwner(optional_ptr<CatalogTransaction> transaction, bool create = false);
 	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
 	SecretMatch LookupCachedSecret(const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache);
-	void FetchSecret(const string &selector, const string &type, bool match, optional_ptr<CatalogTransaction> transaction,
+	struct FetchedSecret {
+		shared_ptr<const SecretEntry> secret;
+		std::optional<BoilstreamSecretCache::Time> expires;
+		unique_ptr<SecretEntry> CopyIfUsable() const;
+	};
+	FetchedSecret FetchSecret(const string &selector, const string &type, bool match, optional_ptr<CatalogTransaction> transaction,
 	                 const shared_ptr<BoilstreamSecretCache> &expected_cache);
-	void PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision);
+	vector<FetchedSecret> PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision);
 
 	//! Write secret with explicit connection state (called from StoreSecret)
 	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
@@ -335,6 +343,7 @@ private:
 	unique_ptr<BaseSecret> DeserializeSecret(const string &json_data, SecretManager &manager);
 
 	//! Parse an RFC3339 timestamp to system_clock time_point
+	std::optional<BoilstreamSecretCache::Time> ParseSecretExpiry(duckdb_yyjson::yyjson_val *root);
 	std::chrono::system_clock::time_point ParseExpiresAt(const string &expires_at_str);
 	//! Check the authoritative expiry without applying the cache refresh window
 	bool IsManagedCatalogCredentialExpiredAt(const string &expires_at_str, std::chrono::system_clock::time_point now);
