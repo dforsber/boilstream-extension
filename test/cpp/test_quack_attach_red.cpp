@@ -12,15 +12,10 @@
 //     TYPE quack secret must take priority over the auto-vended one — the
 //     server-vended JWT MUST NOT silently clobber the user's secret.
 //
-// This test stays in the unit lane:
-//   - No live boilstream server.
-//   - No bootstrap_session called.
-//   - We instantiate RestApiSecretStorage directly and inject a
-//     KeyValueSecret of TYPE quack, then assert LookupSecret returns it.
-//
-// Originally written as a RED TDD reproducer for the Phase 4 e2e blocker
-// (ingestion-agent-cxum / ingestion-agent-8hnt); turned green by the
-// StoreSecret-no-conn_state fix and the named auto-vend helper.
+// These unit tests exercise actual lookup and connection-owned caches. Local
+// secrets use StoreSecret with a real connection transaction. Authenticated
+// cases seed publication and cached responses; no successful OPAQUE exchange,
+// network service or full ATTACH is claimed by this executable.
 //
 // Build (from extension repo root):
 //   make            # builds duckdb static libs + extension archive
@@ -52,6 +47,27 @@ public:
 	static bool IsManagedCatalogCredentialExpiredAt(RestApiSecretStorage &storage, const std::string &expires_at_str,
 	                                                std::chrono::system_clock::time_point now) {
 		return storage.IsManagedCatalogCredentialExpiredAt(expires_at_str, now);
+	}
+};
+
+class BoilstreamSessionPublicationTestAccess {
+public:
+	static shared_ptr<BoilstreamConnectionState> Publish(RestApiSecretStorage &storage, ClientContext &context) {
+		auto state = make_shared_ptr<BoilstreamConnectionState>();
+		state->access_token = "synthetic-scope-test-token";
+		state->session_key.assign(32, 7);
+		state->token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(2);
+		storage.PublishSession(context, state, nullptr, 0, false);
+		return state;
+	}
+
+	// Seed the response cache, not a remote write. StoreSecret on an authenticated
+	// owner intentionally requires the real server's write acknowledgement.
+	static void Cache(RestApiSecretStorage &storage, BoilstreamConnectionState &state,
+	                  unique_ptr<const BaseSecret> secret) {
+		const auto bytes = storage.SerializeSecret(*secret).size();
+		auto entry = BoilstreamSecretCache::Prepare(std::move(secret), BoilstreamSecretCache::Time::max(), bytes);
+		state.secret_cache->Put(std::move(entry), state.secret_cache->Revision());
 	}
 };
 
@@ -230,9 +246,8 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
           "[quack][credentials][scope][multitenant]") {
 	QuackAttachFixture fixture;
 	auto &storage = *fixture.storage;
-	auto &session = storage.GetOrCreateSession("managed-session");
 	Connection connection(*fixture.db);
-	storage.SetActiveSessionKeyForConnection(connection.context->GetConnectionId(), "managed-session");
+	auto session = BoilstreamSessionPublicationTestAccess::Publish(storage, *connection.context);
 	connection.BeginTransaction();
 
 	const string endpoint_scope = "quack:non-routable.invalid:1";
@@ -241,7 +256,7 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	vector<string> broad_scope {endpoint_scope};
 	auto broad = make_uniq<KeyValueSecret>(broad_scope, "quack", "config", "broad-user-secret");
 	broad->secret_map["token"] = Value("broad-user-token");
-	storage.StoreSecret(std::move(broad), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
+	BoilstreamSessionPublicationTestAccess::Cache(storage, *session, std::move(broad));
 
 	ManagedCatalogCredentialEnvelope managed;
 	managed.token = "managed-catalog-token";
@@ -251,10 +266,10 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	managed.storage_owner_tenant_id = 42;
 	managed.catalog_group = "9a927d1b_30f5_48da_91eb_af1492bf31c0";
 	managed.server_ca_pem = "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n";
-	session.StoreManagedCatalogCredential(catalog_scope, managed);
+	session->StoreManagedCatalogCredential(catalog_scope, managed);
 	{
-		lock_guard<mutex> lock(session.expiration_lock);
-		session.secret_expiration["__quack__" + catalog_scope] =
+		lock_guard<mutex> lock(session->expiration_lock);
+		session->secret_expiration["__quack__" + catalog_scope] =
 		    std::chrono::system_clock::now() + std::chrono::minutes(5);
 	}
 
@@ -268,44 +283,47 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	REQUIRE(kv.secret_map.at("server_ca_pem").ToString().find("BEGIN CERTIFICATE") != string::npos);
 	REQUIRE(kv.secret_map.find("client_certificate_pem") == kv.secret_map.end());
 	REQUIRE(kv.secret_map.find("client_private_key_pem") == kv.secret_map.end());
+	connection.Commit();
 }
 
 TEST_CASE("Catalog-qualified managed lookup never falls back to a broader user secret",
           "[quack][credentials][scope][fail-closed]") {
 	QuackAttachFixture fixture;
 	auto &storage = *fixture.storage;
+	Connection connection(*fixture.db);
+	connection.BeginTransaction();
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*connection.context);
 	const string endpoint_scope = "quack:non-routable.invalid:1";
 	const string catalog_scope =
 	    ManagedCatalogSecretScope("non-routable.invalid:1", "9a927d1b-30f5-48da-91eb-af1492bf31c0");
 	vector<string> broad_scope {endpoint_scope};
 	auto broad = make_uniq<KeyValueSecret>(broad_scope, "quack", "config", "broad-user-secret");
 	broad->secret_map["token"] = Value("must-not-be-selected");
-	storage.StoreSecret(std::move(broad), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
+	storage.StoreSecret(std::move(broad), OnCreateConflict::REPLACE_ON_CONFLICT, &transaction);
 
 	// No authenticated session means managed vending cannot run. The exact
 	// catalog scope must return no match instead of broadening to the endpoint
 	// secret. Plain endpoint lookup remains the explicit manual interface.
-	REQUIRE_FALSE(storage.LookupSecret(catalog_scope, "quack", nullptr).HasMatch());
-	auto manual = storage.LookupSecret(endpoint_scope, "quack", nullptr);
+	REQUIRE_FALSE(storage.LookupSecret(catalog_scope, "quack", &transaction).HasMatch());
+	auto manual = storage.LookupSecret(endpoint_scope, "quack", &transaction);
 	REQUIRE(manual.HasMatch());
 	REQUIRE(manual.GetSecret().GetName() == "broad-user-secret");
 
-	REQUIRE_FALSE(storage.LookupSecret(endpoint_scope + "/catalog/not-a-uuid", "quack", nullptr).HasMatch());
+	REQUIRE_FALSE(storage.LookupSecret(endpoint_scope + "/catalog/not-a-uuid", "quack", &transaction).HasMatch());
+	connection.Commit();
 }
 
 //===----------------------------------------------------------------------===//
-// RED: a user-created TYPE quack secret MUST be returned by LookupSecret
-// when there is no active boilstream session. The auto-vend path requires
-// a live conn_state; absent one, LookupQuackSecret must fall through to the
-// local CatalogSet path and return the user's secret unchanged.
+// Manual secrets remain usable without login, but only by their connection.
 //===----------------------------------------------------------------------===//
-// Green as of the StoreSecret-no-conn_state fix + named auto-vend helper
-// (closes ingestion-agent-8hnt). The `[red]` tag stays for cross-reference
-// with the Phase 4 incident reports; the test now asserts the expected
-// behaviour rather than reproducing the bug.
 TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_session", "[quack][red][phase4]") {
 	QuackAttachFixture f;
 	auto &s = *f.storage;
+	Connection connection(*f.db), fresh(*f.db);
+	connection.BeginTransaction();
+	fresh.BeginTransaction();
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*connection.context);
+	auto fresh_transaction = CatalogTransaction::GetSystemCatalogTransaction(*fresh.context);
 
 	// Build a KeyValueSecret of TYPE quack with scope matching the ATTACH path
 	// the user would type. This mirrors what `CREATE SECRET ... (TYPE quack,
@@ -316,19 +334,11 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "smk");
 	secret->secret_map["token"] = Value(user_token);
 
-	// Install through the public StoreSecret API — same path `CREATE SECRET`
-	// hits via the secret manager. With no conn_state, StoreSecret stores
-	// locally only (no REST persist), matching DuckDB's TEMPORARY semantics.
-	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr /* no transaction */);
-
-	// ─── LookupSecret with no conn_state, type=quack ──────────────────
-	auto match = s.LookupSecret(user_path, "quack", nullptr);
-
-	// RED: this currently fails because LookupQuackSecret at line ~3797
-	// returns SecretMatch() empty when conn_state is null, then the
-	// fallthrough generic /match HTTP call at line ~3157 throws (no
-	// connection state) — so we never re-consult the local catalog where
-	// the user secret lives.
+	// The real StoreSecret API requires a connection even before login.
+	REQUIRE_THROWS_WITH(s.StoreSecret(secret->Clone(), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr),
+	                    Catch::Matchers::Contains("A live connection is required"));
+	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, &transaction);
+	auto match = s.LookupSecret(user_path, "quack", &transaction);
 	REQUIRE(match.HasMatch());
 
 	auto &returned = match.GetSecret();
@@ -341,6 +351,12 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	auto it = kv.secret_map.find("token");
 	REQUIRE(it != kv.secret_map.end());
 	REQUIRE(it->second.ToString() == user_token);
+	REQUIRE_FALSE(s.LookupSecret(user_path, "quack", nullptr).HasMatch());
+	REQUIRE_FALSE(s.LookupSecret(user_path, "quack", &fresh_transaction).HasMatch());
+	// Foreign lookups must not consume or invalidate the owner's secret.
+	REQUIRE(s.LookupSecret(user_path, "quack", &transaction).HasMatch());
+	fresh.Commit();
+	connection.Commit();
 }
 
 //===----------------------------------------------------------------------===//
@@ -354,10 +370,9 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend", "[qu
 	QuackAttachFixture f;
 	auto &s = *f.storage;
 
-	// Establish a conn_state so the LookupQuackSecret branch runs in full.
-	auto &session = s.GetOrCreateSession("test-session");
+	// Seed actual connection publication; this is not an authentication test.
 	Connection con(*f.db);
-	s.SetActiveSessionKeyForConnection(con.context->GetConnectionId(), "test-session");
+	auto session = BoilstreamSessionPublicationTestAccess::Publish(s, *con.context);
 
 	// Production ATTACH always runs inside an active meta transaction (the
 	// secret manager is invoked from query binding, not from raw API calls).
@@ -374,7 +389,7 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend", "[qu
 	vector<string> scope {user_path};
 	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "user-quack");
 	secret->secret_map["token"] = Value(user_token);
-	s.StoreSecret(std::move(secret), OnCreateConflict::REPLACE_ON_CONFLICT, nullptr);
+	BoilstreamSessionPublicationTestAccess::Cache(s, *session, std::move(secret));
 
 	// Use a CatalogTransaction wired to our connection so GetSession resolves.
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*con.context);
@@ -388,6 +403,5 @@ TEST_CASE("LookupSecret prefers user-supplied quack secret over auto-vend", "[qu
 	REQUIRE(it != kv.secret_map.end());
 	REQUIRE(it->second.ToString() == user_token);
 
-	// Silence unused warning under -DNDEBUG.
-	(void)session;
+	con.Commit();
 }
