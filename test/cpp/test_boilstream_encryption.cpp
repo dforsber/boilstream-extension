@@ -119,17 +119,14 @@ struct EncryptionTestFixture {
 
 		return std::string(reinterpret_cast<char *>(ciphertext_with_tag_vec.data()), ciphertext_with_tag_vec.size());
 	}
-};
 
-TEST_CASE("Response Encryption/Decryption - AES-256-GCM", "[encryption][aes]") {
-	EncryptionTestFixture fixture;
-
-	SECTION("Encrypt and decrypt plaintext successfully") {
+	// Independent mbedTLS encryption/HMAC producer for the native Rust decoder.
+	std::string EncryptedResponse() {
 		// 1. Generate nonce (12 bytes)
 		std::vector<uint8_t> nonce = {0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab};
 
 		// 2. Encrypt plaintext using AES-256-GCM AEAD
-		std::string ciphertext_with_tag = fixture.EncryptAes256Gcm(nonce, fixture.plaintext_json);
+		std::string ciphertext_with_tag = EncryptAes256Gcm(nonce, plaintext_json);
 		REQUIRE(ciphertext_with_tag.size() >= 16); // At least 16 bytes for AEAD tag
 
 		// 3. Compute HMAC over (nonce || ciphertext_with_tag)
@@ -139,7 +136,7 @@ TEST_CASE("Response Encryption/Decryption - AES-256-GCM", "[encryption][aes]") {
 
 		char hmac[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
 		duckdb_mbedtls::MbedTlsWrapper::Hmac256(
-		    reinterpret_cast<const char *>(fixture.integrity_key.data()), fixture.integrity_key.size(),
+		    reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
 		    reinterpret_cast<const char *>(hmac_input.data()), hmac_input.size(), hmac);
 
 		// 4. Encode fields for JSON
@@ -156,13 +153,21 @@ TEST_CASE("Response Encryption/Decryption - AES-256-GCM", "[encryption][aes]") {
 		}
 
 		// 5. Build encrypted response JSON
-		std::string encrypted_response = R"({
+		return R"({
 			"encrypted": true,
 			"nonce": ")" + nonce_b64 + R"(",
 			"ciphertext": ")" + ciphertext_b64 +
 		                                 R"(",
 			"hmac": ")" + hmac_hex + R"("
 		})";
+	}
+};
+
+TEST_CASE("Response Encryption/Decryption - AES-256-GCM", "[encryption][aes]") {
+	EncryptionTestFixture fixture;
+
+	SECTION("Encrypt and decrypt plaintext successfully") {
+		auto encrypted_response = fixture.EncryptedResponse();
 
 		// 6. Decrypt response
 		std::string decrypted_plaintext =
@@ -361,5 +366,27 @@ TEST_CASE("Response Encryption - HMAC Computation Order", "[encryption][hmac]") 
 		REQUIRE(hmac_input[11] == 0x0c);  // Last byte from nonce
 		REQUIRE(hmac_input[12] == 0x10);  // First byte from ciphertext
 		REQUIRE(hmac_input[19] == 0x17);  // Last byte from ciphertext
+	}
+}
+
+TEST_CASE("Response encryption rejects NUL-suffixed JSON fields", "[encryption][json][security]") {
+	EncryptionTestFixture fixture;
+	for (const auto *field : {"nonce", "ciphertext", "hmac"}) {
+		DYNAMIC_SECTION(field) {
+			auto response = fixture.EncryptedResponse();
+			// The prefix is cryptographically valid. Rejection must be caused by
+			// the complete malformed field, not a broken fixture or invalid key.
+			REQUIRE(BoilstreamEncryptionTestAccess::DecryptResponse(response, fixture.test_session_key, 0x0001) ==
+			        fixture.plaintext_json);
+			const auto marker = std::string("\"") + field + "\": \"";
+			auto begin = response.find(marker);
+			REQUIRE(begin != std::string::npos);
+			auto end = response.find('"', begin + marker.size());
+			REQUIRE(end != std::string::npos);
+			response.insert(end, "\\u0000ignored");
+			REQUIRE_THROWS_AS(
+			    BoilstreamEncryptionTestAccess::DecryptResponse(response, fixture.test_session_key, 0x0001),
+			    duckdb::Exception);
+		}
 	}
 }
