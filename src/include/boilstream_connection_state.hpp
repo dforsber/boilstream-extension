@@ -12,6 +12,7 @@
 
 #include "duckdb/main/client_context_state.hpp"
 #include "boilstream_secret_cache.hpp"
+#include "boilstream_local_secret_provider.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include <chrono>
@@ -57,8 +58,19 @@ public:
 	explicit BoilstreamConnectionState(string endpoint = "")
 	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()),
-	      authentication_endpoint(std::move(endpoint)) {
+	      authentication_endpoint(std::move(endpoint)), local_session(false) {
 	}
+
+
+    explicit BoilstreamConnectionState(shared_ptr<BoilstreamLocalSecretProvider> provider)
+        : client_sequence(0), token_expires_at(provider->ExpiresAt()), is_exchanging(false),
+          last_version_check(std::chrono::system_clock::time_point::min()),
+          local_provider(std::move(provider)), local_session(true) {
+    }
+
+    // Dispatch kind survives logout. Revoking authority must never switch a
+    // local operation into remote fallback or turn its failure into a cache miss.
+    bool IsLocalSession() const { return local_session; }
 
 	//! Prevent copying (contains mutex)
 	BoilstreamConnectionState(const BoilstreamConnectionState &) = delete;
@@ -181,6 +193,7 @@ public:
 	//! Check if session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid() {
 		lock_guard<mutex> lock(session_lock);
+		if (local_provider) return !local_provider->Expired();
 		if (access_token.empty() || session_key.empty()) {
 			return false;
 		}
@@ -217,8 +230,16 @@ public:
 	//! Detect logout while a replacement exchange is in flight.
 	std::atomic<uint64_t> authentication_generation {0};
 
+    // Written only while unpublished; copies are taken under session_lock.
+    shared_ptr<BoilstreamLocalSecretProvider> local_provider;
+    shared_ptr<BoilstreamLocalSecretProvider> GetLocalProvider() {
+        lock_guard<mutex> lock(session_lock);
+        return local_provider;
+    }
+
 	//! Clear session state (on error or logout)
 	void ClearSession() {
+        shared_ptr<BoilstreamLocalSecretProvider> retired_local;
 		secret_cache->Close();
 		{
 			lock_guard<mutex> lock(expiration_lock);
@@ -227,6 +248,7 @@ public:
 		{
 			authentication_generation.fetch_add(1);
 			lock_guard<mutex> lock(session_lock);
+            retired_local = std::move(local_provider);
 			// Secure memory wiping using volatile to prevent compiler optimization
 			SecureZeroString(access_token);
 			access_token.clear();
@@ -363,6 +385,7 @@ public:
 private:
 	friend class RestApiSecretStorage;
 	string authentication_endpoint;
+    const bool local_session;
 
 };
 

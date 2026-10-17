@@ -91,6 +91,12 @@ public:
 	//! Context-aware authority access; a changed tenant must authenticate again.
 	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
 
+    //! Private embedding API. No SQL binding or constructor from claimed IDs.
+    void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
+    string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+    BoilstreamLocalSecretProvider::Response RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+    void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
+
 	//! Perform OPAQUE login with password
 	//! Authenticate private state, then publish it for this connection
 	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
@@ -348,11 +354,11 @@ private:
 
 	//! Check catalog versions and refresh credentials for changed catalogs (uses connection state)
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
-	void CheckCatalogVersions(BoilstreamConnectionState &conn_state);
+	void CheckCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
 
 	//! Fetch catalog versions from server (uses connection state)
 	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
-	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state);
+	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
 
 	//! Force refresh credentials for a specific catalog by name (uses connection state)
 	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);
