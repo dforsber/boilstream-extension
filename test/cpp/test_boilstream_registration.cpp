@@ -10,6 +10,9 @@
 #include <catch2/catch.hpp>
 #include "../../src/include/opaque_client_ffi.hpp"
 #include <cstring>
+#include <array>
+#include <vector>
+#include <algorithm>
 #include <string>
 
 //===----------------------------------------------------------------------===//
@@ -68,8 +71,9 @@ TEST_CASE("registration_validate_password - weak passwords", "[registration][ffi
 	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(password3), strlen(password3)) == -1);
 
 	// 11 characters (too short)
-	const char *password4 = "11charspas";
-	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(password4), 11) == -1);
+	const char password4[] = "12345678901";
+	static_assert(sizeof(password4) - 1 == 11, "Fixture must contain exactly 11 characters");
+	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(password4), sizeof(password4) - 1) == -1);
 }
 
 TEST_CASE("registration_validate_password - null input", "[registration][ffi]") {
@@ -89,7 +93,7 @@ TEST_CASE("registration_build_totp_uri - default issuer", "[registration][ffi]")
 	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
-	REQUIRE(result < 512);
+	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
 
 	std::string uri(uri_buffer, result);
 	REQUIRE(uri.find("otpauth://totp/BoilStream:alice%40example.com") == 0);
@@ -109,6 +113,7 @@ TEST_CASE("registration_build_totp_uri - custom issuer", "[registration][ffi]") 
 	long result = registration_build_totp_uri(email, secret, issuer, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
+	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
 
 	std::string uri(uri_buffer, result);
 	REQUIRE(uri.find("otpauth://totp/MyCompany:bob%40company.com") == 0);
@@ -152,6 +157,7 @@ TEST_CASE("registration_build_totp_uri - special characters in email", "[registr
 	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
+	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
 
 	std::string uri(uri_buffer, result);
 	REQUIRE(uri.find("user%2Btag%40example.com") != std::string::npos);
@@ -166,6 +172,7 @@ TEST_CASE("registration_build_totp_uri - verify null termination", "[registratio
 	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
+	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
 	// Verify null termination
 	REQUIRE(uri_buffer[result] == '\0');
 }
@@ -191,6 +198,7 @@ TEST_CASE("registration flow validation", "[registration][integration]") {
 	long uri_len = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(uri_len > 0);
+	REQUIRE(static_cast<size_t>(uri_len) < sizeof(uri_buffer));
 	REQUIRE(uri_buffer[uri_len] == '\0');
 
 	std::string uri(uri_buffer, uri_len);
@@ -213,4 +221,38 @@ TEST_CASE("registration validation catches errors early", "[registration][integr
 	REQUIRE(registration_validate_email(valid_email) == 0);
 	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(weak_password), strlen(weak_password)) ==
 	        -1);
+}
+
+TEST_CASE("Password FFI honors byte length and Unicode character boundaries", "[registration][ffi][boundary]") {
+	// No terminator: the final byte must be ignored at length 12 and rejected at 13.
+	std::array<uint8_t, 13> bytes;
+	bytes.fill('a');
+	bytes.back() = 0xff;
+	REQUIRE(registration_validate_password(bytes.data(), 0) == -1);
+	REQUIRE(registration_validate_password(bytes.data(), 11) == -1);
+	REQUIRE(registration_validate_password(bytes.data(), 12) == 0);
+	REQUIRE(registration_validate_password(bytes.data(), 13) == -1);
+	const std::string unicode = u8"éééééééééééé";
+	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(unicode.data()), 22) == -1);
+	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(unicode.data()), 23) == -1);
+	REQUIRE(registration_validate_password(reinterpret_cast<const uint8_t *>(unicode.data()), unicode.size()) == 0);
+}
+
+TEST_CASE("TOTP FFI enforces exact output capacity without overwriting guards", "[registration][ffi][boundary]") {
+	const std::string expected = "otpauth://totp/BoilStream:user%40example.com?secret=SECRET&issuer=BoilStream&algorithm=SHA512&digits=6&period=30";
+	for (size_t capacity : {size_t(0), expected.size(), expected.size() + 1}) {
+		CAPTURE(capacity);
+		std::vector<char> buffer(expected.size() + 3, '!');
+		auto result = registration_build_totp_uri("user@example.com", "SECRET", nullptr, buffer.data() + 1, capacity);
+		if (capacity <= expected.size()) {
+			REQUIRE(result == -1);
+			REQUIRE(std::all_of(buffer.begin(), buffer.end(), [](char byte) { return byte == '!'; }));
+		} else {
+			REQUIRE(result == static_cast<long>(expected.size()));
+			REQUIRE(std::string(buffer.data() + 1, expected.size()) == expected);
+			REQUIRE(buffer[expected.size() + 1] == '\0');
+		}
+		REQUIRE(buffer.front() == '!');
+		REQUIRE(buffer.back() == '!');
+	}
 }
