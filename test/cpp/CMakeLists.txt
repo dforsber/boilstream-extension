@@ -498,14 +498,26 @@ target_link_libraries(session_publication_test PRIVATE ${DUCKDB_LIBS})
 link_rust_dependencies(session_publication_test)
 add_test(NAME SessionPublication COMMAND session_publication_test)
 
+# Provider integration fixtures call the selected native build's generated
+# extension loader. The unit-test dummy static loader does not define that API.
+# Use the same exact combined library as the authentication integration targets;
+# do not search for a system DuckDB or mix a second static core into these targets.
+find_package(Threads REQUIRED)
+find_library(BOILSTREAM_AUTH_TEST_LIBRARY NAMES duckdb
+  PATHS "${EXTENSION_BUILD_DIR}/src" NO_DEFAULT_PATH)
+if(NOT BOILSTREAM_AUTH_TEST_LIBRARY)
+  message(FATAL_ERROR "Provider integration tests require the exact native shared library with static extension providers")
+endif()
+
 # Memory-only session publication/resume with a filesystem tripwire.
 add_executable(session_memory_only_test test_session_memory_only.cpp
                ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
 target_include_directories(session_memory_only_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
   ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-target_link_libraries(session_memory_only_test PRIVATE ${DUCKDB_LIBS})
-link_rust_dependencies(session_memory_only_test)
+target_link_libraries(session_memory_only_test PRIVATE
+  ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+  "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME SessionMemoryOnly COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_SOURCE_DIR}/run_session_memory_only.py $<TARGET_FILE:session_memory_only_test>)
@@ -528,8 +540,9 @@ if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hp
   target_include_directories(secret_cache_providers_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
     ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-  target_link_libraries(secret_cache_providers_test PRIVATE ${DUCKDB_LIBS})
-  link_rust_dependencies(secret_cache_providers_test)
+  target_link_libraries(secret_cache_providers_test PRIVATE
+    ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+    "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
   add_test(NAME SecretCacheProviders COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_cache_providers.py $<TARGET_FILE:secret_cache_providers_test>)
   set_tests_properties(SecretCacheProviders PROPERTIES TIMEOUT 70)
@@ -543,12 +556,6 @@ set_property(TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
 # Compile the actual authentication SQL entrypoints and storage implementation.
 # Runtime uses synthetic loopback HTTP; never needs real credentials.
 if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  find_package(Threads REQUIRED)
-  find_library(BOILSTREAM_AUTH_TEST_LIBRARY NAMES duckdb
-    PATHS "${EXTENSION_BUILD_DIR}/src" NO_DEFAULT_PATH)
-  if(NOT BOILSTREAM_AUTH_TEST_LIBRARY)
-    message(FATAL_ERROR "Auth diagnostics require the exact fork shared library with static httpfs providers")
-  endif()
   foreach(mode IN ITEMS debug release)
     add_executable(auth_diagnostics_${mode}_test test_auth_diagnostics.cpp
       ../../src/boilstream_secret_storage.cpp ../../src/boilstream_extension.cpp
