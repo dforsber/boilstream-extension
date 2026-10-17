@@ -2753,12 +2753,10 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
                                                 BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction) {
 
-    if (conn_state.IsLocalSession())
-        throw IOException("Local native secret writes require the paired-secret adapter");
 	// Check if endpoint is configured
 	string url = conn_state.GetEndpointUrl();
 
-	if (url.empty()) {
+	if (!conn_state.IsLocalSession() && url.empty()) {
 		BOILSTREAM_LOG("WriteSecretWithState: ERROR - endpoint is empty!");
 		throw InvalidInputException("Boilstream endpoint not configured. Use PRAGMA "
 		                            "boilstream_bootstrap_session('https://host/path/:TOKEN') to set it.");
@@ -2787,8 +2785,16 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 
-	// Make HTTP POST request with connection state for authentication
-	HttpPostWithState(AppendPlatformParams(url, transaction), body, conn_state);
+	if (conn_state.IsLocalSession()) {
+		if (!transaction || !transaction->HasContext())
+			throw IOException("Local secret writes require the current query context");
+		// The verified server principal derives and atomically stores both
+		// binary names. No tenant ID or transport credentials come from SQL.
+		RequestLocal(transaction->GetContext(), conn_state,
+		             "{\"operation\":\"store\",\"request\":" + body + "}");
+	} else {
+		HttpPostWithState(AppendPlatformParams(url, transaction), body, conn_state);
+	}
 	BOILSTREAM_LOG("WriteSecretWithState: POST successful");
 }
 
