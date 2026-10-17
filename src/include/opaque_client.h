@@ -157,6 +157,7 @@ void opaque_free_login_state(LoginState *state);
  *
  * The returned buffer must be freed with opaque_free_buffer.
  */
+// Text fields must be valid UTF-8. A null payload is valid only with zero length.
 OpaqueResult aws_build_canonical_request(const char *method, size_t method_len, const char *canonical_uri,
                                          size_t canonical_uri_len, const char *canonical_query,
                                          size_t canonical_query_len, const char *canonical_headers,
@@ -178,6 +179,7 @@ OpaqueResult aws_build_canonical_request(const char *method, size_t method_len, 
  *
  * The returned buffer must be freed with opaque_free_buffer.
  */
+// Date, region and service must be valid UTF-8; malformed scopes are rejected.
 OpaqueResult aws_derive_signing_key(const uint8_t *base_signing_key, size_t base_signing_key_len, const char *date,
                                     size_t date_len, const char *region, size_t region_len, const char *service,
                                     size_t service_len);

@@ -391,33 +391,49 @@ pub extern "C" fn aws_build_canonical_request(
     payload_len: usize,
 ) -> OpaqueResult {
     if method.is_null() || canonical_uri.is_null() || canonical_query.is_null()
-        || canonical_headers.is_null() || signed_headers.is_null() {
+        || canonical_headers.is_null() || signed_headers.is_null()
+        || (payload.is_null() && payload_len != 0) {
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
     let method_str = unsafe {
         let slice = slice::from_raw_parts(method as *const u8, method_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let canonical_uri_str = unsafe {
         let slice = slice::from_raw_parts(canonical_uri as *const u8, canonical_uri_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let canonical_query_str = unsafe {
         let slice = slice::from_raw_parts(canonical_query as *const u8, canonical_query_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let canonical_headers_str = unsafe {
         let slice = slice::from_raw_parts(canonical_headers as *const u8, canonical_headers_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let signed_headers_str = unsafe {
         let slice = slice::from_raw_parts(signed_headers as *const u8, signed_headers_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     // Hash the payload with SHA-256
@@ -469,17 +485,26 @@ pub extern "C" fn aws_derive_signing_key(
 
     let date_str = unsafe {
         let slice = slice::from_raw_parts(date as *const u8, date_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let region_str = unsafe {
         let slice = slice::from_raw_parts(region as *const u8, region_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     let service_str = unsafe {
         let slice = slice::from_raw_parts(service as *const u8, service_len);
-        std::str::from_utf8(slice).unwrap_or("")
+        match std::str::from_utf8(slice) {
+            Ok(value) => value,
+            Err(_) => return OpaqueResult::error(OpaqueError::InvalidInput),
+        }
     };
 
     // AWS-style key derivation:
