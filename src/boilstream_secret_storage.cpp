@@ -173,12 +173,13 @@ struct HttpOperationGuard {
 
 //! Safe string extraction from yyjson - returns empty string if NULL or not a string
 //! This prevents undefined behavior from constructing std::string with NULL
+//! Preserve embedded NUL bytes so field validators see the complete value.
 static inline string SafeGetStr(yyjson_val *val) {
 	if (!val) {
 		return "";
 	}
 	const char *str = yyjson_get_str(val);
-	return str ? string(str) : "";
+	return str ? string(str, yyjson_get_len(val)) : "";
 }
 
 static bool IsManagedCatalogEndpoint(const string &endpoint) {
@@ -596,7 +597,7 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool
 	// Add state_id if it was provided by server (required for stateful OPAQUE)
 
 	if (!state_id.empty()) {
-		yyjson_mut_obj_add_strcpy(final_doc, final_obj, "state_id", state_id.c_str());
+		yyjson_mut_obj_add_strncpy(final_doc, final_obj, "state_id", state_id.data(), state_id.size());
 		BOILSTREAM_LOG("PerformOpaqueLogin: Added state_id to finalization request");
 	} else {
 		BOILSTREAM_LOG("PerformOpaqueLogin: ERROR - state_id is EMPTY, not adding to request");
