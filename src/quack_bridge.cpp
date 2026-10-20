@@ -25,6 +25,11 @@ static inline void *boilstream_lookup_runtime_symbol(const char *name) {
 
 namespace {
 
+std::atomic<const boilstream_quack_capability_context_factory *> &ContextFactorySlot() {
+	static std::atomic<const boilstream_quack_capability_context_factory *> slot {nullptr};
+	return slot;
+}
+
 std::atomic<boilstream_quack_jwt_verifier_fn> &JwtVerifierSlot() {
 	static std::atomic<boilstream_quack_jwt_verifier_fn> slot {nullptr};
 	return slot;
@@ -74,6 +79,11 @@ void ClearCatalogPlanDataOutputs(uint32_t *operation_out, char *catalog_id_out, 
 
 } // namespace
 
+extern "C" void
+boilstream_quack_set_capability_context_factory(const boilstream_quack_capability_context_factory *factory) {
+	ContextFactorySlot().store(factory, std::memory_order_release);
+}
+
 extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn) {
 	JwtVerifierSlot().store(fn, std::memory_order_release);
 }
@@ -100,7 +110,7 @@ namespace {
 
 struct SessionRegistry {
 	std::mutex mutex;
-	std::unordered_map<std::string, SessionCtx> sessions;
+	std::unordered_map<std::string, std::shared_ptr<const SessionCtx>> sessions;
 };
 
 SessionRegistry &QuackSessionRegistry() {
@@ -119,7 +129,8 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 	    args.data[0], args.data[1], args.data[2], result, args.size(),
 	    [verifier](string_t sid, string_t client_auth, string_t) {
 		    try {
-			    if (!verifier) {
+			    auto factory = ContextFactorySlot().load(std::memory_order_acquire);
+			    if (!verifier || !factory || !factory->create || !factory->destroy) {
 				    return false;
 			    }
 			    const std::string session_id(sid.GetData(), sid.GetSize());
@@ -136,12 +147,25 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 			    if (rc != 1 || user_id[0] == '\0' || bundle[0] == '\0') {
 				    return false;
 			    }
-			    SessionCtx context;
-			    context.user_id = user_id;
-			    context.capability_bundle = bundle.data();
+			    const auto authority = factory->create(bundle.data());
+			    if (!authority) {
+				    return false;
+			    }
+			    // Capture the exact deallocator before publishing the owner.
+			    // shared_ptr releases authority even if its allocation fails.
+			    std::shared_ptr<const void> owned_authority(authority, factory->destroy);
+			    auto context = std::make_shared<SessionCtx>();
+			    context->user_id = user_id;
+			    context->capability_context = std::move(owned_authority);
+			    std::shared_ptr<const SessionCtx> retired;
 			    auto &registry = QuackSessionRegistry();
-			    std::lock_guard<std::mutex> guard(registry.mutex);
-			    registry.sessions[session_id] = std::move(context);
+			    {
+				    std::lock_guard<std::mutex> guard(registry.mutex);
+				    auto &slot = registry.sessions[session_id];
+				    retired = std::move(slot);
+				    slot = std::move(context);
+			    }
+			    // Any replaced session is destroyed after releasing the lock.
 			    return true;
 		    } catch (...) {
 			    return false;
@@ -149,13 +173,13 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 	    });
 }
 
-// Authentication binds the opaque bundle. This scalar only verifies that the
+// Authentication binds the immutable opaque context. This scalar only verifies that the
 // same session exists; all operation authorization happens at the typed hook.
 void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	BinaryExecutor::Execute<string_t, string_t, bool>(
 	    args.data[0], args.data[1], result, args.size(), [](string_t sid, string_t) {
 		    try {
-			    return GetQuackSessionCtx(std::string(sid.GetData(), sid.GetSize())).second;
+			    return bool(GetQuackSessionCtx(std::string(sid.GetData(), sid.GetSize())));
 		    } catch (...) {
 			    return false;
 		    }
@@ -172,14 +196,11 @@ void BoilstreamQuackDebugSessionCountFunction(DataChunk &args, ExpressionState &
 
 } // namespace
 
-std::pair<SessionCtx, bool> GetQuackSessionCtx(const std::string &session_id) {
+std::shared_ptr<const SessionCtx> GetQuackSessionCtx(const std::string &session_id) {
 	auto &registry = QuackSessionRegistry();
 	std::lock_guard<std::mutex> guard(registry.mutex);
 	auto found = registry.sessions.find(session_id);
-	if (found == registry.sessions.end()) {
-		return {SessionCtx {}, false};
-	}
-	return {found->second, true};
+	return found == registry.sessions.end() ? nullptr : found->second;
 }
 
 void RegisterQuackBridge(ExtensionLoader &loader) {
@@ -210,9 +231,16 @@ extern "C" void boilstream_quack_catalog_session_close(const char *session_id) {
 		return;
 	}
 	try {
+		std::shared_ptr<const duckdb::SessionCtx> retired;
 		auto &registry = duckdb::QuackSessionRegistry();
-		std::lock_guard<std::mutex> guard(registry.mutex);
-		registry.sessions.erase(session_id);
+		{
+			std::lock_guard<std::mutex> guard(registry.mutex);
+			auto found = registry.sessions.find(session_id);
+			if (found != registry.sessions.end()) {
+				retired = std::move(found->second);
+				registry.sessions.erase(found);
+			}
+		}
 	} catch (...) {
 		// Quack teardown callbacks are no-throw and idempotent.
 	}
@@ -242,11 +270,11 @@ extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char 
 			return -1;
 		}
 		auto session = duckdb::GetQuackSessionCtx(session_id);
-		if (!session.second) {
-			WriteError(error_out_buf, error_out_size, "Quack session capability bundle is missing");
+		if (!session) {
+			WriteError(error_out_buf, error_out_size, "Quack session capability context is missing");
 			return -1;
 		}
-		const auto rc = planner(session.first.capability_bundle.c_str(), declared_catalog_id, sql_in, operation_out,
+		const auto rc = planner(session->capability_context.get(), declared_catalog_id, sql_in, operation_out,
 		                        catalog_id_out, catalog_id_out_size, execution_catalog_alias_out,
 		                        execution_catalog_alias_out_size, read_catalog_alias_out, read_catalog_alias_out_size,
 		                        sql_out_buf, sql_out_size, error_out_buf, error_out_size);
@@ -290,13 +318,12 @@ extern "C" int boilstream_quack_catalog_authorize(const char *session_id, uint32
 			return -1;
 		}
 		auto session = duckdb::GetQuackSessionCtx(session_id);
-		if (!session.second) {
-			WriteError(error_out_buf, error_out_size, "Quack session capability bundle is missing");
+		if (!session) {
+			WriteError(error_out_buf, error_out_size, "Quack session capability context is missing");
 			return -1;
 		}
-		const auto rc =
-		    authorizer(session.first.capability_bundle.c_str(), operation, catalog_id, execution_catalog_alias,
-		               read_catalog_alias, storage_owner_tenant_id_out, error_out_buf, error_out_size);
+		const auto rc = authorizer(session->capability_context.get(), operation, catalog_id, execution_catalog_alias,
+		                           read_catalog_alias, storage_owner_tenant_id_out, error_out_buf, error_out_size);
 		if (rc != 0) {
 			*storage_owner_tenant_id_out = 0;
 		}
@@ -322,11 +349,11 @@ extern "C" int boilstream_quack_catalog_post_execute(const char *session_id, uin
 			return 0;
 		}
 		auto session = duckdb::GetQuackSessionCtx(session_id);
-		if (!session.second) {
-			WriteError(error_out_buf, error_out_size, "Quack session capability bundle is missing");
+		if (!session) {
+			WriteError(error_out_buf, error_out_size, "Quack session capability context is missing");
 			return -1;
 		}
-		return hook(session.first.capability_bundle.c_str(), operation, catalog_id, error_out_buf, error_out_size);
+		return hook(session->capability_context.get(), operation, catalog_id, error_out_buf, error_out_size);
 	} catch (...) {
 		WriteError(error_out_buf, error_out_size, "Post-execute bridge failed");
 		return -1;

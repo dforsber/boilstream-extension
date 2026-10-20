@@ -4,7 +4,7 @@
 // quack_bridge.hpp
 //
 // Opaque structured-capability bridge between Quack and the Boilstream host.
-// C++ stores the signed, host-verified capability bundle but never interprets
+// C++ owns the immutable host-verified capability context but never interprets
 // product grants, display names, access modes, or storage-owner scope.
 //===----------------------------------------------------------------------===//
 
@@ -14,11 +14,21 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 extern "C" {
+
+//! Factory has static lifetime. Create returns null on denial; destroy is
+//! no-throw and releases exactly one context after its last callback borrower.
+//! Context internals and permission semantics remain entirely Rust-owned.
+struct boilstream_quack_capability_context_factory {
+	const void *(*create)(const char *capability_bundle);
+	void (*destroy)(const void *context);
+};
+void boilstream_quack_set_capability_context_factory(const boilstream_quack_capability_context_factory *factory);
 
 //! Verify a Quack JWT and return the requester audit identity plus one opaque,
 //! versioned capability bundle. Returns 1 on success and 0 on denial.
@@ -32,7 +42,7 @@ void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn);
 //! and may rewrite SQL for Airport routing. The execution target is independent
 //! of whether SQL is rewritten. Returns 1 for rewrite, 0 for no rewrite, and
 //! <0 for hard denial.
-typedef int (*boilstream_quack_catalog_planner_fn)(const char *capability_bundle, const char *declared_catalog_id,
+typedef int (*boilstream_quack_catalog_planner_fn)(const void *capability_context, const char *declared_catalog_id,
                                                    const char *sql_in, uint32_t *operation_out, char *catalog_id_out,
                                                    size_t catalog_id_out_size, char *execution_catalog_alias_out,
                                                    size_t execution_catalog_alias_out_size,
@@ -45,7 +55,7 @@ void boilstream_quack_set_catalog_planner(boilstream_quack_catalog_planner_fn fn
 //! by the trusted planner; request SQL and display names are deliberately absent.
 //! Catalog operations return the authoritative storage-owner tenant for
 //! physical routing. Returns 0 on allow and nonzero on hard denial.
-typedef int (*boilstream_quack_catalog_authorizer_fn)(const char *capability_bundle, uint32_t operation,
+typedef int (*boilstream_quack_catalog_authorizer_fn)(const void *capability_context, uint32_t operation,
                                                       const char *catalog_id, const char *execution_catalog_alias,
                                                       const char *read_catalog_alias,
                                                       uint32_t *storage_owner_tenant_id_out, char *error_out_buf,
@@ -54,7 +64,7 @@ void boilstream_quack_set_catalog_authorizer(boilstream_quack_catalog_authorizer
 
 //! Post-success durability hook addressed by canonical UUID and typed
 //! operation. Returns 0 on success/no-op and nonzero on failure.
-typedef int (*boilstream_quack_post_execute_fn)(const char *capability_bundle, uint32_t operation,
+typedef int (*boilstream_quack_post_execute_fn)(const void *capability_context, uint32_t operation,
                                                 const char *catalog_id, char *error_out_buf, size_t error_out_size);
 void boilstream_quack_set_post_execute_hook(boilstream_quack_post_execute_fn fn);
 
@@ -78,10 +88,12 @@ namespace duckdb {
 
 struct SessionCtx {
 	std::string user_id;
-	std::string capability_bundle;
+	std::shared_ptr<const void> capability_context;
 };
 
-std::pair<SessionCtx, bool> GetQuackSessionCtx(const std::string &session_id);
+//! A retained immutable session lease. No callback or destruction runs under
+//! the registry lock; close/replacement cannot invalidate an admitted borrower.
+std::shared_ptr<const SessionCtx> GetQuackSessionCtx(const std::string &session_id);
 void RegisterQuackBridge(ExtensionLoader &loader);
 
 } // namespace duckdb

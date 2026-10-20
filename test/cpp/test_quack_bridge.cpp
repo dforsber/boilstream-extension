@@ -14,6 +14,10 @@
 #include "duckdb/main/extension_manager.hpp"
 #include "quack_bridge.hpp"
 
+#include <atomic>
+#include <future>
+#include <condition_variable>
+#include <thread>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -28,11 +32,15 @@ using ExpectedPlannerAdapter = int (*)(const char *, const char *, const char *,
                                        size_t, char *, size_t, char *, size_t, char *, size_t);
 using ExpectedAuthorizerAdapter = int (*)(const char *, uint32_t, const char *, const char *, const char *, uint32_t *,
                                           char *, size_t);
-static_assert(std::is_same<boilstream_quack_catalog_planner_fn, ExpectedPlannerAdapter>::value,
+using ExpectedHostPlanner = int (*)(const void *, const char *, const char *, uint32_t *, char *, size_t, char *,
+                                    size_t, char *, size_t, char *, size_t, char *, size_t);
+using ExpectedHostAuthorizer = int (*)(const void *, uint32_t, const char *, const char *, const char *, uint32_t *,
+                                       char *, size_t);
+static_assert(std::is_same<boilstream_quack_catalog_planner_fn, ExpectedHostPlanner>::value,
               "Boilstream host planner ABI changed");
 static_assert(std::is_same<decltype(&boilstream_quack_catalog_plan), ExpectedPlannerAdapter>::value,
               "Quack planner adapter ABI changed");
-static_assert(std::is_same<boilstream_quack_catalog_authorizer_fn, ExpectedAuthorizerAdapter>::value,
+static_assert(std::is_same<boilstream_quack_catalog_authorizer_fn, ExpectedHostAuthorizer>::value,
               "Boilstream host authorizer ABI changed");
 static_assert(std::is_same<decltype(&boilstream_quack_catalog_authorize), ExpectedAuthorizerAdapter>::value,
               "Quack authorizer adapter ABI changed");
@@ -65,6 +73,27 @@ bool CopyOutput(char *out, size_t capacity, const char *value) {
 	return true;
 }
 
+std::atomic<size_t> context_created {0};
+std::atomic<size_t> context_destroyed {0};
+std::atomic<bool> context_refused {false};
+
+const void *CreateContext(const char *bundle) {
+	if (context_refused.load())
+		return nullptr;
+	auto context = new std::string(bundle);
+	++context_created;
+	return context;
+}
+
+void DestroyContext(const void *context) {
+	// Destruction must be outside the registry lock, including replacement.
+	(void)GetQuackSessionCtx("destruction-reentry-probe");
+	delete static_cast<const std::string *>(context);
+	++context_destroyed;
+}
+
+const boilstream_quack_capability_context_factory CONTEXT_FACTORY {CreateContext, DestroyContext};
+
 int VerifyJwt(const char *, size_t, char *user_id_out, size_t user_id_capacity, char *capability_out,
               size_t capability_capacity) {
 	return CopyOutput(user_id_out, user_id_capacity, "requester-17") &&
@@ -73,7 +102,7 @@ int VerifyJwt(const char *, size_t, char *user_id_out, size_t user_id_capacity, 
 	           : 0;
 }
 
-int PlanSuccess(const char *capability, const char *declared_catalog_id, const char *sql_in, uint32_t *operation_out,
+int PlanSuccess(const void *context, const char *declared_catalog_id, const char *sql_in, uint32_t *operation_out,
                 char *catalog_id_out, size_t catalog_id_out_size, char *execution_catalog_alias_out,
                 size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
                 size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *error_out_buf,
@@ -82,7 +111,7 @@ int PlanSuccess(const char *capability, const char *declared_catalog_id, const c
 	                            execution_catalog_alias_out && execution_catalog_alias_out[0] == '\0' &&
 	                            read_catalog_alias_out && read_catalog_alias_out[0] == '\0' && sql_out_buf &&
 	                            sql_out_buf[0] == '\0' && error_out_buf && error_out_buf[0] == '\0';
-	seen_capability = capability ? capability : "";
+	seen_capability = context ? *static_cast<const std::string *>(context) : "";
 	seen_declared_catalog = declared_catalog_id ? declared_catalog_id : "";
 	seen_sql = sql_in ? sql_in : "";
 	if (!operation_out || !CopyOutput(catalog_id_out, catalog_id_out_size, CATALOG_ID) ||
@@ -96,7 +125,7 @@ int PlanSuccess(const char *capability, const char *declared_catalog_id, const c
 	return planner_result;
 }
 
-int PlanDenialWithDirtyOutputs(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
+int PlanDenialWithDirtyOutputs(const void *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                                size_t catalog_id_out_size, char *execution_catalog_alias_out,
                                size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
                                size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size,
@@ -110,7 +139,7 @@ int PlanDenialWithDirtyOutputs(const char *, const char *, const char *, uint32_
 	return -7;
 }
 
-int PlanInvalidStatus(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
+int PlanInvalidStatus(const void *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                       size_t catalog_id_out_size, char *execution_catalog_alias_out,
                       size_t execution_catalog_alias_out_size, char *read_catalog_alias_out,
                       size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size, char *, size_t) {
@@ -122,7 +151,7 @@ int PlanInvalidStatus(const char *, const char *, const char *, uint32_t *operat
 	return 2;
 }
 
-int PlanThrows(const char *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
+int PlanThrows(const void *, const char *, const char *, uint32_t *operation_out, char *catalog_id_out,
                size_t catalog_id_out_size, char *execution_catalog_alias_out, size_t execution_catalog_alias_out_size,
                char *read_catalog_alias_out, size_t read_catalog_alias_out_size, char *sql_out_buf, size_t sql_out_size,
                char *, size_t) {
@@ -134,10 +163,10 @@ int PlanThrows(const char *, const char *, const char *, uint32_t *operation_out
 	throw std::runtime_error("planner exception must not cross C ABI");
 }
 
-int AuthorizeSuccess(const char *capability, uint32_t operation, const char *catalog_id,
+int AuthorizeSuccess(const void *context, uint32_t operation, const char *catalog_id,
                      const char *execution_catalog_alias, const char *read_catalog_alias,
                      uint32_t *storage_owner_tenant_id_out, char *, size_t) {
-	seen_authorizer_capability = capability ? capability : "";
+	seen_authorizer_capability = context ? *static_cast<const std::string *>(context) : "";
 	seen_authorizer_operation = operation;
 	seen_authorizer_catalog = catalog_id ? catalog_id : "";
 	seen_authorizer_alias = execution_catalog_alias ? execution_catalog_alias : "";
@@ -146,14 +175,14 @@ int AuthorizeSuccess(const char *capability, uint32_t operation, const char *cat
 	return 0;
 }
 
-int AuthorizeDenial(const char *, uint32_t, const char *, const char *, const char *,
+int AuthorizeDenial(const void *, uint32_t, const char *, const char *, const char *,
                     uint32_t *storage_owner_tenant_id_out, char *error_out_buf, size_t error_out_size) {
 	*storage_owner_tenant_id_out = 9999;
 	CopyOutput(error_out_buf, error_out_size, "authorizer denied exactly");
 	return -7;
 }
 
-int AuthorizeThrows(const char *, uint32_t, const char *, const char *, const char *,
+int AuthorizeThrows(const void *, uint32_t, const char *, const char *, const char *,
                     uint32_t *storage_owner_tenant_id_out, char *, size_t) {
 	*storage_owner_tenant_id_out = 9999;
 	throw std::runtime_error("authorizer exception must not cross C ABI");
@@ -218,7 +247,7 @@ struct LateSessionCloseProbe {
 	~LateSessionCloseProbe() noexcept {
 		boilstream_quack_catalog_session_close(SESSION_ID);
 		try {
-			if (GetQuackSessionCtx(SESSION_ID).second) {
+			if (GetQuackSessionCtx(SESSION_ID)) {
 				std::terminate();
 			}
 		} catch (...) {
@@ -252,9 +281,12 @@ struct BridgeFixture {
 		seen_authorizer_catalog.clear();
 		seen_authorizer_alias.clear();
 		seen_authorizer_operation = 0;
+		context_refused.store(false);
+		boilstream_quack_set_capability_context_factory(&CONTEXT_FACTORY);
 		boilstream_quack_set_jwt_verifier(&VerifyJwt);
 		boilstream_quack_set_catalog_planner(nullptr);
 		boilstream_quack_set_catalog_authorizer(nullptr);
+		boilstream_quack_set_post_execute_hook(nullptr);
 		auto result =
 		    connection.Query("SELECT boilstream_quack_authn('" + std::string(SESSION_ID) + "', 'test-jwt', '')");
 		const auto query_error = result->HasError() ? result->GetError() : "";
@@ -267,7 +299,9 @@ struct BridgeFixture {
 		boilstream_quack_catalog_session_close(SESSION_ID);
 		boilstream_quack_set_catalog_planner(nullptr);
 		boilstream_quack_set_catalog_authorizer(nullptr);
+		boilstream_quack_set_post_execute_hook(nullptr);
 		boilstream_quack_set_jwt_verifier(nullptr);
+		boilstream_quack_set_capability_context_factory(nullptr);
 	}
 };
 
@@ -475,7 +509,7 @@ TEST_CASE_METHOD(BridgeFixture, "Planner bridge fails closed without planner or 
 		PlanOutputs outputs;
 		REQUIRE(outputs.Call() == -1);
 		outputs.RequireDataCleared();
-		REQUIRE(std::string(outputs.error) == "Quack session capability bundle is missing");
+		REQUIRE(std::string(outputs.error) == "Quack session capability context is missing");
 	}
 }
 
@@ -525,7 +559,7 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge fails closed and clears owner
 		REQUIRE(boilstream_quack_catalog_authorize(SESSION_ID, 4, CATALOG_ID, EXECUTION_ALIAS, "durable-source",
 		                                           &storage_owner, error, sizeof(error)) == -1);
 		REQUIRE(storage_owner == 0);
-		REQUIRE(std::string(error) == "Quack session capability bundle is missing");
+		REQUIRE(std::string(error) == "Quack session capability context is missing");
 	}
 
 	SECTION("host exception") {
@@ -575,3 +609,5 @@ TEST_CASE_METHOD(BridgeFixture, "Authorizer bridge rejects every invalid require
 		REQUIRE(storage_owner == 0);
 	}
 }
+
+#include "test_quack_bridge_context.inc"
