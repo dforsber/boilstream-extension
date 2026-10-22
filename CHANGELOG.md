@@ -5,6 +5,40 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-23
+
+### Changed
+
+- **Requires DuckDB v2.0.0 or newer.** The extension now builds against the DuckDB 2.0 APIs
+  (`Identifier` names for functions, secrets and catalog entries; the unified `QueryResult`).
+  DuckDB 1.x is no longer supported.
+- The boilstream secret storage moved to tie-break offset 7. DuckDB 2.0 added a connection-scoped
+  secret storage at offset 5; a connection-scoped secret the user created now wins a tie, the
+  temporary and local-file storages still rank below boilstream.
+
+### Added
+
+- First-class statement syntax for the PRAGMA commands, implemented as a DuckDB 2.0 PEG grammar
+  extension named `boilstream`: `BOILSTREAM LOGIN 'url_with_email' 'password' 'mfa_code'`,
+  `BOILSTREAM REGISTER USER 'url_with_email' 'password'`, `BOILSTREAM VERIFY MFA 'totp_code'`,
+  `BOILSTREAM BOOTSTRAP SESSION 'url_with_token'`, `BOILSTREAM HELP`,
+  `CREATE DUCKLAKE 'name' ['description' ['s3_bucket_name']]` and
+  `ATTACH DUCKLAKE '<catalog-uuid>' AS alias`. Each statement is parsed into the PragmaStatement of the
+  matching `PRAGMA boilstream_*` call, so both forms share one implementation; wrong arity is a
+  parse-time error that prints the usage. The grammar is activated automatically on every connection
+  opened after the extension loaded; earlier connections and the DuckDB CLI (which selects its own
+  `shell` grammar) run `SET active_grammar_extensions = ['boilstream']`.
+- `PRAGMA boilstream_help` lists the statement forms.
+
+### Tests
+
+- `test/sql/boilstream_grammar.test` (statement syntax, PRAGMA equivalence, arity errors,
+  activation) and `test/sql/boilstream_pragmas.test` (argument validation and no-session failure
+  paths of every PRAGMA and table function; dotted setting names must be quoted in 2.0).
+- The C++ lanes link DuckDB 2.0 statically through `test/cpp/static_extension_loader.c`; the
+  stock-DuckDB integration lane is behind `BOILSTREAM_INTEGRATION_TESTS` (needs 2.0 httpfs and
+  quack artifacts). Removed four test cases that asserted nothing.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added

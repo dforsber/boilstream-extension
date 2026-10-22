@@ -1,231 +1,78 @@
 # Boilstream Extension Test Suite
 
-This directory contains comprehensive tests for the Boilstream DuckDB extension, with a focus on security features and PKCE token exchange.
+Two lanes: SQL logic tests under `test/sql/` run inside DuckDB's `unittest` binary, and C++ Catch2 tests
+under `test/cpp/` build as standalone executables against the same DuckDB build. Both need DuckDB
+**v2.0.0 or newer**.
 
-## Test Structure
+## SQL tests (`test/sql/`)
 
-### C++ Unit Tests (`test/cpp/`)
+| File | What it checks |
+|------|----------------|
+| `boilstream_grammar.test` | `BOILSTREAM ...`, `CREATE DUCKLAKE`, `ATTACH DUCKLAKE` statements: registration in `duckdb_grammar_extensions()`, automatic activation on new connections, equivalence with the PRAGMA output, routing of arguments into the PRAGMA validation, parse-time arity errors, built-in `ATTACH`/`CREATE` still parsing, deactivation via `SET active_grammar_extensions`. |
+| `boilstream_pragmas.test` | Every PRAGMA and table function is registered; URL/email/token/TOTP validation errors; no-session failure paths (`No endpoint configured`, `requires an active Boilstream session`); `duckdb_secrets()` without a session; dotted setting names must be quoted in 2.0. |
+| `quack_bridge.test` | Quack bridge scalar functions fail closed without a Rust host. |
+| `quack_secret_autovend.test` | `quack` secret type stays owned by the quack extension (`require quack`). |
+| `quack_attach_with_manual_secret.test` | A user-created `TYPE quack` secret is honoured by `ATTACH` (`require quack`). |
 
-**File:** `test_boilstream_security.cpp`
+The tests are registered into `unittest` through `LOAD_TESTS` in the extension config. Run them with
+an absolute path glob:
 
-C++ unit tests using the Catch2 framework. These tests focus on low-level functionality and security properties:
-
-#### PKCE Code Verifier Generation
-- ✅ Correct length (64 characters)
-- ✅ Valid base64url characters only
-- ✅ Uniqueness (no collisions in 1000 samples)
-- ✅ High entropy (chi-square distribution test)
-- ✅ Rejection sampling (unbiased random distribution)
-
-#### PKCE Code Challenge Computation
-- ✅ Correct output format (43-char base64url)
-- ✅ Deterministic (same input → same output)
-- ✅ One-way function (cannot recover verifier)
-- ✅ RFC 7636 test vector validation
-
-#### Token Format Validation
-- ✅ Valid tokens (32-512 chars, alphanumeric + - and _)
-- ✅ Rejects empty tokens
-- ✅ Rejects tokens that are too short (< 32)
-- ✅ Rejects tokens that are too long (> 512)
-- ✅ Rejects invalid characters
-- ✅ Descriptive error messages
-
-#### Session State Management
-- ✅ Token validity checks
-- ✅ Rotation timing logic
-- ✅ Session clearing
-
-#### Thread Safety
-- ✅ Concurrent code verifier generation
-- ✅ Concurrent session clearing
-- ✅ No race conditions
-
-#### Security Properties
-- ✅ Unpredictable verifiers (high Hamming distance)
-- ✅ One-way challenge computation
-- ✅ No pattern in generated values
-
-### SQL Integration Tests (`test/sql/`)
-
-**File:** `boilstream.test` - Basic extension functionality
-**File:** `boilstream_security.test` - Security-focused validation tests
-
-SQL tests using DuckDB's SQLLogicTest framework:
-
-#### URL Validation
-- ✅ HTTPS required for non-localhost
-- ✅ HTTP allowed for localhost, 127.0.0.1, ::1
-- ✅ Bypass prevention (subdomain.localhost, path tricks, query params)
-- ✅ Proper hostname extraction
-
-#### Input Validation
-- ✅ Bootstrap token required
-- ✅ URL format validation
-- ✅ Token delimiter validation
-
-#### Error Handling
-- ✅ Descriptive error messages
-- ✅ Proper exception types
-
-## Running Tests
-
-### Run All Tests
 ```bash
-make test
+<duckdb-build>/test/unittest "<extension-checkout>/test/sql/*"
 ```
 
-### Run Tests in Debug Mode
+Tests with `require quack` are skipped when the quack extension is not linked into the build.
+
+## C++ tests (`test/cpp/`)
+
+Standalone CMake project. It links the extension archive, `libduckdb_static.a` and the third-party
+archives from a DuckDB build directory and registers the linked extensions through
+`static_extension_loader.c` (DuckDB 2.0 removed the dummy loader archive; programs register their
+statically linked extensions themselves).
+
 ```bash
-make test_debug
+export DUCKDB_BUILD_DIR=<duckdb-build>        # dir containing src/libduckdb_static.a, extension/boilstream/...
+export DUCKDB_SOURCE_DIR=<duckdb-source>      # fork checkout, for headers and extension/loader/*.cpp
+cmake -G Ninja -DBOILSTREAM_INTEGRATION_TESTS=OFF -S test/cpp -B build/cpp-tests
+ninja -C build/cpp-tests
+ctest --test-dir build/cpp-tests --output-on-failure
 ```
 
-### Run Only C++ Unit Tests
-```bash
-# Build the test binary
-make
+Without the environment variables the project falls back to `../../build/release` and the `duckdb`
+submodule. The Rust library is found under `<build>/cargo/build/*/release/` as either
+`libopaque_client.a` (standalone build) or `librust_bridge.a` (shared staticlib in the BoilStream fork).
 
-# Run with Catch2 options
-./build/release/test/unittest --test-case="*boilstream*"
-```
+| Executable | Tags | Covers |
+|------------|------|--------|
+| `boilstream_test` | `[security]` | Token format validation, session state, connection user mapping, bootstrap hash, thread safety (`[.]`, hidden). |
+| `boilstream_crypto_test` | `[crypto]` | HKDF key derivation, response signature verification, header extraction, secure zeroization, constant-time HMAC compare, canonical response format, refresh-token derivation and storage round-trip. |
+| `boilstream_conformance_test` | `[conformance]` | RFC 4231 / RFC 5869 / SHA-256 vectors, SECURITY_SPECIFICATION.md key derivation, canonical formats, request signing, response verification, AES-256-GCM. |
+| `boilstream_encryption_test` | `[encryption]` | Response decryption and HMAC ordering. |
+| `boilstream_catalog_version_test` | `[catalog_versions]` | Catalog version polling route, rate limiting, per-connection tracking. |
+| `boilstream_connection_state_test` | `[connection]` | Per-connection state isolation, expiration sentinels, snapshot thread safety. |
+| `session_routing_test` | `[session-routing]` | Connection-id to session routing, re-bootstrap, concurrency. |
+| `input_validation_test` | `[input_validation]` | Malformed JSON, size limits, SQL injection in values, error-message hygiene. |
+| `quack_attach_red_test` | `[quack]` | Managed catalog credential vending, user secret precedence, RFC 3339 expiry. |
+| `quack_bridge_test` | `[quack_bridge]` | Planner/authorizer bridge ABI, fail-closed behaviour, session registry lifetime. |
+| `aws_signing_test`, `registration_ffi_test` | `[aws]`, `[registration]` | Rust FFI: SigV4 signing, registration validation, TOTP URI. |
+| `wasm_lock_ordering_test` | `[wasm]` | Lock ordering patterns, no DuckDB dependency. |
 
-### Run Specific Test Cases
-```bash
-# Run only PKCE tests
-./build/release/test/unittest --test-case="*PKCE*"
+### Integration lane (off in the commands above)
 
-# Run only security tests
-./build/release/test/unittest --tag="[security]"
+`boilstream_integration_test` (`-DBOILSTREAM_INTEGRATION_TESTS=ON`, the default) loads the *loadable*
+`boilstream.duckdb_extension` into DuckDB together with stock `httpfs` and `quack` artifacts from one
+extension directory (`BOILSTREAM_HTTPFS_EXTENSION_PATH`, `BOILSTREAM_QUACK_EXTENSION_PATH`). The
+`[local]` cases run in CTest; the `[server]` cases need a running boilstream server and single-use
+bootstrap tokens (`BOILSTREAM_TEST_ENDPOINT`). It needs 2.0-compatible httpfs and quack artifacts.
 
-# Run with verbose output
-./build/release/test/unittest --test-case="*boilstream*" --success
-```
+## Not covered without a server
 
-### Run Only SQL Tests
-```bash
-python3 scripts/run_tests_one_by_one.py test/sql/boilstream*.test
-```
+Token exchange and rotation, server response parsing, network error handling and concurrent rotation
+need a boilstream server; they belong to the product and staging gates.
 
-## Test Coverage
+## Adding tests
 
-### Security Fixes Tested
-
-All critical and high-priority security fixes from v0.2.0 are covered:
-
-| Fix | C++ Test | SQL Test |
-|-----|----------|----------|
-| CRITICAL-1: PKCE rotation protocol | ✅ (challenge computation) | N/A |
-| CRITICAL-2: Weak RNG | ✅ (entropy, distribution) | N/A |
-| CRITICAL-3: Race conditions | ✅ (thread safety) | N/A |
-| HIGH-4: Bootstrap token leakage | ✅ (implicit) | ✅ (validation) |
-| HIGH-5: Inconsistent state | N/A (integration) | ✅ (error paths) |
-| HIGH-6: Exchange race condition | ✅ (thread safety) | N/A |
-| HIGH-7: Token validation | ✅ (format checks) | ✅ (error messages) |
-| HIGH-8: Rotation failures | N/A (integration) | N/A |
-| HIGH-9: URL bypass | N/A | ✅ (comprehensive) |
-
-### What's NOT Tested (Requires Mock Server)
-
-These require a running test server with PKCE endpoints:
-
-- **Token Exchange Flow**: Actual HTTP exchange of bootstrap → session token
-- **Token Rotation Flow**: Actual rotation with new code_challenge
-- **Server Response Validation**: Parsing real server responses
-- **Network Error Handling**: Timeout, connection failures, retries
-- **Multi-threaded Token Rotation**: Concurrent rotation under load
-
-**Recommendation**: Implement integration tests with a mock HTTP server or test against a real development server.
-
-## Test Maintenance
-
-### Adding New Tests
-
-**C++ Unit Test:**
-1. Add test case to `test/cpp/test_boilstream_security.cpp`
-2. Use Catch2 `TEST_CASE` macro with appropriate tags
-3. Rebuild: `make`
-
-**SQL Test:**
-1. Add test to `test/sql/boilstream_security.test` or create new `.test` file
-2. Follow SQLLogicTest format (see existing tests)
-3. Run: `make test`
-
-### Debugging Failed Tests
-
-**C++ Tests:**
-```bash
-# Run with GDB
-gdb ./build/debug/test/unittest
-(gdb) run --test-case="*PKCE*"
-
-# Run with verbose output
-./build/release/test/unittest --test-case="*boilstream*" --success --break
-```
-
-**SQL Tests:**
-```bash
-# Run single test file with verbose output
-python3 scripts/run_tests_one_by_one.py test/sql/boilstream_security.test --verbose
-```
-
-## Continuous Integration
-
-These tests should be run as part of CI/CD:
-
-```yaml
-# Example GitHub Actions workflow
-- name: Build Extension
-  run: make release
-
-- name: Run Unit Tests
-  run: make test
-
-- name: Run C++ Tests
-  run: ./build/release/test/unittest --test-case="*boilstream*"
-
-- name: Run SQL Tests
-  run: make test_debug
-```
-
-## Performance Benchmarks
-
-Some tests include performance assertions:
-
-- **Code Verifier Generation**: Should generate 1000 unique values in < 1 second
-- **Challenge Computation**: Should compute 1000 challenges in < 1 second
-- **Concurrent Access**: 10 threads × 100 operations should complete in < 5 seconds
-
-If these fail, there may be a performance regression.
-
-## Security Test Philosophy
-
-These tests verify **defensive security properties**:
-
-1. **Randomness Quality**: PKCE verifiers are cryptographically random
-2. **Input Validation**: All inputs are validated before use
-3. **Error Handling**: Errors don't leak sensitive information
-4. **Thread Safety**: No race conditions under concurrent access
-5. **Protocol Correctness**: PKCE implementation follows RFC 7636
-
-**What We Don't Test (Out of Scope):**
-- Offensive security (penetration testing)
-- Server-side vulnerabilities
-- Network-level attacks (MITM, etc.)
-- Social engineering
-
-## Future Test Additions
-
-Recommended additions for comprehensive coverage:
-
-1. **Mock HTTP Server**: Test full exchange and rotation flows
-2. **Fuzzing**: Random input fuzzing for crash detection
-3. **Load Testing**: High-concurrency scenarios (1000+ threads)
-4. **Memory Safety**: Valgrind/AddressSanitizer tests
-5. **Timing Attacks**: Constant-time operation verification
-6. **Integration Tests**: Test with real DuckDB secrets storage
-
-## Contact
-
-For questions about tests or to report test failures:
-- File an issue: https://github.com/yourusername/boilstream-extension/issues
-- Include test output and DuckDB version
+- SQL: add a `.test` file under `test/sql/`; start with `require boilstream` (and `require quack` when
+  the quack extension is needed). Assert behaviour (results or error text), not just `statement ok`.
+- C++: add a `TEST_CASE` to the matching file, or a new executable in `test/cpp/CMakeLists.txt` linked
+  through `link_duckdb_static(<target>)` when it needs DuckDB.

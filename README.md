@@ -6,11 +6,16 @@ It incorporates industrial grade e2e application level security even inside the 
 
 > You can also create your own server that implements the required [REST API](src/README.md) to work with `boilstream` extension.
 
+## Requirements
+
+DuckDB **v2.0.0 or newer**. The extension is built against the DuckDB 2.0 C++ API and does not load
+into DuckDB 1.x. The standalone build (`make`) needs the `duckdb` submodule on a v2.0 tag.
+
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)
 2. Open BoilStream [web auth console](https://docs.boilstream.com/guide/auth/postgresql-web-auth.html#_2-login-options), register, and generate web token
-3. Load the extension and provide token using PRAGMA as below
+3. Load the extension and provide token using PRAGMA (or the statement form) as below
 
 ```
 % duckdb # -unsigned
@@ -42,6 +47,34 @@ D FROM duckdb_secrets();
 │ test_crud    │ s3      │ config   │ true       │ boilstream │ ['s3://', 's3n://'…  │ name=test_crud;type=s3;provider=config;serializable=true;scope=s3://,s3n://,s3a…  │
 └──────────────┴─────────┴──────────┴────────────┴────────────┴──────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Statement syntax (DuckDB 2.0)
+
+Every `PRAGMA boilstream_*` command also has a statement form, added through a DuckDB 2.0 grammar
+extension named `boilstream`. Both forms run the same implementation:
+
+```sql
+BOILSTREAM BOOTSTRAP SESSION 'https://localhost/secrets:<token>';
+BOILSTREAM LOGIN 'https://localhost/user@example.com' 'password' '123456';
+BOILSTREAM REGISTER USER 'https://localhost/user@example.com' 'password';
+BOILSTREAM VERIFY MFA '123456';
+CREATE DUCKLAKE 'my_lake' 'optional description';
+ATTACH DUCKLAKE '<catalog-uuid>' AS my_lake;
+BOILSTREAM HELP;
+```
+
+The grammar is activated automatically for every connection opened after the extension loaded, which
+covers builds that link the extension statically. A connection that already existed when `LOAD
+boilstream` ran, and the DuckDB CLI (which selects its own `shell` grammar when it opens a database),
+activate it explicitly:
+
+```sql
+SET active_grammar_extensions = ['boilstream'];          -- any connection
+SET active_grammar_extensions = ['shell', 'boilstream']; -- DuckDB CLI, keeps the CLI shorthand
+```
+
+`RESET active_grammar_extensions` turns the statements back into syntax errors; the PRAGMA forms always
+work. Note that DuckDB 2.0 parses dotted setting names only when quoted: `SET "boilstream.tenant_id" = ...`.
 
 ## Local development: skipping TLS verification
 
