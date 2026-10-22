@@ -2221,6 +2221,10 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  'For production: Use Web Auth GUI or clear history: rm ~/.duckdb_history',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'NOTE: Each DuckDB connection has its own independent session state.',\n";
+	result_sql += "  'Every PRAGMA below also has a statement form (DuckDB 2.0+): BOILSTREAM LOGIN ... ,',\n";
+	result_sql += "  'BOILSTREAM REGISTER USER ... , BOILSTREAM VERIFY MFA ... , BOILSTREAM BOOTSTRAP SESSION ... ,',\n";
+	result_sql += "  'CREATE DUCKLAKE ''name'' [''description''], ATTACH DUCKLAKE ''<uuid>'' AS alias, BOILSTREAM HELP.',\n";
+	result_sql += "  'If a statement form reports a syntax error: SET active_grammar_extensions = [''boilstream''];',\n";
 	result_sql += "  'Sessions expire after ~24h. Run SELECT * FROM duckdb_secrets() to refresh.',\n";
 	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
 	result_sql += "  '',\n";

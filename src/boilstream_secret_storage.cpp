@@ -372,7 +372,9 @@ static inline string RequireStr(yyjson_val *val, const char *field_name) {
 }
 
 RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p)
-    : CatalogSetSecretStorage(db_p, "boilstream", 5), // offset=5 for higher priority than built-in storages (10, 20)
+    // Tie-break offset 7: below the connection-scoped storage (5), so a secret a user created for this
+    // connection wins a tie, but ahead of the temporary (10) and local file (20) storages.
+    : CatalogSetSecretStorage(db_p, "boilstream", 7),
       endpoint_url(endpoint_url_p) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
 	persistent = true; // Acts as persistent storage

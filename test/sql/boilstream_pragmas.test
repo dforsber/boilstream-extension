@@ -1,0 +1,121 @@
+# name: test/sql/boilstream_pragmas.test
+# description: Argument validation and no-session failure paths of the boilstream PRAGMAs and table functions
+# group: [sql]
+
+require boilstream
+
+# Every PRAGMA / table function is registered under its documented name.
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_type IN ('pragma', 'table') AND function_name IN (
+    'boilstream_bootstrap_session', 'boilstream_login', 'boilstream_register_user', 'boilstream_verify_mfa',
+    'boilstream_help', 'boilstream_create_ducklake', 'boilstream_attach_ducklake',
+    'boilstream_ducklakes', 'boilstream_buckets', 'boilstream_secrets');
+----
+10
+
+# Pragma names are identifiers: case does not matter.
+statement ok
+PRAGMA BOILSTREAM_HELP;
+
+# boilstream_bootstrap_session validates the URL before any network access.
+statement error
+PRAGMA boilstream_bootstrap_session('ftp://localhost/secrets:token');
+----
+URL must start with http:// or https://
+
+statement error
+PRAGMA boilstream_bootstrap_session('https://localhost/secrets');
+----
+URL must include token after ':'
+
+statement error
+PRAGMA boilstream_bootstrap_session('https://localhost/secrets:');
+----
+Bootstrap token cannot be empty
+
+# Plain HTTP is only accepted for loopback hosts.
+statement error
+PRAGMA boilstream_bootstrap_session('http://example.com/secrets:token');
+----
+URL must use HTTPS
+
+statement error
+PRAGMA boilstream_bootstrap_session('http://localhost.example.com/secrets:token');
+----
+URL must use HTTPS
+
+# boilstream_login / boilstream_register_user validate the url_with_email form.
+statement error
+PRAGMA boilstream_login('https://localhost/', 'password', '123456');
+----
+Invalid URL format
+
+statement error
+PRAGMA boilstream_login('http://example.com/user@example.com', 'password', '123456');
+----
+URL must use HTTPS
+
+statement error
+PRAGMA boilstream_login('https://localhost/not-an-email', 'password', '123456');
+----
+Invalid email format
+
+statement error
+PRAGMA boilstream_register_user('https://localhost/not-an-email', 'password');
+----
+Invalid email address format
+
+# boilstream_verify_mfa requires a six digit TOTP code.
+statement error
+PRAGMA boilstream_verify_mfa('12345');
+----
+TOTP code must be 6 digits
+
+statement error
+PRAGMA boilstream_verify_mfa('12345a');
+----
+TOTP code must contain only digits
+
+# Without a bootstrapped session nothing talks to a server.
+statement error
+PRAGMA boilstream_create_ducklake('my_lake');
+----
+No endpoint configured
+
+statement error
+PRAGMA boilstream_attach_ducklake('7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10', 'my_lake');
+----
+requires an active Boilstream session
+
+statement error
+PRAGMA boilstream_attach_ducklake('7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10');
+----
+
+statement error
+SELECT * FROM boilstream_ducklakes();
+----
+No endpoint configured
+
+statement error
+SELECT * FROM boilstream_buckets();
+----
+No endpoint configured
+
+statement error
+SELECT * FROM boilstream_secrets();
+----
+No endpoint configured
+
+# Listing secrets without a session is not an error: the boilstream storage contributes nothing.
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'boilstream';
+----
+0
+
+# DuckDB 2.0 only parses dotted setting names when quoted. The tenant id the
+# extension reads through TryGetCurrentSetting lives under such a name.
+statement error
+SET boilstream.tenant_id = '42';
+----
+syntax error
