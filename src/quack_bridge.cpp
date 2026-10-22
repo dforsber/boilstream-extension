@@ -116,7 +116,7 @@ SessionRegistry &QuackSessionRegistry() {
 void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto verifier = JwtVerifierSlot().load(std::memory_order_acquire);
 	TernaryExecutor::Execute<string_t, string_t, string_t, bool>(
-	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    args.data[0], args.data[1], args.data[2], result,
 	    [verifier](string_t sid, string_t client_auth, string_t) {
 		    try {
 			    if (!verifier) {
@@ -153,7 +153,7 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 // same session exists; all operation authorization happens at the typed hook.
 void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	BinaryExecutor::Execute<string_t, string_t, bool>(
-	    args.data[0], args.data[1], result, args.size(), [](string_t sid, string_t) {
+	    args.data[0], args.data[1], result, [](string_t sid, string_t) {
 		    try {
 			    return GetQuackSessionCtx(std::string(sid.GetData(), sid.GetSize())).second;
 		    } catch (...) {

@@ -17,6 +17,7 @@
 #include "duckdb/parser/keyword_helper.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_extension.hpp"
+#include "boilstream_grammar.hpp"
 #include "opaque_client_ffi.hpp"
 #include "quack_bridge.hpp"
 #include "yyjson.hpp"
@@ -2424,6 +2425,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register the Quack session and typed catalog-capability bridge.
 	RegisterQuackBridge(loader);
 	BOILSTREAM_LOG("LoadInternal: Quack bridge scalar functions registered");
+
+	// First-class statement syntax (BOILSTREAM LOGIN ..., CREATE DUCKLAKE ...) on top of the PRAGMAs.
+	RegisterBoilstreamGrammar(loader);
+	BOILSTREAM_LOG("LoadInternal: grammar extension registered");
 
 	BOILSTREAM_LOG("LoadInternal: Extension loaded successfully");
 }

@@ -1,0 +1,120 @@
+# name: test/sql/boilstream_grammar.test
+# description: BOILSTREAM ... / CREATE DUCKLAKE / ATTACH DUCKLAKE statements map onto the boilstream PRAGMAs
+# group: [sql]
+
+require boilstream
+
+# The grammar extension is registered at load.
+query I
+SELECT name FROM duckdb_grammar_extensions() WHERE name = 'boilstream';
+----
+boilstream
+
+# Connections opened after the extension loaded get the grammar activated automatically.
+query I opened_after_load
+SELECT current_setting('active_grammar_extensions');
+----
+[boilstream]
+
+# The test runner opened its default connection before `require boilstream` loaded the
+# extension, so this connection (like a CLI session that ran LOAD) activates it explicitly.
+statement ok
+SET active_grammar_extensions = ['boilstream'];
+
+# BOILSTREAM HELP produces exactly the rows of PRAGMA boilstream_help.
+query I nosort help_rows
+PRAGMA boilstream_help;
+----
+
+query I nosort help_rows
+BOILSTREAM HELP;
+----
+
+# Statement keywords are case-insensitive like the rest of SQL.
+query I nosort help_rows
+boilstream help;
+----
+
+# Arguments are routed into the PRAGMA implementation: the same validation fires.
+statement error
+BOILSTREAM VERIFY MFA 'abc';
+----
+TOTP code must be 6 digits
+
+statement error
+BOILSTREAM LOGIN 'not-a-url' 'password' '123456';
+----
+boilstream_login: Invalid URL format
+
+statement error
+BOILSTREAM REGISTER USER 'ftp://host/user@example.com' 'password';
+----
+boilstream_register_user: URL must start with http:// or https://
+
+statement error
+BOILSTREAM BOOTSTRAP SESSION 'http://example.com/secrets:token';
+----
+URL must use HTTPS
+
+statement error
+CREATE DUCKLAKE 'my_lake' 'a description';
+----
+boilstream_create_ducklake: No endpoint configured
+
+statement error
+ATTACH DUCKLAKE 'not-a-uuid' AS my_lake;
+----
+catalog_id must be a canonical UUID
+
+statement error
+ATTACH DUCKLAKE '7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10' AS my_lake;
+----
+requires an active Boilstream session
+
+# Wrong arity is a parse-time error that names the usage.
+statement error
+BOILSTREAM LOGIN 'https://localhost/user@example.com' 'password';
+----
+BOILSTREAM LOGIN 'url_with_email' 'password' 'mfa_code'
+
+statement error
+BOILSTREAM HELP 'extra';
+----
+BOILSTREAM HELP
+
+statement error
+CREATE DUCKLAKE 'a' 'b' 'c' 'd';
+----
+CREATE DUCKLAKE 'name'
+
+# Built-in statements that start with the same keywords still parse.
+statement ok
+ATTACH ':memory:' AS plain_attach;
+
+statement ok
+CREATE TABLE ducklake(i INTEGER);
+
+# The PRAGMA forms stay available and equivalent.
+statement error
+PRAGMA boilstream_verify_mfa('abc');
+----
+TOTP code must be 6 digits
+
+# Deactivating the grammar turns the statements into syntax errors; the PRAGMAs keep working.
+statement ok
+SET active_grammar_extensions = [];
+
+statement error
+BOILSTREAM HELP;
+----
+syntax error
+
+statement ok
+PRAGMA boilstream_help;
+
+statement ok
+SET active_grammar_extensions = ['boilstream'];
+
+query I nosort help_rows
+BOILSTREAM HELP;
+----
