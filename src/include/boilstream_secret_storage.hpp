@@ -153,7 +153,7 @@ public:
 	                                    optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Override to drop secret from REST API
-	void DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
+	void DropSecretByName(const Identifier &name, OnEntryNotFound on_entry_not_found,
 	                      optional_ptr<CatalogTransaction> transaction) override;
 
 	//! Make HTTP GET request to REST API (uses connection state from transaction)

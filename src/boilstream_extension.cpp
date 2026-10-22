@@ -10,6 +10,7 @@
 #include "duckdb/main/extension.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -147,7 +148,7 @@ struct BoilstreamDucklakesGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> BoilstreamDucklakesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("catalog_id");
 	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
@@ -383,7 +384,7 @@ static void BoilstreamDucklakesFunction(ClientContext &context, TableFunctionInp
 		count++;
 	}
 
-	output.SetCardinality(count);
+	output.SetCardinalityUnsafe(count);
 }
 
 //===--------------------------------------------------------------------===//
@@ -403,7 +404,7 @@ struct BoilstreamSecretsGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> BoilstreamSecretsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("name");
 	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
@@ -473,7 +474,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		vector<Value> row;
 
 		// name (strip tenant prefix for display)
-		row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(secret.GetName(), context)));
+		row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(secret.GetName().GetIdentifierName(), context)));
 
 		// type
 		row.emplace_back(Value(secret.GetType()));
@@ -490,7 +491,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		row.emplace_back(Value::LIST(LogicalType(LogicalTypeId::VARCHAR), scope_values));
 
 		// expires_at (get from storage using connection state)
-		auto expiration = storage->GetSecretExpiration(secret.GetName(), expiration_transaction);
+		auto expiration = storage->GetSecretExpiration(secret.GetName().GetIdentifierName(), expiration_transaction);
 		if (expiration == std::chrono::system_clock::time_point()) {
 			// No expiration data
 			row.emplace_back(Value());
@@ -523,7 +524,7 @@ static void BoilstreamSecretsFunction(ClientContext &context, TableFunctionInput
 		count++;
 	}
 
-	output.SetCardinality(count);
+	output.SetCardinalityUnsafe(count);
 }
 
 //===--------------------------------------------------------------------===//
@@ -543,7 +544,7 @@ struct BoilstreamBucketsGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> BoilstreamBucketsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("bucket_id");
 	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
@@ -716,7 +717,7 @@ static void BoilstreamBucketsFunction(ClientContext &context, TableFunctionInput
 		count++;
 	}
 
-	output.SetCardinality(count);
+	output.SetCardinalityUnsafe(count);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1055,7 +1056,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 				BOILSTREAM_LOG("SetEndpoint: Secret '" << entry.secret->GetName() << "' type='"
 				                                       << entry.secret->GetType() << "'");
 				if (entry.secret->GetType() == "ducklake") {
-					ducklake_names.push_back(entry.secret->GetName());
+					ducklake_names.push_back(entry.secret->GetName().GetIdentifierName());
 					BOILSTREAM_LOG("SetEndpoint: Found ducklake secret: " << entry.secret->GetName());
 				}
 			}
@@ -2168,7 +2169,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		// Collect legacy DuckLake secret names for the login summary only.
 		for (const auto &entry : secrets) {
 			if (entry.secret && entry.secret->GetType() == "ducklake") {
-				ducklake_names.push_back(entry.secret->GetName());
+				ducklake_names.push_back(entry.secret->GetName().GetIdentifierName());
 				BOILSTREAM_LOG("Login: Found ducklake secret: " << entry.secret->GetName());
 			}
 		}

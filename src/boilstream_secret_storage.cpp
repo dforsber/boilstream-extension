@@ -2184,7 +2184,7 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 	const auto result = Timestamp::TryConvertTimestampTZ(expires_at_str.c_str(), expires_at_str.size(), parsed, true,
 	                                                     has_offset, timezone);
 	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 ||
-	    !Timestamp::IsFinite(parsed)) {
+	    !parsed.IsFinite()) {
 		return std::chrono::system_clock::time_point::min();
 	}
 
@@ -2394,7 +2394,7 @@ void RestApiSecretStorage::ClearRegistrationState() {
 void RestApiSecretStorage::AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret,
                                                       optional_ptr<CatalogTransaction> transaction) {
 	auto trans = GetTransactionOrDefault(transaction);
-	auto secret_name = secret->GetName();
+	const Identifier secret_name = secret->GetName();
 
 	BOILSTREAM_LOG("AddOrUpdateSecretInCatalog: Adding '" << secret_name << "'");
 
@@ -3014,11 +3014,11 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	BOILSTREAM_LOG("StoreSecret: name=" << secret->GetName());
 
 	auto trans = GetTransactionOrDefault(transaction);
-	auto secret_name = secret->GetName();
+	const Identifier secret_name = secret->GetName();
 
 	// Check if secret exists in LOCAL CACHE ONLY (don't make HTTP request here - server will handle duplicates)
 	// This prevents recursive HTTP calls during StoreSecret
-	auto existing_local = CatalogSetSecretStorage::GetSecretByName(secret_name, transaction);
+	auto existing_local = CatalogSetSecretStorage::GetSecretByName(secret_name.GetIdentifierName(), transaction);
 	if (existing_local) {
 		BOILSTREAM_LOG("StoreSecret: found existing secret in local cache");
 		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
@@ -3038,7 +3038,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 			// Clear expiration
 			auto *conn_state = GetSession(transaction);
 			if (conn_state) {
-				ClearExpiration(secret_name, *conn_state);
+				ClearExpiration(secret_name.GetIdentifierName(), *conn_state);
 			}
 		}
 	}
@@ -3236,7 +3236,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	// conn_state already retrieved above
 	if (local_match.HasMatch() && conn_state) {
 		auto &secret_ref = local_match.GetSecret();
-		if (!IsExpired(secret_ref.GetName(), *conn_state)) {
+		if (!IsExpired(secret_ref.GetName().GetIdentifierName(), *conn_state)) {
 			// Not expired, use cached version
 			BOILSTREAM_LOG("LookupSecret EXIT: cached, not expired, name=" << secret_ref.GetName());
 			return local_match;
@@ -3321,7 +3321,7 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 		return SecretMatch();
 	}
 
-	auto secret_name = secret->GetName();
+	const string secret_name = secret->GetName().GetIdentifierName();
 
 	// Store expiration if provided
 	if (!expires_at_str.empty() && conn_state) {
@@ -3384,7 +3384,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 	// Determine if we have an expired cached version
 	bool has_expired_cache = false;
 	if (local_entry && local_entry->secret && conn_state) {
-		if (!IsExpired(local_entry->secret->GetName(), *conn_state)) {
+		if (!IsExpired(local_entry->secret->GetName().GetIdentifierName(), *conn_state)) {
 			// Not expired, use cached version
 			BOILSTREAM_LOG("GetSecretByName EXIT: cached, not expired, name=" << name);
 			return local_entry;
@@ -3674,7 +3674,7 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr
 			free(obj_str);
 
 			if (secret) {
-				auto secret_name = secret->GetName();
+				const string secret_name = secret->GetName().GetIdentifierName();
 				BOILSTREAM_LOG("AllSecrets: Adding secret '" << secret_name << "' to catalog");
 
 				// Store expiration if provided
@@ -3766,7 +3766,7 @@ void RestApiSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_e
 	BOILSTREAM_LOG("RemoveSecret: called for '" << name << "' (no-op, work done in DropSecretByName)");
 }
 
-void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
+void RestApiSecretStorage::DropSecretByName(const Identifier &name, OnEntryNotFound on_entry_not_found,
                                             optional_ptr<CatalogTransaction> transaction) {
 	BOILSTREAM_LOG("DropSecretByName: name=" << name);
 
@@ -3786,7 +3786,7 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 	}
 
 	// Build full URL with URL-encoded name
-	string delete_url = url + "/" + StringUtil::URLEncode(name);
+	string delete_url = url + "/" + StringUtil::URLEncode(name.GetIdentifierName());
 
 	// Append platform parameters (multitenant, wasm)
 	delete_url = AppendPlatformParams(delete_url, transaction);
@@ -3815,7 +3815,7 @@ void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound 
 
 	// Clear expiration metadata
 	if (conn_state) {
-		ClearExpiration(name, *conn_state);
+		ClearExpiration(name.GetIdentifierName(), *conn_state);
 	}
 }
 
@@ -3983,7 +3983,7 @@ SecretMatch RestApiSecretStorage::BuildManagedCatalogSecretMatch(const string &s
                                                                  const ManagedCatalogCredentialEnvelope &credential) {
 	const string secret_name = "__quack__" + scope_path;
 	vector<string> scope {scope_path};
-	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
+	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", Identifier(secret_name));
 	secret->secret_map["token"] = Value(credential.token);
 	secret->secret_map["endpoint"] = Value(credential.endpoint);
 	secret->secret_map["catalog_id"] = Value(credential.catalog_id);
