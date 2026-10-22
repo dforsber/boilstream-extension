@@ -197,13 +197,6 @@ TEST_CASE("Response Signature Verification - Valid Signature - Missing Header", 
 	                                                                    status_code, headers, fixture.session_key));
 }
 
-TEST_CASE("Response Signature Verification - Valid Signature - With Signature", "[boilstream][crypto][signature]") {
-	// This test verifies that signature verification works correctly
-	// Full signature verification is tested in the invalid signature test cases
-	TestFixture fixture;
-	REQUIRE(true);
-}
-
 TEST_CASE("Response Signature Verification - Invalid Signature", "[boilstream][crypto][signature]") {
 	TestFixture fixture;
 
@@ -321,56 +314,6 @@ TEST_CASE("Helper - ExtractBoilstreamHeaders", "[boilstream][helpers]") {
 
 		auto extracted = BoilstreamCryptoTestAccess::ExtractBoilstreamHeaders(storage.get(), empty_headers);
 		REQUIRE(extracted.empty());
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// Test: Access Token Format Validation
-//===----------------------------------------------------------------------===//
-TEST_CASE("Access Token Format Validation", "[boilstream][crypto][validation]") {
-	// Note: ValidateTokenFormat is tested in test_boilstream_security.cpp
-	// Here we test the PerformOpaqueLogin path which validates access_token format
-
-	TestFixture fixture;
-
-	SECTION("Valid 64-char hex access_token passes validation") {
-		// This would be tested as part of OPAQUE login flow
-		// The actual implementation validates in PerformOpaqueLogin
-
-		string valid_token = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-		REQUIRE(valid_token.length() == 64);
-
-		// Verify all characters are lowercase hex
-		for (char c : valid_token) {
-			REQUIRE(((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')));
-		}
-	}
-
-	SECTION("Invalid access_token format (uppercase) would fail validation") {
-		string invalid_token = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
-
-		// This has uppercase characters, which violates the spec
-		bool has_uppercase = false;
-		for (char c : invalid_token) {
-			if (c >= 'A' && c <= 'F') {
-				has_uppercase = true;
-				break;
-			}
-		}
-		REQUIRE(has_uppercase);
-	}
-
-	SECTION("Invalid access_token format (too short) would fail validation") {
-		string short_token = "abcdef0123456789"; // Only 16 chars
-		REQUIRE(short_token.length() < 64);
-	}
-
-	SECTION("Invalid access_token format (with special chars) would fail validation") {
-		std::string invalid_token = "abcdef0123456789-abcdef0123456789-abcdef0123456789-abcdef012345";
-
-		// Has dashes, which are not allowed
-		bool has_dash = (invalid_token.find('-') != std::string::npos);
-		REQUIRE(has_dash);
 	}
 }
 

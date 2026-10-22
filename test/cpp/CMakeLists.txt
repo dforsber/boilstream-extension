@@ -24,6 +24,9 @@ else()
   set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
 endif()
 
+option(BOILSTREAM_INTEGRATION_TESTS
+       "Build the stock-DuckDB integration lane (needs compatible httpfs and quack artifacts)" ON)
+
 # The public extension uses the stock httpfs and Quack client extensions at
 # runtime, but its standalone build does not necessarily build either external
 # dependency. Require the integration lane to name the exact compatible
@@ -34,6 +37,8 @@ set(BOILSTREAM_HTTPFS_EXTENSION_PATH
 set(BOILSTREAM_QUACK_EXTENSION_PATH
     ""
     CACHE FILEPATH "Path to a DuckDB-compatible quack.duckdb_extension")
+
+if(BOILSTREAM_INTEGRATION_TESTS)
 
 function(resolve_required_extension_artifact variable_name artifact_name)
   set(candidate "${${variable_name}}")
@@ -72,10 +77,12 @@ endif()
 get_filename_component(_stock_version_dir "${_quack_platform_dir}" DIRECTORY)
 get_filename_component(BOILSTREAM_STOCK_EXTENSION_DIRECTORY
                        "${_stock_version_dir}" DIRECTORY)
+endif()
 
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
 file(GLOB_RECURSE RUST_LIB_CANDIDATES
-     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a")
+     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a"
+     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/librust_bridge.a")
 
 if(RUST_LIB_CANDIDATES)
   list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
@@ -105,14 +112,12 @@ else()
 endif()
 
 set(DUCKDB_LIBS
-    "${EXTENSION_BUILD_DIR}/src/libduckdb_static.a"
-    # v1.5 split ExtensionHelper::LoadAllExtensions out of libduckdb_static.a
-    # into a separate loader library. Link the dummy loader so test executables
-    # that do `DuckDB(":memory:")` resolve the symbol.
-    "${EXTENSION_BUILD_DIR}/extension/libdummy_static_extension_loader.a"
+    # DuckDB 2.0: extension archives go before libduckdb_static.a and are registered by
+    # static_extension_loader.c (see link_duckdb_static below).
     "${EXTENSION_BUILD_DIR}/extension/boilstream/libboilstream_extension.a"
     "${EXTENSION_BUILD_DIR}/extension/parquet/libparquet_extension.a"
     "${EXTENSION_BUILD_DIR}/extension/core_functions/libcore_functions_extension.a"
+    "${EXTENSION_BUILD_DIR}/src/libduckdb_static.a"
     "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a"
     "${EXTENSION_BUILD_DIR}/third_party/fmt/libduckdb_fmt.a"
     "${EXTENSION_BUILD_DIR}/third_party/yyjson/libduckdb_yyjson.a"
@@ -123,8 +128,18 @@ set(DUCKDB_LIBS
     "${EXTENSION_BUILD_DIR}/third_party/fastpforlib/libduckdb_fastpforlib.a"
     "${EXTENSION_BUILD_DIR}/third_party/fsst/libduckdb_fsst.a"
     "${EXTENSION_BUILD_DIR}/third_party/utf8proc/libduckdb_utf8proc.a"
-    "${EXTENSION_BUILD_DIR}/third_party/skiplist/libduckdb_skiplistlib.a"
-    "${EXTENSION_BUILD_DIR}/third_party/libpg_query/libduckdb_pg_query.a")
+    "${EXTENSION_BUILD_DIR}/third_party/skiplist/libduckdb_skiplistlib.a")
+
+# Links DuckDB plus the extension archives above into a test program and compiles the
+# static extension loader into it (it must be a program source, not an archive member).
+function(link_duckdb_static target_name)
+  target_sources(
+    ${target_name}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/static_extension_loader.c
+            ${DUCKDB_SOURCE_DIR}/extension/loader/static_extension_autoregister.cpp)
+  target_include_directories(${target_name} PRIVATE ${DUCKDB_SOURCE_DIR}/src/include)
+  target_link_libraries(${target_name} PRIVATE ${DUCKDB_LIBS})
+endfunction()
 
 # Check if extension is built
 if(NOT EXISTS "${EXTENSION_BUILD_DIR}/src/libduckdb_static.a")
@@ -202,11 +217,13 @@ function(link_rust_dependencies target_name)
 endfunction()
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
+target_link_libraries(boilstream_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_test)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_test)
 
+if(BOILSTREAM_INTEGRATION_TESTS)
 # Integration test executable
 add_executable(boilstream_integration_test test_boilstream_integration.cpp)
 
@@ -230,6 +247,7 @@ elseif(EXISTS "/usr/local/lib/libduckdb.dylib")
 else()
   target_link_libraries(boilstream_integration_test PRIVATE Catch2::Catch2)
   message(WARNING "System DuckDB not found - integration tests may not run")
+endif()
 endif()
 
 # AWS Signing test executable (links with Rust library)
@@ -271,8 +289,8 @@ target_include_directories(
 target_compile_definitions(boilstream_crypto_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_crypto_test PRIVATE ${DUCKDB_LIBS}
-                                                     Catch2::Catch2)
+target_link_libraries(boilstream_crypto_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_crypto_test)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_crypto_test)
@@ -296,8 +314,8 @@ target_include_directories(
 target_compile_definitions(boilstream_conformance_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_conformance_test PRIVATE ${DUCKDB_LIBS}
-                                                          Catch2::Catch2)
+target_link_libraries(boilstream_conformance_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_conformance_test)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_conformance_test)
@@ -320,8 +338,8 @@ target_include_directories(
 target_compile_definitions(boilstream_encryption_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_encryption_test PRIVATE ${DUCKDB_LIBS}
-                                                         Catch2::Catch2)
+target_link_libraries(boilstream_encryption_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_encryption_test)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_encryption_test)
@@ -344,8 +362,8 @@ target_compile_definitions(boilstream_catalog_version_test
                            PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_catalog_version_test PRIVATE ${DUCKDB_LIBS}
-                                                              Catch2::Catch2)
+target_link_libraries(boilstream_catalog_version_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_catalog_version_test)
 
 # Link Rust dependencies
 link_rust_dependencies(boilstream_catalog_version_test)
@@ -366,8 +384,8 @@ target_compile_definitions(boilstream_connection_state_test
 
 # Link extension's DuckDB libraries (connection state is header-only, just needs
 # DuckDB)
-target_link_libraries(boilstream_connection_state_test PRIVATE ${DUCKDB_LIBS}
-                                                               Catch2::Catch2)
+target_link_libraries(boilstream_connection_state_test PRIVATE Catch2::Catch2)
+link_duckdb_static(boilstream_connection_state_test)
 
 # Link Rust dependencies (needed for DuckDB static lib)
 link_rust_dependencies(boilstream_connection_state_test)
@@ -395,8 +413,8 @@ target_include_directories(
 
 target_compile_definitions(session_routing_test PRIVATE BOILSTREAM_DEBUG)
 
-target_link_libraries(session_routing_test PRIVATE ${DUCKDB_LIBS}
-                                                   Catch2::Catch2)
+target_link_libraries(session_routing_test PRIVATE Catch2::Catch2)
+link_duckdb_static(session_routing_test)
 link_rust_dependencies(session_routing_test)
 
 # Input validation test executable (malicious/empty value handling)
@@ -416,8 +434,8 @@ target_include_directories(
 target_compile_definitions(input_validation_test PRIVATE BOILSTREAM_DEBUG)
 
 # Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(input_validation_test PRIVATE ${DUCKDB_LIBS}
-                                                    Catch2::Catch2)
+target_link_libraries(input_validation_test PRIVATE Catch2::Catch2)
+link_duckdb_static(input_validation_test)
 
 # Link Rust dependencies
 link_rust_dependencies(input_validation_test)
@@ -439,8 +457,8 @@ target_include_directories(
 
 target_compile_definitions(quack_attach_red_test PRIVATE BOILSTREAM_DEBUG)
 
-target_link_libraries(quack_attach_red_test PRIVATE ${DUCKDB_LIBS}
-                                                    Catch2::Catch2)
+target_link_libraries(quack_attach_red_test PRIVATE Catch2::Catch2)
+link_duckdb_static(quack_attach_red_test)
 link_rust_dependencies(quack_attach_red_test)
 
 # Quack planner bridge ABI tests compile the bridge source under review rather
@@ -454,7 +472,8 @@ target_include_directories(
   quack_bridge_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
                             ${DUCKDB_SOURCE_DIR}/src/include)
 
-target_link_libraries(quack_bridge_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2)
+target_link_libraries(quack_bridge_test PRIVATE Catch2::Catch2)
+link_duckdb_static(quack_bridge_test)
 link_rust_dependencies(quack_bridge_test)
 
 # Enable testing
@@ -472,6 +491,7 @@ add_test(NAME InputValidationTests COMMAND input_validation_test)
 # The CTest lane is deliberately non-interactive: it proves that the exact
 # loadable artifact works in stock DuckDB. Server/OPAQUE cases require
 # single-use credentials and belong to the product and staging gates.
+if(BOILSTREAM_INTEGRATION_TESTS)
 add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test
                                                  "[local]")
 set_tests_properties(
@@ -480,6 +500,7 @@ set_tests_properties(
     ENVIRONMENT
     "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_STOCK_EXTENSION_DIRECTORY=${BOILSTREAM_STOCK_EXTENSION_DIRECTORY}"
 )
+endif()
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)

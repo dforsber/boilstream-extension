@@ -492,36 +492,6 @@ TEST_CASE("Token Expiration Per Connection", "[boilstream][connection]") {
 }
 
 //===----------------------------------------------------------------------===//
-// Test: Connection Destruction Cleanup
-//===----------------------------------------------------------------------===//
-TEST_CASE("Connection Destruction Cleanup", "[boilstream][connection]") {
-	DuckDB db(nullptr);
-
-	SECTION("State is cleaned up when connection is destroyed") {
-		BoilstreamConnectionState *state_ptr = nullptr;
-
-		{
-			Connection con(db);
-			auto &state = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con.context);
-
-			// Set some state
-			BoilstreamConnectionStateTestAccess::SetAccessToken(
-			    state, "temp-token-abcdef1234567890abcdef1234567890abcdef1234567890");
-			duckdb::vector<uint8_t> key(32, 0xFF);
-			BoilstreamConnectionStateTestAccess::SetSessionKey(state, key);
-
-			state_ptr = &state;
-		}
-		// Connection destroyed here
-
-		// Note: We can't safely access state_ptr after destruction
-		// The test validates that destruction happens without crash
-		// The destructor calls ClearSession() which securely wipes memory
-		REQUIRE(true); // If we get here, destruction was clean
-	}
-}
-
-//===----------------------------------------------------------------------===//
 // Test: Catalog Version Isolation
 //===----------------------------------------------------------------------===//
 TEST_CASE("Catalog Version Isolation", "[boilstream][connection]") {
