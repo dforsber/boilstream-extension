@@ -203,7 +203,7 @@ struct BridgeDatabase {
 
 	BridgeDatabase() {
 		ExtensionInfo extension_info {};
-		ExtensionActiveLoad load_info {*db.instance, extension_info, "boilstream_bridge_test"};
+		ExtensionActiveLoad load_info {*db.instance, extension_info, "boilstream_bridge_test", "boilstream_bridge_test"};
 		ExtensionLoader loader {load_info};
 		RegisterQuackBridge(loader);
 	}
@@ -260,7 +260,7 @@ struct BridgeFixture {
 		const auto query_error = result->HasError() ? result->GetError() : "";
 		INFO(query_error);
 		REQUIRE(!result->HasError());
-		REQUIRE(result->GetValue(0, 0).GetValue<bool>());
+		REQUIRE(result->Collection().GetValue(0, 0).GetValue<bool>());
 	}
 
 	~BridgeFixture() {
