@@ -7,6 +7,8 @@
 
 #include "boilstream_grammar.hpp"
 
+#include <cstdlib>
+
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
@@ -160,6 +162,12 @@ public:
 		if (context.TryGetCurrentSetting(BOILSTREAM_GRAMMAR_AUTO_ACTIVATE_OPTION, auto_activate) &&
 		    !auto_activate.IsNull() && !auto_activate.GetValue<bool>()) {
 			return; // opted out (e.g. test harnesses that measure the base grammar)
+		}
+		// Statically linked extensions register their options after DuckDB validates pre-init options, so a
+		// harness that must opt out before the first connection uses the environment instead.
+		if (const char *env = std::getenv("BOILSTREAM_GRAMMAR_AUTO_ACTIVATE");
+		    env && (std::string(env) == "0" || std::string(env) == "false")) {
+			return;
 		}
 		vector<string> extensions {BOILSTREAM_GRAMMAR_NAME};
 		config.cached_grammar = CompiledGrammar::Create(context, extensions);
