@@ -74,20 +74,28 @@ void ClearCatalogPlanDataOutputs(uint32_t *operation_out, char *catalog_id_out, 
 
 } // namespace
 
+namespace duckdb {
+//! Installs the fail-closed admission hooks into Quack once the Rust host has registered a planner.
+void InstallQuackAdmissionHooksIfHosted();
+} // namespace duckdb
+
 extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn) {
 	JwtVerifierSlot().store(fn, std::memory_order_release);
 }
 
 extern "C" void boilstream_quack_set_catalog_planner(boilstream_quack_catalog_planner_fn fn) {
 	CatalogPlannerSlot().store(fn, std::memory_order_release);
+	duckdb::InstallQuackAdmissionHooksIfHosted();
 }
 
 extern "C" void boilstream_quack_set_catalog_authorizer(boilstream_quack_catalog_authorizer_fn fn) {
 	CatalogAuthorizerSlot().store(fn, std::memory_order_release);
+	duckdb::InstallQuackAdmissionHooksIfHosted();
 }
 
 extern "C" void boilstream_quack_set_post_execute_hook(boilstream_quack_post_execute_fn fn) {
 	PostExecuteSlot().store(fn, std::memory_order_release);
+	duckdb::InstallQuackAdmissionHooksIfHosted();
 }
 
 typedef void (*quack_set_catalog_admission_hooks_fn_t)(decltype(&boilstream_quack_catalog_plan) planner,
@@ -97,6 +105,17 @@ typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint3
 
 namespace duckdb {
 namespace {
+
+struct QuackHookSetterSlots {
+	std::atomic<quack_set_catalog_admission_hooks_fn_t> admission {nullptr};
+	std::atomic<quack_set_post_execute_hook_fn_t> post_execute {nullptr};
+	std::atomic<bool> installed {false};
+};
+
+QuackHookSetterSlots &QuackHookSetters() {
+	static auto *slots = new QuackHookSetterSlots();
+	return *slots;
+}
 
 struct SessionRegistry {
 	std::mutex mutex;
@@ -190,16 +209,31 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	                                       LogicalType::BOOLEAN, BoilstreamQuackAuthzFunction));
 	loader.RegisterFunction(ScalarFunction("boilstream_quack_debug_session_count", {}, LogicalType::INTEGER,
 	                                       BoilstreamQuackDebugSessionCountFunction));
-	auto admission_setter = reinterpret_cast<quack_set_catalog_admission_hooks_fn_t>(
-	    boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks"));
-	auto post_setter = reinterpret_cast<quack_set_post_execute_hook_fn_t>(
-	    boilstream_lookup_runtime_symbol("quack_set_post_execute_hook"));
-	if (admission_setter) {
-		admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
-		                 &boilstream_quack_catalog_session_close);
+	// Quack's admission hooks are installed only once a Rust host has registered a catalog planner
+	// (InstallQuackAdmissionHooksIfHosted). Until then a statically linked Quack keeps its stock
+	// behaviour, so standalone binaries and Quack's own tests are not failed closed by an absent host.
+	QuackHookSetters().admission.store(reinterpret_cast<quack_set_catalog_admission_hooks_fn_t>(
+	                                       boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks")),
+	                                   std::memory_order_release);
+	QuackHookSetters().post_execute.store(reinterpret_cast<quack_set_post_execute_hook_fn_t>(
+	                                          boilstream_lookup_runtime_symbol("quack_set_post_execute_hook")),
+	                                      std::memory_order_release);
+	InstallQuackAdmissionHooksIfHosted();
+}
+
+void InstallQuackAdmissionHooksIfHosted() {
+	if (!CatalogPlannerSlot().load(std::memory_order_acquire)) {
+		return; // no host yet
 	}
-	if (post_setter) {
-		post_setter(&boilstream_quack_catalog_post_execute);
+	auto &setters = QuackHookSetters();
+	if (!setters.installed.exchange(true)) {
+		if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {
+			admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
+			                 &boilstream_quack_catalog_session_close);
+		}
+		if (auto post_setter = setters.post_execute.load(std::memory_order_acquire)) {
+			post_setter(&boilstream_quack_catalog_post_execute);
+		}
 	}
 }
 

@@ -156,6 +156,11 @@ public:
 		if (!config.active_grammar_extensions.empty()) {
 			return;
 		}
+		Value auto_activate;
+		if (context.TryGetCurrentSetting(BOILSTREAM_GRAMMAR_AUTO_ACTIVATE_OPTION, auto_activate) &&
+		    !auto_activate.IsNull() && !auto_activate.GetValue<bool>()) {
+			return; // opted out (e.g. test harnesses that measure the base grammar)
+		}
 		vector<string> extensions {BOILSTREAM_GRAMMAR_NAME};
 		config.cached_grammar = CompiledGrammar::Create(context, extensions);
 		config.active_grammar_extensions = std::move(extensions);
@@ -166,6 +171,10 @@ public:
 
 void RegisterBoilstreamGrammar(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
+	DBConfig::GetConfig(db).AddExtensionOption(
+	    BOILSTREAM_GRAMMAR_AUTO_ACTIVATE_OPTION,
+	    "Activate the boilstream SQL syntax (BOILSTREAM ..., CREATE/ATTACH DUCKLAKE) on every new connection",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	GrammarExtension::Register(db, make_shared_ptr<BoilstreamGrammar>());
 	ExtensionCallback::Register(DBConfig::GetConfig(db), make_shared_ptr<BoilstreamGrammarActivator>());
 }

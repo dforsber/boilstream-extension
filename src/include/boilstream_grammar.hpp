@@ -18,6 +18,7 @@ namespace duckdb {
 //! Name of the grammar extension, as listed in duckdb_grammar_extensions() and
 //! accepted by SET active_grammar_extensions = ['boilstream'].
 constexpr const char *BOILSTREAM_GRAMMAR_NAME = "boilstream";
+constexpr const char *BOILSTREAM_GRAMMAR_AUTO_ACTIVATE_OPTION = "boilstream_grammar_auto_activate";
 
 //! Register the grammar extension and the per-connection activation callback.
 void RegisterBoilstreamGrammar(ExtensionLoader &loader);
