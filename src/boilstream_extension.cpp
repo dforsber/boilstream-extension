@@ -357,7 +357,7 @@ static void BoilstreamDucklakesFunction(ClientContext &context, TableFunctionInp
 		count++;
 	}
 
-	output.SetCardinalityUnsafe(count);
+	output.SetChildCardinality(count); // sizes the vectors filled by SetValue (2.0: vectors carry their own size)
 }
 
 //===--------------------------------------------------------------------===//
@@ -493,7 +493,7 @@ static void BoilstreamSecretsFunction(ClientContext &context, TableFunctionInput
 		count++;
 	}
 
-	output.SetCardinalityUnsafe(count);
+	output.SetChildCardinality(count); // sizes the vectors filled by SetValue (2.0: vectors carry their own size)
 }
 
 //===--------------------------------------------------------------------===//
@@ -683,7 +683,7 @@ static void BoilstreamBucketsFunction(ClientContext &context, TableFunctionInput
 		count++;
 	}
 
-	output.SetCardinalityUnsafe(count);
+	output.SetChildCardinality(count); // sizes the vectors filled by SetValue (2.0: vectors carry their own size)
 }
 
 //===--------------------------------------------------------------------===//
@@ -1081,7 +1081,7 @@ static void RegistrationOutputScan(ClientContext &, TableFunctionInput &input, D
 		chunk.SetValue(2, i, Value::BOOLEAN(row.encode_qr));
 	}
 	state.offset += count;
-	chunk.SetCardinality(count);
+	chunk.SetChildCardinality(count);
 }
 static string RegistrationQrResult(ClientContext &context, RestApiSecretStorage &storage, uint64_t generation,
                                    const string &uri) {
