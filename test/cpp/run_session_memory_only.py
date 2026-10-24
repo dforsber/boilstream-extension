@@ -1,4 +1,5 @@
 """Run the memory-only session regression with a rejecting loopback authority."""
+
 import http.server
 import os
 import subprocess

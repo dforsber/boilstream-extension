@@ -1,4 +1,5 @@
 """Exercise required statically linked providers with disposable local data."""
+
 import subprocess
 import sys
 import tempfile

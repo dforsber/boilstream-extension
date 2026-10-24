@@ -36,11 +36,11 @@ struct BoilstreamCommandSpec {
 
 constexpr BoilstreamCommandSpec COMMANDS[] = {
     {"BoilstreamLogin", "boilstream_login", "BOILSTREAM LOGIN 'url_with_email' 'password' 'mfa_code'", 3, 3},
-    {"BoilstreamRegisterUser", "boilstream_register_user", "BOILSTREAM REGISTER USER 'url_with_email' 'password'",
-     2, 2},
+    {"BoilstreamRegisterUser", "boilstream_register_user", "BOILSTREAM REGISTER USER 'url_with_email' 'password'", 2,
+     2},
     {"BoilstreamVerifyMfa", "boilstream_verify_mfa", "BOILSTREAM VERIFY MFA 'totp_code'", 1, 1},
-    {"BoilstreamBootstrapSession", "boilstream_bootstrap_session", "BOILSTREAM BOOTSTRAP SESSION 'url_with_token'",
-     1, 1},
+    {"BoilstreamBootstrapSession", "boilstream_bootstrap_session", "BOILSTREAM BOOTSTRAP SESSION 'url_with_token'", 1,
+     1},
     {"BoilstreamHelp", "boilstream_help", "BOILSTREAM HELP", 0, 0},
     {"BoilstreamCreateDucklake", "boilstream_create_ducklake",
      "CREATE DUCKLAKE 'name' ['description' ['s3_bucket_name']]", 1, 3},
@@ -62,8 +62,8 @@ ParseResult &GetChoice(ParseResult &parse_result) {
 unique_ptr<PragmaStatement> MakePragma(const BoilstreamCommandSpec &command, vector<string> args) {
 	if (args.size() < command.min_args || args.size() > command.max_args) {
 		throw ParserException("%s: expected %llu%s string argument(s), got %llu. Usage: %s", command.pragma,
-		                      command.min_args, command.min_args == command.max_args ? "" : " or more",
-		                      args.size(), command.usage);
+		                      command.min_args, command.min_args == command.max_args ? "" : " or more", args.size(),
+		                      command.usage);
 	}
 	auto result = make_uniq<PragmaStatement>();
 	result->info->name = Identifier(command.pragma);

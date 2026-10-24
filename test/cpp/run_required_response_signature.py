@@ -18,8 +18,7 @@ def sign(body, status, headers, key=bytes([7]) * 64):
     fields = sorted(
         (k.lower(), v)
         for k, v in headers.items()
-        if k.lower().startswith("x-boilstream-")
-        and k.lower() != "x-boilstream-response-signature"
+        if k.lower().startswith("x-boilstream-") and k.lower() != "x-boilstream-response-signature"
     )
     canonical = (
         str(status)
@@ -30,16 +29,13 @@ def sign(body, status, headers, key=bytes([7]) * 64):
         + "\n"
         + hashlib.sha256(body.encode()).hexdigest()
     )
-    return base64.b64encode(
-        hmac.new(integrity, canonical.encode(), hashlib.sha256).digest()
-    ).decode()
+    return base64.b64encode(hmac.new(integrity, canonical.encode(), hashlib.sha256).digest()).decode()
 
 
 def now(offset=0):
-    return (
-        datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(seconds=offset)
-    ).strftime("%Y%m%dT%H%M%SZ")
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
 
 
 def fixtures():
@@ -84,11 +80,7 @@ def fixtures():
         now(),
         True,
         mutate=lambda r: r["headers"].update(
-            {
-                "x-boilstream-signature": r["headers"].pop(
-                    "x-boilstream-response-signature"
-                )
-            }
+            {"x-boilstream-signature": r["headers"].pop("x-boilstream-response-signature")}
         ),
     )
     add("missing_signed_timestamp_rejected", None, True)
@@ -145,11 +137,7 @@ class Reply(http.server.BaseHTTPRequestHandler):
             self.server.count += 1
         body = "synthetic-result"
         headers = {
-            "x-boilstream-date": (
-                now(-120)
-                if mode == "stale"
-                else "not-a-date" if mode == "bad-date" else now()
-            )
+            "x-boilstream-date": (now(-120) if mode == "stale" else "not-a-date" if mode == "bad-date" else now())
         }
         if mode != "missing":
             headers["x-boilstream-response-signature"] = sign(

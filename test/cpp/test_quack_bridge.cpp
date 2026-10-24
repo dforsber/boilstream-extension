@@ -232,7 +232,8 @@ struct BridgeDatabase {
 
 	BridgeDatabase() {
 		ExtensionInfo extension_info {};
-		ExtensionActiveLoad load_info {*db.instance, extension_info, "boilstream_bridge_test", "boilstream_bridge_test"};
+		ExtensionActiveLoad load_info {*db.instance, extension_info, "boilstream_bridge_test",
+		                               "boilstream_bridge_test"};
 		ExtensionLoader loader {load_info};
 		RegisterQuackBridge(loader);
 	}

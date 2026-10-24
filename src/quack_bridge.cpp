@@ -145,8 +145,7 @@ SessionRegistry &QuackSessionRegistry() {
 void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto verifier = JwtVerifierSlot().load(std::memory_order_acquire);
 	TernaryExecutor::Execute<string_t, string_t, string_t, bool>(
-	    args.data[0], args.data[1], args.data[2], result,
-	    [verifier](string_t sid, string_t client_auth, string_t) {
+	    args.data[0], args.data[1], args.data[2], result, [verifier](string_t sid, string_t client_auth, string_t) {
 		    try {
 			    auto factory = ContextFactorySlot().load(std::memory_order_acquire);
 			    if (!verifier || !factory || !factory->create || !factory->destroy) {
@@ -195,14 +194,13 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 // Authentication binds the immutable opaque context. This scalar only verifies that the
 // same session exists; all operation authorization happens at the typed hook.
 void BoilstreamQuackAuthzFunction(DataChunk &args, ExpressionState &, Vector &result) {
-	BinaryExecutor::Execute<string_t, string_t, bool>(
-	    args.data[0], args.data[1], result, [](string_t sid, string_t) {
-		    try {
-			    return bool(GetQuackSessionCtx(std::string(sid.GetData(), sid.GetSize())));
-		    } catch (...) {
-			    return false;
-		    }
-	    });
+	BinaryExecutor::Execute<string_t, string_t, bool>(args.data[0], args.data[1], result, [](string_t sid, string_t) {
+		try {
+			return bool(GetQuackSessionCtx(std::string(sid.GetData(), sid.GetSize())));
+		} catch (...) {
+			return false;
+		}
+	});
 }
 
 void BoilstreamQuackDebugSessionCountFunction(DataChunk &args, ExpressionState &, Vector &result) {

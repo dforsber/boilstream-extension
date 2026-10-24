@@ -72,8 +72,6 @@ public:
 	                                                            const std::string &expires_at_str) {
 		return storage.ParseExpiresAt(expires_at_str);
 	}
-
-
 };
 
 //===----------------------------------------------------------------------===//
@@ -622,8 +620,8 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Extension handles malicious JSON p
 
 		// The base64 decodes to invalid serialized secret bytes. A successful
 		// object, or silently swallowing the decoding error, must fail this test.
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager), IOException);
+		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager),
+		                  IOException);
 	}
 
 	SECTION("Unicode and special characters are handled") {
@@ -687,8 +685,9 @@ TEST_CASE_METHOD(InputValidationTestFixture, "VerifyResponseSignature validates 
 	SECTION("Request signature cannot replace a response signature") {
 		headers["x-boilstream-signature"] = "YWJjZGVm";
 	}
-	REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::VerifyResponseSignature(
-	                     *storage, "{}", 200, headers, valid_session_key), IOException);
+	REQUIRE_THROWS_AS(
+	    BoilstreamInputValidationTestAccess::VerifyResponseSignature(*storage, "{}", 200, headers, valid_session_key),
+	    IOException);
 }
 
 //===----------------------------------------------------------------------===//

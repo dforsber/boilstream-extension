@@ -34,7 +34,8 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 				header.ParseQuery("PRAGMA " + query.substr(token.start, length) + ";");
 				if (header.statements.size() != 1 || header.statements[0]->type != StatementType::PRAGMA_STATEMENT)
 					return true;
-				if (StringUtil::CIEquals(header.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName(), result_name))
+				if (StringUtil::CIEquals(header.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName(),
+				                         result_name))
 					return true;
 			}
 		}
@@ -62,7 +63,8 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 		parser.ParseQuery(query.substr(token.start, end - token.start) + ";");
 		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::PRAGMA_STATEMENT)
 			return true;
-		const auto name = StringUtil::Lower(parser.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName());
+		const auto name =
+		    StringUtil::Lower(parser.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName());
 		if (name == "boilstream_login" || name == "boilstream_register_user" || name == "boilstream_verify_mfa" ||
 		    name == "boilstream_bootstrap_session")
 			return true;

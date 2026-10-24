@@ -239,7 +239,9 @@ TEST_CASE("Password FFI honors byte length and Unicode character boundaries", "[
 }
 
 TEST_CASE("TOTP FFI enforces exact output capacity without overwriting guards", "[registration][ffi][boundary]") {
-	const std::string expected = "otpauth://totp/BoilStream:user%40example.com?secret=SECRET&issuer=BoilStream&algorithm=SHA512&digits=6&period=30";
+	const std::string expected =
+	    "otpauth://totp/"
+	    "BoilStream:user%40example.com?secret=SECRET&issuer=BoilStream&algorithm=SHA512&digits=6&period=30";
 	for (size_t capacity : {size_t(0), expected.size(), expected.size() + 1}) {
 		CAPTURE(capacity);
 		std::vector<char> buffer(expected.size() + 3, '!');

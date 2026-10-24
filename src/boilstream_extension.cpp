@@ -189,7 +189,10 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	// Make HTTP GET request
 	string response;
 	try {
-		response = (conn_state->IsLocalSession() ? storage->RequestLocal(context, *conn_state, "{\"operation\":\"list_ducklakes\",\"multitenant\":true}") : storage->HttpGetWithState(ducklakes_url, *conn_state));
+		response = (conn_state->IsLocalSession()
+		                ? storage->RequestLocal(context, *conn_state,
+		                                        "{\"operation\":\"list_ducklakes\",\"multitenant\":true}")
+		                : storage->HttpGetWithState(ducklakes_url, *conn_state));
 	} catch (const std::exception &e) {
 		BoilstreamRethrowSafe("Failed to fetch ducklakes from boilstream server", e);
 	}
@@ -406,7 +409,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 	}
 
 	// Remote sessions need an endpoint; a local session carries host authority.
-    auto secret_owner = storage->GetSessionForContext(context);
+	auto secret_owner = storage->GetSessionForContext(context);
 	string endpoint_url = secret_owner ? secret_owner->GetEndpointUrl() : "";
 	if (!secret_owner || (!secret_owner->IsLocalSession() && endpoint_url.empty())) {
 		throw InvalidInputException(
@@ -565,7 +568,9 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 	// Make HTTP GET request
 	string response;
 	try {
-		response = (conn_state->IsLocalSession() ? storage->RequestLocal(context, *conn_state, "{\"operation\":\"list_buckets\"}") : storage->HttpGetWithState(buckets_url, *conn_state));
+		response = (conn_state->IsLocalSession()
+		                ? storage->RequestLocal(context, *conn_state, "{\"operation\":\"list_buckets\"}")
+		                : storage->HttpGetWithState(buckets_url, *conn_state));
 	} catch (const std::exception &e) {
 		BoilstreamRethrowSafe("Failed to fetch buckets from boilstream server", e);
 	}
@@ -754,7 +759,10 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	// Make HTTP POST request
 	string response;
 	try {
-		response = (conn_state->IsLocalSession() ? storage->RequestLocal(context, *conn_state, "{\"operation\":\"create_ducklake\",\"request\":" + body + "}") : storage->HttpPostWithState(create_url, body, *conn_state));
+		response = (conn_state->IsLocalSession()
+		                ? storage->RequestLocal(context, *conn_state,
+		                                        "{\"operation\":\"create_ducklake\",\"request\":" + body + "}")
+		                : storage->HttpPostWithState(create_url, body, *conn_state));
 	} catch (const std::exception &e) {
 		BoilstreamRethrowSafe("Failed to create ducklake", e);
 	}
@@ -947,7 +955,6 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	BOILSTREAM_LOG("Step 12: Starting OPAQUE login");
 
 	try {
-
 		// Bind this bootstrap identity to the newly authenticated session
 		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
 		BOILSTREAM_LOG("SetEndpoint: OPAQUE login successful");
@@ -2017,7 +2024,6 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	// Perform OPAQUE login
 	try {
-
 		// Bind the bootstrap identity and endpoint together
 		storage->PerformOpaqueLogin(context, bootstrap_token, incoming_token_hash, endpoint_url);
 		BOILSTREAM_LOG("Login: OPAQUE login successful");
@@ -2096,9 +2102,12 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '',\n";
 	result_sql += "  'NOTE: Each DuckDB connection has its own independent session state.',\n";
 	result_sql += "  'Every PRAGMA below also has a statement form (DuckDB 2.0+): BOILSTREAM LOGIN ... ,',\n";
-	result_sql += "  'BOILSTREAM REGISTER USER ... , BOILSTREAM VERIFY MFA ... , BOILSTREAM BOOTSTRAP SESSION ... ,',\n";
-	result_sql += "  'CREATE DUCKLAKE ''name'' [''description''], ATTACH DUCKLAKE ''<uuid>'' AS alias, BOILSTREAM HELP.',\n";
-	result_sql += "  'If a statement form reports a syntax error: SET active_grammar_extensions = [''boilstream''];',\n";
+	result_sql +=
+	    "  'BOILSTREAM REGISTER USER ... , BOILSTREAM VERIFY MFA ... , BOILSTREAM BOOTSTRAP SESSION ... ,',\n";
+	result_sql +=
+	    "  'CREATE DUCKLAKE ''name'' [''description''], ATTACH DUCKLAKE ''<uuid>'' AS alias, BOILSTREAM HELP.',\n";
+	result_sql +=
+	    "  'If a statement form reports a syntax error: SET active_grammar_extensions = [''boilstream''];',\n";
 	result_sql += "  'Sessions expire after ~24h. Run SELECT * FROM duckdb_secrets() to refresh.',\n";
 	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
 	result_sql += "  '',\n";
@@ -2337,23 +2346,28 @@ extern "C" {
 // Private embedding entry point. Only a live native context and retained host
 // descriptor can reach it; no SQL function accepts these capabilities.
 DUCKDB_EXTENSION_API uint8_t boilstream_install_local_session_v2(void *raw_context,
-    const BoilstreamLocalSecretHostV2 *host, char *error, size_t capacity) {
-    if (error && capacity) error[0] = '\0';
-    try {
-        if (!raw_context || !host) throw duckdb::InvalidInputException("Missing local session capability");
-        auto &context = *static_cast<duckdb::ClientContext *>(raw_context);
-        auto storage = duckdb::GetStorageFromContext(context);
-        if (!storage) throw duckdb::IOException("BoilStream extension is not loaded");
-        storage->InstallLocalSession(context, *host);
-        return 1;
-    } catch (...) {
-        const char message[] = "Local session installation failed";
-        if (error && capacity) {
-            const auto length = std::min(capacity - 1, sizeof(message) - 1);
-            std::memcpy(error, message, length); error[length] = '\0';
-        }
-        return 0;
-    }
+                                                                 const BoilstreamLocalSecretHostV2 *host, char *error,
+                                                                 size_t capacity) {
+	if (error && capacity)
+		error[0] = '\0';
+	try {
+		if (!raw_context || !host)
+			throw duckdb::InvalidInputException("Missing local session capability");
+		auto &context = *static_cast<duckdb::ClientContext *>(raw_context);
+		auto storage = duckdb::GetStorageFromContext(context);
+		if (!storage)
+			throw duckdb::IOException("BoilStream extension is not loaded");
+		storage->InstallLocalSession(context, *host);
+		return 1;
+	} catch (...) {
+		const char message[] = "Local session installation failed";
+		if (error && capacity) {
+			const auto length = std::min(capacity - 1, sizeof(message) - 1);
+			std::memcpy(error, message, length);
+			error[length] = '\0';
+		}
+		return 0;
+	}
 }
 
 // DuckDB C++ extension entry point (used when loading by name)

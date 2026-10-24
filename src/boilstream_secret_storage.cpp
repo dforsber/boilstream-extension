@@ -318,8 +318,7 @@ static inline string RequireStr(yyjson_val *val, const char *field_name) {
 RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p)
     // Tie-break offset 7: below the connection-scoped storage (5), so a secret a user created for this
     // connection wins a tie, but ahead of the temporary (10) and local file (20) storages.
-    : CatalogSetSecretStorage(db_p, "boilstream", 7),
-      endpoint_url(endpoint_url_p) {
+    : CatalogSetSecretStorage(db_p, "boilstream", 7), endpoint_url(endpoint_url_p) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
 	persistent = true; // Acts as persistent storage
 	                   // Sessions are stored in sessions_ map keyed by bootstrap_token_hash
@@ -399,8 +398,8 @@ shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForConnect
 
 shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForContext(ClientContext &context) {
 	auto state = GetSessionForConnection(context.GetConnectionId());
-    if (state && state->IsLocalSession() && state->authenticated_tenant != GetTenantId(context))
-        throw IOException("Local credential tenant changed");
+	if (state && state->IsLocalSession() && state->authenticated_tenant != GetTenantId(context))
+		throw IOException("Local credential tenant changed");
 	return state && state->authenticated_tenant == GetTenantId(context) ? state : nullptr;
 }
 
@@ -414,7 +413,8 @@ void RestApiSecretStorage::ClearSession(ClientContext &context) {
 	{
 		lock_guard<mutex> lock(sessions_lock_);
 		auto conn_it = connection_session_keys_.find(context.GetConnectionId());
-		if (conn_it == connection_session_keys_.end()) return;
+		if (conn_it == connection_session_keys_.end())
+			return;
 		auto it = sessions_.find(conn_it->second);
 		if (it != sessions_.end()) {
 			retired = it->second;
@@ -423,7 +423,8 @@ void RestApiSecretStorage::ClearSession(ClientContext &context) {
 			retired->authentication_generation.fetch_add(1);
 		}
 	}
-	if (retired) retired->ClearSession();
+	if (retired)
+		retired->ClearSession();
 }
 
 bool RestApiSecretStorage::IsSessionTokenValid(ClientContext &context) {
@@ -479,7 +480,7 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 }
 
 bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool is_resume,
-                                                     BoilstreamConnectionState &conn_state) {
+                                                    BoilstreamConnectionState &conn_state) {
 	// This state is private until the complete exchange succeeds. It cannot
 	// overwrite an active session's key, sequence, endpoint or exchange flag.
 	conn_state.is_exchanging = true;
@@ -755,16 +756,20 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool
 class BoilstreamSessionCleanup : public ClientContextState {
 public:
 	BoilstreamSessionCleanup(RestApiSecretStorage &storage, idx_t connection_id)
-	    : storage(storage), connection_id(connection_id) {}
-	~BoilstreamSessionCleanup() override { storage.ClearConnectionMapping(connection_id); }
+	    : storage(storage), connection_id(connection_id) {
+	}
+	~BoilstreamSessionCleanup() override {
+		storage.ClearConnectionMapping(connection_id);
+	}
+
 private:
 	RestApiSecretStorage &storage;
 	idx_t connection_id;
 };
 
 void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<BoilstreamConnectionState> pending,
-                                          const shared_ptr<BoilstreamConnectionState> &previous,
-                                          uint64_t generation, bool supports_resumption) {
+                                          const shared_ptr<BoilstreamConnectionState> &previous, uint64_t generation,
+                                          bool supports_resumption) {
 	const auto connection_id = context.GetConnectionId();
 	context.registered_state->GetOrCreate<BoilstreamSessionCleanup>("boilstream_session_cleanup", *this, connection_id);
 	const auto key = "@connection:" + std::to_string(connection_id);
@@ -781,7 +786,8 @@ void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<Boi
 		shared_ptr<BoilstreamConnectionState> current;
 		if (current_mapping != connection_session_keys_.end()) {
 			auto found = sessions_.find(current_mapping->second);
-			if (found != sessions_.end()) current = found->second;
+			if (found != sessions_.end())
+				current = found->second;
 		}
 		if (context.IsInterrupted() || current != previous ||
 		    (previous && previous->authentication_generation.load() != generation)) {
@@ -794,56 +800,60 @@ void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<Boi
 		sessions_[key] = pending;
 		connection_session_keys_[connection_id] = key;
 	}
-	if (previous) previous->secret_cache->Close();
+	if (previous)
+		previous->secret_cache->Close();
 }
 
 void RestApiSecretStorage::InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host) {
-    auto previous = GetSessionForConnection(context.GetConnectionId());
-    const auto generation = previous ? previous->authentication_generation.load() : 0;
-    auto provider = make_shared_ptr<BoilstreamLocalSecretProvider>(host);
-    if (GetTenantId(context) != std::to_string(provider->TenantId()))
-        throw IOException("Local credential tenant does not match connection context");
-    provider->Validate(context);
-    if (GetTenantId(context) != std::to_string(provider->TenantId()))
-        throw IOException("Local credential tenant changed during installation");
-    auto pending = make_shared_ptr<BoilstreamConnectionState>(std::move(provider));
-    // No OPAQUE key, refresh token, endpoint or sequence is fabricated.
-    PublishSession(context, std::move(pending), previous, generation, false);
+	auto previous = GetSessionForConnection(context.GetConnectionId());
+	const auto generation = previous ? previous->authentication_generation.load() : 0;
+	auto provider = make_shared_ptr<BoilstreamLocalSecretProvider>(host);
+	if (GetTenantId(context) != std::to_string(provider->TenantId()))
+		throw IOException("Local credential tenant does not match connection context");
+	provider->Validate(context);
+	if (GetTenantId(context) != std::to_string(provider->TenantId()))
+		throw IOException("Local credential tenant changed during installation");
+	auto pending = make_shared_ptr<BoilstreamConnectionState>(std::move(provider));
+	// No OPAQUE key, refresh token, endpoint or sequence is fabricated.
+	PublishSession(context, std::move(pending), previous, generation, false);
 }
 
 void RestApiSecretStorage::ValidateLocal(ClientContext &context, BoilstreamConnectionState &state) {
-    auto provider = state.GetLocalProvider();
-    if (!provider) throw IOException("Local credential authority is unavailable");
-    if (GetTenantId(context) != std::to_string(provider->TenantId()))
-        throw IOException("Local credential tenant changed");
-    const auto generation = state.authentication_generation.load();
-    provider->Validate(context); // Never hold session/cache locks across this call.
-    if (state.GetLocalProvider() != provider || state.authentication_generation.load() != generation ||
-        GetTenantId(context) != std::to_string(provider->TenantId()) ||
-        GetSessionForConnection(context.GetConnectionId()).get() != &state || context.IsInterrupted())
-        throw IOException("Local credential authority was superseded");
+	auto provider = state.GetLocalProvider();
+	if (!provider)
+		throw IOException("Local credential authority is unavailable");
+	if (GetTenantId(context) != std::to_string(provider->TenantId()))
+		throw IOException("Local credential tenant changed");
+	const auto generation = state.authentication_generation.load();
+	provider->Validate(context); // Never hold session/cache locks across this call.
+	if (state.GetLocalProvider() != provider || state.authentication_generation.load() != generation ||
+	    GetTenantId(context) != std::to_string(provider->TenantId()) ||
+	    GetSessionForConnection(context.GetConnectionId()).get() != &state || context.IsInterrupted())
+		throw IOException("Local credential authority was superseded");
 }
 
-string RestApiSecretStorage::RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request) {
-    return RequestLocalResponse(context, state, request).TakeBody();
+string RestApiSecretStorage::RequestLocal(ClientContext &context, BoilstreamConnectionState &state,
+                                          const string &request) {
+	return RequestLocalResponse(context, state, request).TakeBody();
 }
 
-BoilstreamLocalSecretProvider::Response RestApiSecretStorage::RequestLocalResponse(
-    ClientContext &context, BoilstreamConnectionState &state, const string &request) {
-    auto provider = state.GetLocalProvider();
-    if (!provider || GetTenantId(context) != std::to_string(provider->TenantId()))
-        throw IOException("Local credential authority is unavailable");
-    const auto generation = state.authentication_generation.load();
-    auto result = provider->RequestResponse(context, request);
-    if (state.GetLocalProvider() != provider || state.authentication_generation.load() != generation ||
-        GetTenantId(context) != std::to_string(provider->TenantId()) ||
-        GetSessionForConnection(context.GetConnectionId()).get() != &state || context.IsInterrupted())
-        throw IOException("Local credential authority was superseded");
-    return result;
+BoilstreamLocalSecretProvider::Response RestApiSecretStorage::RequestLocalResponse(ClientContext &context,
+                                                                                   BoilstreamConnectionState &state,
+                                                                                   const string &request) {
+	auto provider = state.GetLocalProvider();
+	if (!provider || GetTenantId(context) != std::to_string(provider->TenantId()))
+		throw IOException("Local credential authority is unavailable");
+	const auto generation = state.authentication_generation.load();
+	auto result = provider->RequestResponse(context, request);
+	if (state.GetLocalProvider() != provider || state.authentication_generation.load() != generation ||
+	    GetTenantId(context) != std::to_string(provider->TenantId()) ||
+	    GetSessionForConnection(context.GetConnectionId()).get() != &state || context.IsInterrupted())
+		throw IOException("Local credential authority was superseded");
+	return result;
 }
 
-void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const string &password,
-                                              const string &token_hash, const string &endpoint) {
+void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
+                                              const string &endpoint) {
 	auto previous = GetSessionForConnection(context.GetConnectionId());
 	auto generation = previous ? previous->authentication_generation.load() : 0;
 	auto pending = make_shared_ptr<BoilstreamConnectionState>(endpoint);
@@ -872,7 +882,9 @@ void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
 	string password(pending->refresh_token.begin(), pending->refresh_token.end());
 	struct PasswordGuard {
 		string &value;
-		~PasswordGuard() { BoilstreamConnectionState::SecureZeroString(value); }
+		~PasswordGuard() {
+			BoilstreamConnectionState::SecureZeroString(value);
+		}
 	} password_guard {password};
 	// A failed exchange leaves the published session intact. The pending state
 	// owns the same authority and identity; it cannot borrow another connection.
@@ -929,7 +941,8 @@ void RestApiSecretStorage::ClearConnectionMapping(idx_t connection_id) {
 			connection_session_keys_.erase(it);
 		}
 	}
-	if (retired) retired->secret_cache->Close();
+	if (retired)
+		retired->secret_cache->Close();
 }
 
 string RestApiSecretStorage::ExtractUserContext(optional_ptr<CatalogTransaction> transaction) {
@@ -1027,7 +1040,8 @@ case_insensitive_map_t<string> RestApiSecretStorage::ExtractBoilstreamHeaders(co
 }
 
 HTTPHeaders RestApiSecretStorage::BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-                                                            BoilstreamConnectionState &conn_state, vector<uint8_t> *response_key) {
+                                                            BoilstreamConnectionState &conn_state,
+                                                            vector<uint8_t> *response_key) {
 	// Get session snapshot from connection state (thread-safe, increments sequence)
 	auto snapshot = conn_state.GetSessionSnapshot();
 
@@ -1199,13 +1213,14 @@ void RestApiSecretStorage::VerifyResponseSignature(const string &response_body, 
 	};
 	date_t date;
 	const auto hour = decimal(9, 2), minute = decimal(11, 2), second = decimal(13, 2);
-	if (!Date::TryFromDate(decimal(0, 4), decimal(4, 2), decimal(6, 2), date) ||
-	    hour > 23 || minute > 59 || second > 59) {
+	if (!Date::TryFromDate(decimal(0, 4), decimal(4, 2), decimal(6, 2), date) || hour > 23 || minute > 59 ||
+	    second > 59) {
 		throw IOException("Response signature verification failed: invalid timestamp");
 	}
-	const auto response_time = Timestamp::GetEpochSeconds(Timestamp::FromDatetime(date, Time::FromTime(hour, minute, second)));
-	const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-	                     std::chrono::system_clock::now().time_since_epoch()).count();
+	const auto response_time =
+	    Timestamp::GetEpochSeconds(Timestamp::FromDatetime(date, Time::FromTime(hour, minute, second)));
+	const auto now =
+	    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 	if (response_time < now - 60 || response_time > now + 60) {
 		throw IOException("Response signature verification failed: timestamp outside 60-second window");
 	}
@@ -1733,8 +1748,7 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 	string_t timezone(nullptr, 0);
 	const auto result = Timestamp::TryConvertTimestampTZ(expires_at_str.c_str(), expires_at_str.size(), parsed, true,
 	                                                     has_offset, timezone);
-	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 ||
-	    !parsed.IsFinite()) {
+	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 || !parsed.IsFinite()) {
 		return std::chrono::system_clock::time_point::min();
 	}
 
@@ -1750,10 +1764,13 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 
 std::optional<BoilstreamSecretCache::Time> RestApiSecretStorage::ParseSecretExpiry(yyjson_val *root) {
 	auto value = yyjson_obj_get(root, "expires_at");
-	if (!value || yyjson_is_null(value)) return std::nullopt;
-	if (!yyjson_is_str(value)) throw IOException("Invalid secret response expiry");
+	if (!value || yyjson_is_null(value))
+		return std::nullopt;
+	if (!yyjson_is_str(value))
+		throw IOException("Invalid secret response expiry");
 	const auto expires = ParseExpiresAt(string(yyjson_get_str(value), yyjson_get_len(value)));
-	if (expires == BoilstreamSecretCache::Time::min()) throw IOException("Invalid secret response expiry");
+	if (expires == BoilstreamSecretCache::Time::min())
+		throw IOException("Invalid secret response expiry");
 	return expires;
 }
 
@@ -1800,7 +1817,8 @@ RestApiSecretStorage::GetSecretExpiration(const string &secret_name, optional_pt
 	}
 
 	auto generic_expiry = conn_state->secret_cache->Expiration(secret_name);
-	if (generic_expiry != BoilstreamSecretCache::Time::min()) return generic_expiry;
+	if (generic_expiry != BoilstreamSecretCache::Time::min())
+		return generic_expiry;
 	lock_guard<mutex> lock(conn_state->expiration_lock);
 
 	auto it = conn_state->secret_expiration.find(secret_name);
@@ -1829,7 +1847,8 @@ bool RestApiSecretStorage::IsMultiTenantMode(ClientContext &context) {
 string RestApiSecretStorage::GetTenantId(ClientContext &context) {
 #ifdef BOILSTREAM_HAS_TENANT_CONTEXT
 	auto &tenant = TenantIsolation::GetTenant(context);
-	if (tenant.IsActive()) return tenant.tenant_id;
+	if (tenant.IsActive())
+		return tenant.tenant_id;
 	auto active = ActiveTenantRegistry::GetCurrentTenant(DatabaseInstance::GetDatabase(context));
 	return active && active->IsActive() ? active->tenant_id : "";
 #else
@@ -2174,32 +2193,37 @@ void RestApiSecretStorage::EndRegistrationOperation(ClientContext &context, uint
 namespace {
 class LocalBoilstreamSecrets : public ClientContextState {
 public:
-	explicit LocalBoilstreamSecrets(string tenant) : tenant(std::move(tenant)) {}
+	explicit LocalBoilstreamSecrets(string tenant) : tenant(std::move(tenant)) {
+	}
 	const string tenant;
 	shared_ptr<BoilstreamSecretCache> cache = make_shared_ptr<BoilstreamSecretCache>();
-	~LocalBoilstreamSecrets() override { cache->Close(); }
+	~LocalBoilstreamSecrets() override {
+		cache->Close();
+	}
 };
-}
+} // namespace
 
-RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(
-    optional_ptr<CatalogTransaction> transaction, bool create) {
-	if (!transaction || !transaction->HasContext()) return {};
+RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(optional_ptr<CatalogTransaction> transaction,
+                                                                       bool create) {
+	if (!transaction || !transaction->HasContext())
+		return {};
 	auto &context = transaction->GetContext();
 	auto state = GetSession(transaction);
 	if (state) {
-        if (state->IsLocalSession()) {
-            ValidateLocal(context, *state);
-            return {state, state->secret_cache};
-        }
+		if (state->IsLocalSession()) {
+			ValidateLocal(context, *state);
+			return {state, state->secret_cache};
+		}
 		lock_guard<mutex> lock(state->session_lock);
 		if (state->access_token.empty() || state->session_key.empty() ||
-		    state->token_expires_at <= std::chrono::system_clock::now()) return {};
+		    state->token_expires_at <= std::chrono::system_clock::now())
+			return {};
 		return {state, state->secret_cache};
 	}
 	// Explicit secrets without a login are local to this connection and tenant.
 	// They are never mirrored into database-wide memory storage.
-	auto local = create ? context.registered_state->GetOrCreate<LocalBoilstreamSecrets>(
-	                          "boilstream_local_secrets", GetTenantId(context))
+	auto local = create ? context.registered_state->GetOrCreate<LocalBoilstreamSecrets>("boilstream_local_secrets",
+	                                                                                    GetTenantId(context))
 	                    : context.registered_state->Get<LocalBoilstreamSecrets>("boilstream_local_secrets");
 	if (local && local->tenant != GetTenantId(context)) {
 		throw IOException("Local BoilStream secrets belong to a different tenant context");
@@ -2207,19 +2231,21 @@ RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(
 	return {nullptr, local ? local->cache : nullptr};
 }
 
-shared_ptr<BoilstreamSecretCache> RestApiSecretStorage::GetSecretCache(
-    optional_ptr<CatalogTransaction> transaction, bool create) {
+shared_ptr<BoilstreamSecretCache> RestApiSecretStorage::GetSecretCache(optional_ptr<CatalogTransaction> transaction,
+                                                                       bool create) {
 	return GetSecretOwner(transaction, create).cache;
 }
 
 static vector<SecretEntry> CloneSecretSnapshot(const shared_ptr<BoilstreamSecretCache> &cache) {
 	vector<SecretEntry> result;
-	if (cache) for (auto &entry : cache->Snapshot()) result.emplace_back(*entry);
+	if (cache)
+		for (auto &entry : cache->Snapshot())
+			result.emplace_back(*entry);
 	return result;
 }
 
-SecretMatch RestApiSecretStorage::LookupCachedSecret(
-    const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache) {
+SecretMatch RestApiSecretStorage::LookupCachedSecret(const string &path, const string &type,
+                                                     const shared_ptr<BoilstreamSecretCache> &cache) {
 	SecretMatch best;
 	if (cache) {
 		for (auto &entry : cache->Snapshot()) {
@@ -2713,20 +2739,24 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	auto owner = GetSecretOwner(transaction, true);
 	auto state = owner.session;
 	auto cache = owner.cache;
-	if (!cache) throw IOException("A live connection is required to store a BoilStream secret");
-	if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) throw InvalidInputException("Unsupported secret conflict mode");
+	if (!cache)
+		throw IOException("A live connection is required to store a BoilStream secret");
+	if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT)
+		throw InvalidInputException("Unsupported secret conflict mode");
 	const auto revision = cache->Revision();
 	const auto name = secret->GetName().GetIdentifierName();
 	auto existing = cache->Get(name, true);
 	if (!state && existing) {
-		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) return nullptr;
-		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) throw InvalidInputException("Secret already exists");
+		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT)
+			return nullptr;
+		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT)
+			throw InvalidInputException("Secret already exists");
 	}
 	const auto bytes = SerializeSecret(*secret).size();
 	// Remote writes do not establish credential expiry: refetch the authoritative
 	// server response before using them. Explicit local secrets have no remote TTL.
-	auto entry = BoilstreamSecretCache::Prepare(secret->Clone(),
-	    state ? BoilstreamSecretCache::Time::min() : BoilstreamSecretCache::Time::max(), bytes);
+	auto entry = BoilstreamSecretCache::Prepare(
+	    secret->Clone(), state ? BoilstreamSecretCache::Time::min() : BoilstreamSecretCache::Time::max(), bytes);
 	cache->ValidatePut(entry, revision);
 	if (state) {
 		// Conflict decisions belong to the server, not a possibly stale cache.
@@ -2739,7 +2769,8 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 		if (current.session != state || current.cache != cache || transaction->GetContext().IsInterrupted())
 			throw IOException("Secret write owner changed during readback");
 		auto result = stored.CopyIfUsable();
-		if (!result) throw IOException("Secret write completed but authoritative readback failed");
+		if (!result)
+			throw IOException("Secret write completed but authoritative readback failed");
 		return result;
 	}
 	auto result = make_uniq<SecretEntry>(*entry.secret);
@@ -2756,8 +2787,8 @@ void RestApiSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflic
 }
 
 void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
-                                                BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction) {
-
+                                                BoilstreamConnectionState &conn_state,
+                                                optional_ptr<CatalogTransaction> transaction) {
 	// Check if endpoint is configured
 	string url = conn_state.GetEndpointUrl();
 
@@ -2784,8 +2815,9 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	yyjson_doc_free(secret_doc);
 
 	yyjson_mut_obj_add_strcpy(doc, obj, "on_conflict",
-	                          on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT ? "replace" :
-	                          on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT ? "ignore" : "error");
+	                          on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT  ? "replace"
+	                          : on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT ? "ignore"
+	                                                                                : "error");
 
 	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
@@ -2795,8 +2827,7 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 			throw IOException("Local secret writes require the current query context");
 		// The verified server principal derives and atomically stores both
 		// binary names. No tenant ID or transport credentials come from SQL.
-		RequestLocal(transaction->GetContext(), conn_state,
-		             "{\"operation\":\"store\",\"request\":" + body + "}");
+		RequestLocal(transaction->GetContext(), conn_state, "{\"operation\":\"store\",\"request\":" + body + "}");
 	} else {
 		HttpPostWithState(AppendPlatformParams(url, transaction), body, conn_state);
 	}
@@ -2810,9 +2841,11 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	}
 	auto cache = GetSecretCache(transaction);
 	auto cached = LookupCachedSecret(path, type, cache);
-	if (cached.HasMatch() || IsWasmMode()) return cached;
+	if (cached.HasMatch() || IsWasmMode())
+		return cached;
 	auto fresh = FetchSecret(path, type, true, transaction, cache);
-	if (GetSecretCache(transaction) != cache) return SecretMatch();
+	if (GetSecretCache(transaction) != cache)
+		return SecretMatch();
 	auto entry = fresh.CopyIfUsable();
 	if (entry) {
 		SecretMatch best;
@@ -2821,84 +2854,113 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	return LookupCachedSecret(path, type, cache);
 }
 
-unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(
-    const string &name, optional_ptr<CatalogTransaction> transaction) {
+unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name,
+                                                              optional_ptr<CatalogTransaction> transaction) {
 	auto cache = GetSecretCache(transaction);
 	auto owned_entry = cache ? cache->Get(name) : nullptr;
 	auto cached = owned_entry ? make_uniq<SecretEntry>(*owned_entry) : nullptr;
-	if (cached || IsWasmMode()) return cached;
+	if (cached || IsWasmMode())
+		return cached;
 	auto fresh = FetchSecret(name, "", false, transaction, cache);
-	if (GetSecretCache(transaction) != cache) return nullptr;
+	if (GetSecretCache(transaction) != cache)
+		return nullptr;
 	auto usable = fresh.CopyIfUsable();
-	if (usable) return usable;
+	if (usable)
+		return usable;
 	auto entry = cache ? cache->Get(name) : nullptr;
 	return entry ? make_uniq<SecretEntry>(*entry) : nullptr;
 }
 
 unique_ptr<SecretEntry> RestApiSecretStorage::FetchedSecret::CopyIfUsable() const {
-	if (!secret) return nullptr;
+	if (!secret)
+		return nullptr;
 	auto result = make_uniq<SecretEntry>(*secret);
 	// Check after the caller revalidates its owner and after copying. A host
 	// validation callback may have waited beyond the credential deadline.
-	if (expires && *expires <= std::chrono::system_clock::now()) return nullptr;
+	if (expires && *expires <= std::chrono::system_clock::now())
+		return nullptr;
 	return result;
 }
 
-RestApiSecretStorage::FetchedSecret RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bool match,
-                                       optional_ptr<CatalogTransaction> transaction,
-                                       const shared_ptr<BoilstreamSecretCache> &expected_cache) {
+RestApiSecretStorage::FetchedSecret
+RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bool match,
+                                  optional_ptr<CatalogTransaction> transaction,
+                                  const shared_ptr<BoilstreamSecretCache> &expected_cache) {
 	auto owner = GetSecretOwner(transaction);
 	auto state = owner.session;
 	auto cache = owner.cache;
-	if (!state || !cache || cache != expected_cache || (!state->IsLocalSession() && state->GetEndpointUrl().empty()) || in_http_operation) return {};
+	if (!state || !cache || cache != expected_cache || (!state->IsLocalSession() && state->GetEndpointUrl().empty()) ||
+	    in_http_operation)
+		return {};
 	BoilstreamConnectionState::SecretLookupGuard guard(*state);
-	if (!guard.Acquired()) return {};
+	if (!guard.Acquired())
+		return {};
 	const auto revision = cache->Revision();
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
 	yyjson_mut_obj_add_strncpy(doc, obj, match ? "path" : "name", selector.data(), selector.size());
 	if (match) {
-        const auto normalized_type = StringUtil::Lower(type);
-        yyjson_mut_obj_add_strncpy(doc, obj, "type", normalized_type.data(), normalized_type.size());
-    }
+		const auto normalized_type = StringUtil::Lower(type);
+		yyjson_mut_obj_add_strncpy(doc, obj, "type", normalized_type.data(), normalized_type.size());
+	}
 	bool expired = !match && cache->Get(selector, true) != nullptr;
 	if (match) {
 		for (auto &entry : cache->Snapshot(true)) {
 			if (StringUtil::CIEquals(entry->secret->GetType().GetIdentifierName(), type) &&
-			    entry->secret->MatchScore(selector) != NumericLimits<int64_t>::Minimum()) { expired = true; break; }
+			    entry->secret->MatchScore(selector) != NumericLimits<int64_t>::Minimum()) {
+				expired = true;
+				break;
+			}
 		}
 	}
 	yyjson_mut_obj_add_bool(doc, obj, "expired", expired);
 	string body = SafeJsonSerialize(doc);
 	yyjson_mut_doc_free(doc);
 	try {
-        string response;
-        if (state->IsLocalSession()) {
-            auto reply = RequestLocalResponse(transaction->GetContext(), *state, string("{\"operation\":\"") +
-                (match ? "match" : "get") + "\",\"multitenant\":true,\"request\":" + body + "}");
-            // The same service returns 404 for an absent named secret and an
-            // empty object for an unmatched scope. Neither is an auth failure.
-            if (!match && reply.status == 404) return {};
-            response = reply.TakeBody();
-        } else {
-            response = HttpPostWithState(AppendPlatformParams(state->GetEndpointUrl() +
-                (match ? "/match" : "/get"), transaction), body, *state);
-        }
-		if (response.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) throw IOException("Oversized secret response");
+		string response;
+		if (state->IsLocalSession()) {
+			auto reply = RequestLocalResponse(transaction->GetContext(), *state,
+			                                  string("{\"operation\":\"") + (match ? "match" : "get") +
+			                                      "\",\"multitenant\":true,\"request\":" + body + "}");
+			// The same service returns 404 for an absent named secret and an
+			// empty object for an unmatched scope. Neither is an auth failure.
+			if (!match && reply.status == 404)
+				return {};
+			response = reply.TakeBody();
+		} else {
+			response = HttpPostWithState(
+			    AppendPlatformParams(state->GetEndpointUrl() + (match ? "/match" : "/get"), transaction), body, *state);
+		}
+		if (response.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES)
+			throw IOException("Oversized secret response");
 		auto parsed = unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(
 		    yyjson_read(response.c_str(), response.size(), 0), yyjson_doc_free);
-		if (!parsed) { if (state->IsLocalSession()) throw IOException("Invalid secret response JSON"); return {}; }
+		if (!parsed) {
+			if (state->IsLocalSession())
+				throw IOException("Invalid secret response JSON");
+			return {};
+		}
 		auto root = yyjson_doc_get_root(parsed.get());
-		if (!yyjson_is_obj(root)) { if (state->IsLocalSession()) throw IOException("Invalid secret response object"); return {}; }
-        if (match && yyjson_obj_size(root) == 0) return {};
+		if (!yyjson_is_obj(root)) {
+			if (state->IsLocalSession())
+				throw IOException("Invalid secret response object");
+			return {};
+		}
+		if (match && yyjson_obj_size(root) == 0)
+			return {};
 		auto expires = ParseSecretExpiry(root);
 		auto secret = DeserializeSecret(response, SecretManager::Get(db));
 		if (!secret || (!match && !StringUtil::CIEquals(secret->GetName().GetIdentifierName(), selector)) ||
 		    (match && (!StringUtil::CIEquals(secret->GetType().GetIdentifierName(), type) ||
-		               secret->MatchScore(selector) == NumericLimits<int64_t>::Minimum()))) { if (state->IsLocalSession()) throw IOException("Invalid or mismatched serialized secret"); return {}; }
+		               secret->MatchScore(selector) == NumericLimits<int64_t>::Minimum()))) {
+			if (state->IsLocalSession())
+				throw IOException("Invalid or mismatched serialized secret");
+			return {};
+		}
 		// The captured owner must still be current after network/deserialization.
-		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted()) return {};
+		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted())
+			return {};
 		auto entry = BoilstreamSecretCache::PrepareSecret(std::move(secret), response.size());
 		if (expires) {
 			cache->Put({entry, *expires, response.size()}, revision);
@@ -2909,7 +2971,8 @@ RestApiSecretStorage::FetchedSecret RestApiSecretStorage::FetchSecret(const stri
 		}
 		return {std::move(entry), expires};
 	} catch (...) {
-        if (state->IsLocalSession()) throw;
+		if (state->IsLocalSession())
+			throw;
 		// Failed, malformed, expired or superseded requests cannot broaden access.
 		// A still-fresh owned entry may be used by the caller; no global fallback.
 	}
@@ -2920,12 +2983,14 @@ vector<SecretEntry> RestApiSecretStorage::AllSecrets(optional_ptr<CatalogTransac
 	return IsWasmMode() ? GetCachedSecrets(transaction) : FetchAllSecretsFromServer(transaction);
 }
 
-vector<RestApiSecretStorage::FetchedSecret> RestApiSecretStorage::PublishSecretList(const string &response, BoilstreamConnectionState &state,
-                                                          uint64_t revision) {
-	if (response.size() > BoilstreamSecretCache::MAX_BYTES) throw IOException("Oversized secret list");
-	auto doc = unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(
-	    yyjson_read(response.c_str(), response.size(), 0), yyjson_doc_free);
-	if (!doc) throw IOException("Invalid secret list JSON");
+vector<RestApiSecretStorage::FetchedSecret>
+RestApiSecretStorage::PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision) {
+	if (response.size() > BoilstreamSecretCache::MAX_BYTES)
+		throw IOException("Oversized secret list");
+	auto doc = unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(yyjson_read(response.c_str(), response.size(), 0),
+	                                                              yyjson_doc_free);
+	if (!doc)
+		throw IOException("Invalid secret list JSON");
 	auto root = yyjson_doc_get_root(doc.get());
 	if (!yyjson_is_arr(root) || yyjson_arr_size(root) > BoilstreamSecretCache::MAX_ENTRIES)
 		throw IOException("Invalid secret list");
@@ -2936,20 +3001,27 @@ vector<RestApiSecretStorage::FetchedSecret> RestApiSecretStorage::PublishSecretL
 	size_t idx, max;
 	yyjson_val *val;
 	yyjson_arr_foreach(root, idx, max, val) {
-		if (!yyjson_is_obj(val)) throw IOException("Invalid secret list entry");
+		if (!yyjson_is_obj(val))
+			throw IOException("Invalid secret list entry");
 		auto expires = ParseSecretExpiry(val);
 		auto encoded = unique_ptr<char, decltype(&free)>(yyjson_val_write(val, 0, nullptr), free);
-		if (!encoded) throw IOException("Cannot serialize secret list entry");
+		if (!encoded)
+			throw IOException("Cannot serialize secret list entry");
 		string json(encoded.get());
-		if (json.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) throw IOException("Oversized secret list entry");
+		if (json.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES)
+			throw IOException("Oversized secret list entry");
 		auto secret = DeserializeSecret(json, SecretManager::Get(db));
-		if (!secret) throw IOException("Invalid serialized secret");
+		if (!secret)
+			throw IOException("Invalid serialized secret");
 		auto name = secret->GetName().GetIdentifierName();
-		if (!names.emplace(name, true).second) throw IOException("Duplicate secret name");
+		if (!names.emplace(name, true).second)
+			throw IOException("Duplicate secret name");
 		auto entry = BoilstreamSecretCache::PrepareSecret(std::move(secret), json.size());
 		fresh.push_back({entry, expires});
-		if (expires) staged.emplace(name, BoilstreamSecretCache::Entry{entry, *expires, json.size()});
-		else complete = false;
+		if (expires)
+			staged.emplace(name, BoilstreamSecretCache::Entry {entry, *expires, json.size()});
+		else
+			complete = false;
 	}
 	// Validate the whole response before publishing. Unknown deadlines are kept
 	// only in this response, so its partial cache cannot satisfy a later list.
@@ -2957,22 +3029,27 @@ vector<RestApiSecretStorage::FetchedSecret> RestApiSecretStorage::PublishSecretL
 	return fresh;
 }
 
-vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(
-    optional_ptr<CatalogTransaction> transaction, shared_ptr<BoilstreamConnectionState> explicit_conn_state) {
+vector<SecretEntry>
+RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
+                                                shared_ptr<BoilstreamConnectionState> explicit_conn_state) {
 	auto owner = GetSecretOwner(transaction);
 	auto state = owner.session;
-	if (explicit_conn_state && explicit_conn_state != state) throw IOException("Secret owner was superseded");
+	if (explicit_conn_state && explicit_conn_state != state)
+		throw IOException("Secret owner was superseded");
 	auto cache = owner.cache;
 	if (!state || !cache || (!state->IsLocalSession() && state->GetEndpointUrl().empty()) || in_http_operation ||
-	    (!explicit_conn_state && cache->RecentlyFetched())) return CloneSecretSnapshot(cache);
+	    (!explicit_conn_state && cache->RecentlyFetched()))
+		return CloneSecretSnapshot(cache);
 	BoilstreamConnectionState::SecretLookupGuard guard(*state);
-	if (!guard.Acquired()) return CloneSecretSnapshot(cache);
+	if (!guard.Acquired())
+		return CloneSecretSnapshot(cache);
 	CheckCatalogVersions(*state, &transaction->GetContext());
 	const auto revision = cache->Revision();
 	try {
-        auto response = state->IsLocalSession()
-            ? RequestLocal(transaction->GetContext(), *state, "{\"operation\":\"list\",\"multitenant\":true}")
-            : HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl(), transaction), *state);
+		auto response =
+		    state->IsLocalSession()
+		        ? RequestLocal(transaction->GetContext(), *state, "{\"operation\":\"list\",\"multitenant\":true}")
+		        : HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl(), transaction), *state);
 		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted())
 			throw IOException("Secret fetch was superseded");
 		auto fresh = PublishSecretList(response, *state, revision);
@@ -2982,11 +3059,13 @@ vector<SecretEntry> RestApiSecretStorage::FetchAllSecretsFromServer(
 		vector<SecretEntry> result;
 		for (const auto &entry : fresh) {
 			auto usable = entry.CopyIfUsable();
-			if (usable) result.push_back(std::move(*usable));
+			if (usable)
+				result.push_back(std::move(*usable));
 		}
 		return result;
 	} catch (...) {
-		if (explicit_conn_state || state->IsLocalSession()) throw;
+		if (explicit_conn_state || state->IsLocalSession())
+			throw;
 		// Keep only this owner's previously validated, unexpired snapshot.
 	}
 	return CloneSecretSnapshot(cache);
@@ -3009,21 +3088,26 @@ void RestApiSecretStorage::DropSecretByName(const Identifier &secret_name, OnEnt
 	auto state = owner.session;
 	auto cache = owner.cache;
 	if (!cache) {
-		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) throw CatalogException("Secret not found");
+		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION)
+			throw CatalogException("Secret not found");
 		return;
 	}
 	const auto revision = cache->Revision();
 	if (state) {
-        if (state->IsLocalSession()) {
-            auto doc = unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>(yyjson_mut_doc_new(nullptr), yyjson_mut_doc_free);
-            auto root = yyjson_mut_obj(doc.get()); yyjson_mut_doc_set_root(doc.get(), root);
-            yyjson_mut_obj_add_strcpy(doc.get(), root, "operation", "delete");
-            yyjson_mut_obj_add_strncpy(doc.get(), root, "name", name.data(), name.size());
-            RequestLocal(transaction->GetContext(), *state, SafeJsonSerialize(doc.get()));
-        } else {
-            if (state->GetEndpointUrl().empty()) throw IOException("Secret endpoint is not configured");
-            HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name), transaction), *state);
-        }
+		if (state->IsLocalSession()) {
+			auto doc = unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>(yyjson_mut_doc_new(nullptr),
+			                                                                      yyjson_mut_doc_free);
+			auto root = yyjson_mut_obj(doc.get());
+			yyjson_mut_doc_set_root(doc.get(), root);
+			yyjson_mut_obj_add_strcpy(doc.get(), root, "operation", "delete");
+			yyjson_mut_obj_add_strncpy(doc.get(), root, "name", name.data(), name.size());
+			RequestLocal(transaction->GetContext(), *state, SafeJsonSerialize(doc.get()));
+		} else {
+			if (state->GetEndpointUrl().empty())
+				throw IOException("Secret endpoint is not configured");
+			HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name), transaction),
+			           *state);
+		}
 	} else if (!cache->Get(name, true) && on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
 		throw CatalogException("Secret not found");
 	}
@@ -3062,14 +3146,18 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 	string response;
 	try {
 		if (conn_state.IsLocalSession()) {
-            if (!context) throw IOException("Local catalog versions require the current query context");
-            response = RequestLocal(*context, conn_state, "{\"operation\":\"catalog_versions\"}");
-        } else response = HttpGetWithState(url, conn_state);
+			if (!context)
+				throw IOException("Local catalog versions require the current query context");
+			response = RequestLocal(*context, conn_state, "{\"operation\":\"catalog_versions\"}");
+		} else
+			response = HttpGetWithState(url, conn_state);
 	} catch (const std::exception &e) {
-        if (conn_state.IsLocalSession()) throw;
+		if (conn_state.IsLocalSession())
+			throw;
 		return versions;
 	} catch (...) {
-        if (conn_state.IsLocalSession()) throw;
+		if (conn_state.IsLocalSession())
+			throw;
 		BOILSTREAM_LOG("FetchCatalogVersions: HTTP request failed with unknown error");
 		return versions;
 	}
@@ -3155,16 +3243,19 @@ static bool ParseManagedCatalogSecretScope(const string &path, string &catalog_i
 ManagedCatalogCredentialEnvelope
 RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, BoilstreamConnectionState &conn_state,
                                                     optional_ptr<CatalogTransaction> transaction) {
-    string response;
-    if (conn_state.IsLocalSession()) {
-        if (!transaction || !transaction->HasContext()) throw IOException("Local catalog credentials require context");
-        // catalog_id is checked as a canonical UUID by every public caller.
-        response = RequestLocal(transaction->GetContext(), conn_state,
-            "{\"operation\":\"quack_credentials\",\"request\":{\"catalog_id\":\"" + catalog_id + "\"}}");
-    } else {
-        const auto url = AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id), transaction);
-        response = HttpGetWithState(url, conn_state);
-    }
+	string response;
+	if (conn_state.IsLocalSession()) {
+		if (!transaction || !transaction->HasContext())
+			throw IOException("Local catalog credentials require context");
+		// catalog_id is checked as a canonical UUID by every public caller.
+		response =
+		    RequestLocal(transaction->GetContext(), conn_state,
+		                 "{\"operation\":\"quack_credentials\",\"request\":{\"catalog_id\":\"" + catalog_id + "\"}}");
+	} else {
+		const auto url =
+		    AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id), transaction);
+		response = HttpGetWithState(url, conn_state);
+	}
 	ManagedCatalogCredentialEnvelope credential;
 	if (!ParseManagedCatalogCredentialEnvelope(response, credential)) {
 		throw IOException("Managed DuckDB credential response is incomplete or malformed");
@@ -3229,7 +3320,6 @@ RestApiSecretStorage::VendManagedCatalogCredential(const string &catalog_id,
 }
 
 SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction) {
-
 	// Need an active session for authenticated GET — quack credentials are gated
 	// behind the same OPAQUE-authenticated REST API as everything else.
 	auto conn_state = GetSession(transaction);
@@ -3291,10 +3381,12 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 	try {
 		credential = FetchManagedCatalogCredential(catalog_id, *conn_state, transaction);
 	} catch (const std::exception &e) {
-        if (conn_state->IsLocalSession()) throw;
+		if (conn_state->IsLocalSession())
+			throw;
 		return SecretMatch();
 	} catch (...) {
-        if (conn_state->IsLocalSession()) throw;
+		if (conn_state->IsLocalSession())
+			throw;
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure (unknown)");
 		return SecretMatch();
 	}
@@ -3305,7 +3397,6 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
                                                      BoilstreamConnectionState &conn_state) {
-
 	conn_state.secret_cache->SetExpiration(catalog_name, std::chrono::system_clock::time_point::min());
 
 	// Force expiration by setting expires_at to past
@@ -3320,7 +3411,8 @@ void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
 	// to return new credentials with updated master IP
 }
 
-void RestApiSecretStorage::CheckCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context) {
+void RestApiSecretStorage::CheckCatalogVersions(BoilstreamConnectionState &conn_state,
+                                                optional_ptr<ClientContext> context) {
 	// Rate limit: only check every 60 seconds
 	auto now = std::chrono::system_clock::now();
 	{

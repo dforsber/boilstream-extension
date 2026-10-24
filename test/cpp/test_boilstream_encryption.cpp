@@ -135,9 +135,9 @@ struct EncryptionTestFixture {
 		hmac_input.insert(hmac_input.end(), ciphertext_with_tag.begin(), ciphertext_with_tag.end());
 
 		char hmac[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-		duckdb_mbedtls::MbedTlsWrapper::Hmac256(
-		    reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
-		    reinterpret_cast<const char *>(hmac_input.data()), hmac_input.size(), hmac);
+		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()),
+		                                        integrity_key.size(), reinterpret_cast<const char *>(hmac_input.data()),
+		                                        hmac_input.size(), hmac);
 
 		// 4. Encode fields for JSON
 		std::string nonce_b64 = Blob::ToBase64(string_t(reinterpret_cast<const char *>(nonce.data()), nonce.size()));
@@ -155,10 +155,13 @@ struct EncryptionTestFixture {
 		// 5. Build encrypted response JSON
 		return R"({
 			"encrypted": true,
-			"nonce": ")" + nonce_b64 + R"(",
-			"ciphertext": ")" + ciphertext_b64 +
-		                                 R"(",
-			"hmac": ")" + hmac_hex + R"("
+			"nonce": ")" +
+		       nonce_b64 + R"(",
+			"ciphertext": ")" +
+		       ciphertext_b64 +
+		       R"(",
+			"hmac": ")" +
+		       hmac_hex + R"("
 		})";
 	}
 };

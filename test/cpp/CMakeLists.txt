@@ -24,8 +24,10 @@ else()
   set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
 endif()
 
-option(BOILSTREAM_INTEGRATION_TESTS
-       "Build the stock-DuckDB integration lane (needs compatible httpfs and quack artifacts)" ON)
+option(
+  BOILSTREAM_INTEGRATION_TESTS
+  "Build the stock-DuckDB integration lane (needs compatible httpfs and quack artifacts)"
+  ON)
 
 # The public extension uses the stock httpfs and Quack client extensions at
 # runtime, but its standalone build does not necessarily build either external
@@ -40,43 +42,43 @@ set(BOILSTREAM_QUACK_EXTENSION_PATH
 
 if(BOILSTREAM_INTEGRATION_TESTS)
 
-function(resolve_required_extension_artifact variable_name artifact_name)
-  set(candidate "${${variable_name}}")
-  if(candidate STREQUAL "")
-    set(candidate
-        "${EXTENSION_BUILD_DIR}/extension/${artifact_name}/${artifact_name}.duckdb_extension"
-    )
-  endif()
-  get_filename_component(candidate "${candidate}" REALPATH)
-  if(NOT EXISTS "${candidate}")
+  function(resolve_required_extension_artifact variable_name artifact_name)
+    set(candidate "${${variable_name}}")
+    if(candidate STREQUAL "")
+      set(candidate
+          "${EXTENSION_BUILD_DIR}/extension/${artifact_name}/${artifact_name}.duckdb_extension"
+      )
+    endif()
+    get_filename_component(candidate "${candidate}" REALPATH)
+    if(NOT EXISTS "${candidate}")
+      message(
+        FATAL_ERROR
+          "The C++ integration tests require ${artifact_name}. Set "
+          "${variable_name} to the exact compatible "
+          "${artifact_name}.duckdb_extension artifact.")
+    else()
+      set(${variable_name}
+          "${candidate}"
+          PARENT_SCOPE)
+    endif()
+  endfunction()
+
+  resolve_required_extension_artifact(BOILSTREAM_HTTPFS_EXTENSION_PATH httpfs)
+  resolve_required_extension_artifact(BOILSTREAM_QUACK_EXTENSION_PATH quack)
+
+  get_filename_component(_httpfs_platform_dir
+                         "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" DIRECTORY)
+  get_filename_component(_quack_platform_dir
+                         "${BOILSTREAM_QUACK_EXTENSION_PATH}" DIRECTORY)
+  if(NOT _httpfs_platform_dir STREQUAL _quack_platform_dir)
     message(
       FATAL_ERROR
-        "The C++ integration tests require ${artifact_name}. Set "
-        "${variable_name} to the exact compatible "
-        "${artifact_name}.duckdb_extension artifact.")
-  else()
-    set(${variable_name}
-        "${candidate}"
-        PARENT_SCOPE)
+        "httpfs and quack must come from the same DuckDB version/platform extension directory"
+    )
   endif()
-endfunction()
-
-resolve_required_extension_artifact(BOILSTREAM_HTTPFS_EXTENSION_PATH httpfs)
-resolve_required_extension_artifact(BOILSTREAM_QUACK_EXTENSION_PATH quack)
-
-get_filename_component(_httpfs_platform_dir
-                       "${BOILSTREAM_HTTPFS_EXTENSION_PATH}" DIRECTORY)
-get_filename_component(_quack_platform_dir "${BOILSTREAM_QUACK_EXTENSION_PATH}"
-                       DIRECTORY)
-if(NOT _httpfs_platform_dir STREQUAL _quack_platform_dir)
-  message(
-    FATAL_ERROR
-      "httpfs and quack must come from the same DuckDB version/platform extension directory"
-  )
-endif()
-get_filename_component(_stock_version_dir "${_quack_platform_dir}" DIRECTORY)
-get_filename_component(BOILSTREAM_STOCK_EXTENSION_DIRECTORY
-                       "${_stock_version_dir}" DIRECTORY)
+  get_filename_component(_stock_version_dir "${_quack_platform_dir}" DIRECTORY)
+  get_filename_component(BOILSTREAM_STOCK_EXTENSION_DIRECTORY
+                         "${_stock_version_dir}" DIRECTORY)
 endif()
 
 # Priority 1: Look in Corrosion's cargo build directory (release builds)
@@ -112,7 +114,8 @@ else()
 endif()
 
 set(DUCKDB_LIBS
-    # DuckDB 2.0: extension archives go before libduckdb_static.a and are registered by
+    # DuckDB 2.0: extension archives go before libduckdb_static.a and are
+    # registered by
     # static_extension_loader.c (see link_duckdb_static below).
     "${EXTENSION_BUILD_DIR}/extension/boilstream/libboilstream_extension.a"
     "${EXTENSION_BUILD_DIR}/extension/parquet/libparquet_extension.a"
@@ -130,14 +133,17 @@ set(DUCKDB_LIBS
     "${EXTENSION_BUILD_DIR}/third_party/utf8proc/libduckdb_utf8proc.a"
     "${EXTENSION_BUILD_DIR}/third_party/skiplist/libduckdb_skiplistlib.a")
 
-# Links DuckDB plus the extension archives above into a test program and compiles the
-# static extension loader into it (it must be a program source, not an archive member).
+# Links DuckDB plus the extension archives above into a test program and
+# compiles the static extension loader into it (it must be a program source, not
+# an archive member).
 function(link_duckdb_static target_name)
   target_sources(
     ${target_name}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/static_extension_loader.c
-            ${DUCKDB_SOURCE_DIR}/extension/loader/static_extension_autoregister.cpp)
-  target_include_directories(${target_name} PRIVATE ${DUCKDB_SOURCE_DIR}/src/include)
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/static_extension_loader.c
+      ${DUCKDB_SOURCE_DIR}/extension/loader/static_extension_autoregister.cpp)
+  target_include_directories(${target_name}
+                             PRIVATE ${DUCKDB_SOURCE_DIR}/src/include)
   target_link_libraries(${target_name} PRIVATE ${DUCKDB_LIBS})
 endfunction()
 
@@ -157,8 +163,8 @@ FetchContent_Declare(
   GIT_TAG v2.13.10)
 FetchContent_MakeAvailable(Catch2)
 
-# Native test dependencies above are exact artifacts from the selected build.
-# Do not let Homebrew/local library search paths silently replace those inputs.
+# Native test dependencies above are exact artifacts from the selected build. Do
+# not let Homebrew/local library search paths silently replace those inputs.
 
 # Test executable
 add_executable(
@@ -224,30 +230,31 @@ link_duckdb_static(boilstream_test)
 link_rust_dependencies(boilstream_test)
 
 if(BOILSTREAM_INTEGRATION_TESTS)
-# Integration test executable
-add_executable(boilstream_integration_test test_boilstream_integration.cpp)
+  # Integration test executable
+  add_executable(boilstream_integration_test test_boilstream_integration.cpp)
 
-target_include_directories(
-  boilstream_integration_test
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${DUCKDB_SOURCE_DIR}/src/include)
+  target_include_directories(
+    boilstream_integration_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+            ${DUCKDB_SOURCE_DIR}/src/include)
 
-# Enable debug logging for OPAQUE authentication flows
-target_compile_definitions(boilstream_integration_test PRIVATE BOILSTREAM_DEBUG)
+  # Enable debug logging for OPAQUE authentication flows
+  target_compile_definitions(boilstream_integration_test
+                             PRIVATE BOILSTREAM_DEBUG)
 
-# Integration tests use system DuckDB and load the extension dynamically So we
-# link against system DuckDB (not extension's build)
-if(EXISTS "/opt/homebrew/lib/libduckdb.dylib")
-  target_link_libraries(
-    boilstream_integration_test PRIVATE /opt/homebrew/lib/libduckdb.dylib
-                                        Catch2::Catch2)
-elseif(EXISTS "/usr/local/lib/libduckdb.dylib")
-  target_link_libraries(boilstream_integration_test
-                        PRIVATE /usr/local/lib/libduckdb.dylib Catch2::Catch2)
-else()
-  target_link_libraries(boilstream_integration_test PRIVATE Catch2::Catch2)
-  message(WARNING "System DuckDB not found - integration tests may not run")
-endif()
+  # Integration tests use system DuckDB and load the extension dynamically So we
+  # link against system DuckDB (not extension's build)
+  if(EXISTS "/opt/homebrew/lib/libduckdb.dylib")
+    target_link_libraries(
+      boilstream_integration_test PRIVATE /opt/homebrew/lib/libduckdb.dylib
+                                          Catch2::Catch2)
+  elseif(EXISTS "/usr/local/lib/libduckdb.dylib")
+    target_link_libraries(boilstream_integration_test
+                          PRIVATE /usr/local/lib/libduckdb.dylib Catch2::Catch2)
+  else()
+    target_link_libraries(boilstream_integration_test PRIVATE Catch2::Catch2)
+    message(WARNING "System DuckDB not found - integration tests may not run")
+  endif()
 endif()
 
 # AWS Signing test executable (links with Rust library)
@@ -390,12 +397,15 @@ link_duckdb_static(boilstream_connection_state_test)
 # Link Rust dependencies (needed for DuckDB static lib)
 link_rust_dependencies(boilstream_connection_state_test)
 
-# Historical target name; tests the actual session class natively, not WASM execution.
+# Historical target name; tests the actual session class natively, not WASM
+# execution.
 find_package(Threads REQUIRED)
 add_executable(wasm_lock_ordering_test test_wasm_lock_ordering.cpp)
-target_include_directories(wasm_lock_ordering_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include)
-target_link_libraries(wasm_lock_ordering_test PRIVATE ${DUCKDB_LIBS} Catch2::Catch2 Threads::Threads)
+target_include_directories(
+  wasm_lock_ordering_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+                                  ${DUCKDB_SOURCE_DIR}/src/include)
+target_link_libraries(wasm_lock_ordering_test
+                      PRIVATE ${DUCKDB_LIBS} Catch2::Catch2 Threads::Threads)
 link_rust_dependencies(wasm_lock_ordering_test)
 
 # Session routing test executable (per-connection session isolation)
@@ -494,14 +504,14 @@ add_test(NAME InputValidationTests COMMAND input_validation_test)
 # loadable artifact works in stock DuckDB. Server/OPAQUE cases require
 # single-use credentials and belong to the product and staging gates.
 if(BOILSTREAM_INTEGRATION_TESTS)
-add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test
-                                                 "[local]")
-set_tests_properties(
-  BoilstreamIntegrationTests
-  PROPERTIES
-    ENVIRONMENT
-    "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_STOCK_EXTENSION_DIRECTORY=${BOILSTREAM_STOCK_EXTENSION_DIRECTORY}"
-)
+  add_test(NAME BoilstreamIntegrationTests COMMAND boilstream_integration_test
+                                                   "[local]")
+  set_tests_properties(
+    BoilstreamIntegrationTests
+    PROPERTIES
+      ENVIRONMENT
+      "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_STOCK_EXTENSION_DIRECTORY=${BOILSTREAM_STOCK_EXTENSION_DIRECTORY}"
+  )
 endif()
 add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
@@ -510,11 +520,16 @@ add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)
 add_test(NAME QuackBridgeTests COMMAND quack_bridge_test)
 
 # Session publication ownership, rejection and real ClientContext teardown.
-add_executable(session_publication_test test_session_publication.cpp
-               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-target_include_directories(session_publication_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+add_executable(
+  session_publication_test
+  test_session_publication.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+target_include_directories(
+  session_publication_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 target_link_libraries(session_publication_test PRIVATE ${DUCKDB_LIBS})
 link_rust_dependencies(session_publication_test)
 add_test(NAME SessionPublication COMMAND session_publication_test)
@@ -522,129 +537,212 @@ add_test(NAME SessionPublication COMMAND session_publication_test)
 # Provider integration fixtures call the selected native build's generated
 # extension loader. The unit-test dummy static loader does not define that API.
 # Use the same exact combined library as the authentication integration targets;
-# do not search for a system DuckDB or mix a second static core into these targets.
+# do not search for a system DuckDB or mix a second static core into these
+# targets.
 find_package(Threads REQUIRED)
-find_library(BOILSTREAM_AUTH_TEST_LIBRARY NAMES duckdb
-  PATHS "${EXTENSION_BUILD_DIR}/src" NO_DEFAULT_PATH)
+find_library(
+  BOILSTREAM_AUTH_TEST_LIBRARY
+  NAMES duckdb
+  PATHS "${EXTENSION_BUILD_DIR}/src"
+  NO_DEFAULT_PATH)
 if(NOT BOILSTREAM_AUTH_TEST_LIBRARY)
-  message(FATAL_ERROR "Provider integration tests require the exact native shared library with static extension providers")
+  message(
+    FATAL_ERROR
+      "Provider integration tests require the exact native shared library with static extension providers"
+  )
 endif()
 
 # Memory-only session publication/resume with a filesystem tripwire.
-add_executable(session_memory_only_test test_session_memory_only.cpp
-               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-target_include_directories(session_memory_only_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-target_link_libraries(session_memory_only_test PRIVATE
-  ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-  "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME SessionMemoryOnly COMMAND ${Python3_EXECUTABLE}
-  ${CMAKE_CURRENT_SOURCE_DIR}/run_session_memory_only.py $<TARGET_FILE:session_memory_only_test>)
+add_executable(
+  session_memory_only_test
+  test_session_memory_only.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+target_include_directories(
+  session_memory_only_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(
+  session_memory_only_test
+  PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+          "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+find_package(
+  Python3
+  COMPONENTS Interpreter
+  REQUIRED)
+add_test(
+  NAME SessionMemoryOnly
+  COMMAND
+    ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_session_memory_only.py
+    $<TARGET_FILE:session_memory_only_test>)
 
-# Generic cache isolation, stale publication, capacity and real secret-manager routing.
-add_executable(secret_cache_ownership_test test_secret_cache_ownership.cpp
-               ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-target_include_directories(secret_cache_ownership_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-  ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+# Generic cache isolation, stale publication, capacity and real secret-manager
+# routing.
+add_executable(
+  secret_cache_ownership_test
+  test_secret_cache_ownership.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+target_include_directories(
+  secret_cache_ownership_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
 target_link_libraries(secret_cache_ownership_test PRIVATE ${DUCKDB_LIBS})
 link_rust_dependencies(secret_cache_ownership_test)
 add_test(NAME SecretCacheOwnership COMMAND secret_cache_ownership_test)
 set_tests_properties(SecretCacheOwnership PROPERTIES TIMEOUT 60)
 
 # This integration gate targets the BoilStream fork's required static providers.
-if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  add_executable(secret_cache_providers_test test_secret_cache_providers.cpp
-                 ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-  target_include_directories(secret_cache_providers_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-    ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-  target_link_libraries(secret_cache_providers_test PRIVATE
-    ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-    "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-  add_test(NAME SecretCacheProviders COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_cache_providers.py $<TARGET_FILE:secret_cache_providers_test>)
+if(EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  add_executable(
+    secret_cache_providers_test
+    test_secret_cache_providers.cpp ../../src/boilstream_secret_storage.cpp
+    ../../src/opaque_wrapper.cpp)
+  target_include_directories(
+    secret_cache_providers_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+            ${DUCKDB_SOURCE_DIR}/src/include
+            ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+            ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+  target_link_libraries(
+    secret_cache_providers_test
+    PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+            "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+  add_test(
+    NAME SecretCacheProviders
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_cache_providers.py
+      $<TARGET_FILE:secret_cache_providers_test>)
   set_tests_properties(SecretCacheProviders PROPERTIES TIMEOUT 70)
 endif()
 
 # Unit/security tests must not perform unrelated Airport startup telemetry.
-set_property(TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
-  BoilstreamCryptoTests InputValidationTests BoilstreamConnectionStateTests
-  APPEND PROPERTY ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+set_property(
+  TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
+       BoilstreamCryptoTests InputValidationTests BoilstreamConnectionStateTests
+  APPEND
+  PROPERTY ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
 # Compile the actual authentication SQL entrypoints and storage implementation.
 # Runtime uses synthetic loopback HTTP; never needs real credentials.
-if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+if(EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
   foreach(mode IN ITEMS debug release)
-    add_executable(auth_diagnostics_${mode}_test test_auth_diagnostics.cpp
-      ../../src/boilstream_secret_storage.cpp ../../src/boilstream_extension.cpp
-      ../../src/opaque_wrapper.cpp)
-    target_include_directories(auth_diagnostics_${mode}_test PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-      ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-    target_link_libraries(auth_diagnostics_${mode}_test PRIVATE
-      ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-      "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+    add_executable(
+      auth_diagnostics_${mode}_test
+      test_auth_diagnostics.cpp ../../src/boilstream_secret_storage.cpp
+      ../../src/boilstream_extension.cpp ../../src/opaque_wrapper.cpp)
+    target_include_directories(
+      auth_diagnostics_${mode}_test
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+              ${DUCKDB_SOURCE_DIR}/src/include
+              ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+              ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+    target_link_libraries(
+      auth_diagnostics_${mode}_test
+      PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+              "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-      target_compile_definitions(auth_diagnostics_${mode}_test PRIVATE BOILSTREAM_TRACK_STATE_FREE)
-      target_link_options(auth_diagnostics_${mode}_test PRIVATE
-        "-Wl,--wrap=opaque_free_login_state" "-Wl,--wrap=opaque_free_registration_state")
+      target_compile_definitions(auth_diagnostics_${mode}_test
+                                 PRIVATE BOILSTREAM_TRACK_STATE_FREE)
+      target_link_options(
+        auth_diagnostics_${mode}_test PRIVATE
+        "-Wl,--wrap=opaque_free_login_state"
+        "-Wl,--wrap=opaque_free_registration_state")
     endif()
     if(mode STREQUAL "debug")
-      target_compile_definitions(auth_diagnostics_${mode}_test PRIVATE BOILSTREAM_DEBUG)
+      target_compile_definitions(auth_diagnostics_${mode}_test
+                                 PRIVATE BOILSTREAM_DEBUG)
     endif()
-    add_test(NAME AuthDiagnostics_${mode} COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py $<TARGET_FILE:auth_diagnostics_${mode}_test>)
-    set_tests_properties(AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40
-      ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+    add_test(
+      NAME AuthDiagnostics_${mode}
+      COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py
+        $<TARGET_FILE:auth_diagnostics_${mode}_test>)
+    set_tests_properties(
+      AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                         "QUERY_FARM_TELEMETRY_OPT_OUT=1")
   endforeach()
 endif()
 
 # Actual connection ownership plus loopback registration/MFA handlers.
-if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+if(EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
   foreach(kind IN ITEMS ownership http output)
-    add_executable(registration_${kind}_test test_registration_${kind}.cpp
-      ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-    target_include_directories(registration_${kind}_test PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-      ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-    target_link_libraries(registration_${kind}_test PRIVATE
-      ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-      "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+    add_executable(
+      registration_${kind}_test
+      test_registration_${kind}.cpp ../../src/boilstream_secret_storage.cpp
+      ../../src/opaque_wrapper.cpp)
+    target_include_directories(
+      registration_${kind}_test
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+              ${DUCKDB_SOURCE_DIR}/src/include
+              ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+              ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+    target_link_libraries(
+      registration_${kind}_test
+      PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+              "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
   endforeach()
   add_test(NAME RegistrationOwnership COMMAND registration_ownership_test)
   add_test(NAME RegistrationOutput COMMAND registration_output_test)
-  add_test(NAME RegistrationHttp COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py $<TARGET_FILE:registration_http_test>)
-  set_tests_properties(RegistrationOwnership RegistrationHttp RegistrationOutput PROPERTIES TIMEOUT 40
-    ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+  add_test(
+    NAME RegistrationHttp
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py
+      $<TARGET_FILE:registration_http_test>)
+  set_tests_properties(
+    RegistrationOwnership RegistrationHttp RegistrationOutput
+    PROPERTIES TIMEOUT 40 ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
 
-# Independently signed replies exercise actual HTTP verification and session retirement.
-if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  add_executable(required_response_signature_test test_required_response_signature.cpp
+# Independently signed replies exercise actual HTTP verification and session
+# retirement.
+if(EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  add_executable(
+    required_response_signature_test
+    test_required_response_signature.cpp
     ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
-  target_include_directories(required_response_signature_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include
-    ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-  target_link_libraries(required_response_signature_test PRIVATE
-    ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-    "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-  add_test(NAME RequiredResponseSignature COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py $<TARGET_FILE:required_response_signature_test>)
-  set_tests_properties(RequiredResponseSignature PROPERTIES TIMEOUT 40
-    ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+  target_include_directories(
+    required_response_signature_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+            ${DUCKDB_SOURCE_DIR}/src/include
+            ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+            ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+  target_link_libraries(
+    required_response_signature_test
+    PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+            "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+  add_test(
+    NAME RequiredResponseSignature
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py
+      $<TARGET_FILE:required_response_signature_test>)
+  set_tests_properties(
+    RequiredResponseSignature PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                         "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
 
 # Scanner-based authentication diagnostic policy; linked to the matching core.
-if(EXISTS "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+if(EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
   add_executable(query_privacy_test test_query_privacy.cpp)
-  target_include_directories(query_privacy_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include ${DUCKDB_SOURCE_DIR}/src/include)
-  target_link_libraries(query_privacy_test PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads)
+  target_include_directories(
+    query_privacy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+                               ${DUCKDB_SOURCE_DIR}/src/include)
+  target_link_libraries(
+    query_privacy_test PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads)
   add_test(NAME AuthQueryPrivacy COMMAND query_privacy_test)
-  set_tests_properties(AuthQueryPrivacy PROPERTIES TIMEOUT 40
-    ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+  set_tests_properties(
+    AuthQueryPrivacy PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()

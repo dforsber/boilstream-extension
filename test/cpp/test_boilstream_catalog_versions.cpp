@@ -126,11 +126,13 @@ public:
 			hex += "0123456789abcdef"[byte & 15];
 		}
 		string canonical = string("200\nx-boilstream-date:") + date + "\n\nx-boilstream-date\n" + hex;
-		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()), integrity_key.size(),
-		    canonical.data(), canonical.size(), signature);
+		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()),
+		                                        integrity_key.size(), canonical.data(), canonical.size(), signature);
 		response->headers.Insert("X-Boilstream-Date", date);
-		if (corrupt_signature) signature[0] ^= 1;
-		response->headers.Insert("X-Boilstream-Response-Signature", Blob::ToBase64(string_t(signature, sizeof(signature))));
+		if (corrupt_signature)
+			signature[0] ^= 1;
+		response->headers.Insert("X-Boilstream-Response-Signature",
+		                         Blob::ToBase64(string_t(signature, sizeof(signature))));
 		auto &get = request.Cast<GetRequestInfo>();
 		get.response_handler(*response);
 		get.content_handler(reinterpret_cast<const_data_ptr_t>(response_body.data()), response_body.size());
@@ -144,7 +146,8 @@ static duckdb::shared_ptr<CatalogVersionRecordingHTTPUtil> RecordCatalogVersionR
 	fixture.conn_state.access_token = "catalog-version-test-token";
 	fixture.conn_state.session_key = duckdb::vector<uint8_t>(32, 7);
 	fixture.conn_state.region = "eu-west-1";
-	http->integrity_key = BoilstreamCatalogVersionTestAccess::IntegrityKey(*fixture.storage, fixture.conn_state.session_key);
+	http->integrity_key =
+	    BoilstreamCatalogVersionTestAccess::IntegrityKey(*fixture.storage, fixture.conn_state.session_key);
 	return http;
 }
 
@@ -235,7 +238,6 @@ TEST_CASE("RefreshCatalogCredentials", "[boilstream][catalog_versions]") {
 // Test: Thread Safety
 //===----------------------------------------------------------------------===//
 TEST_CASE("Catalog Version Thread Safety", "[boilstream][catalog_versions][threading]") {
-
 	SECTION("Concurrent RefreshCatalogCredentials calls") {
 		TestFixture fixture;
 		const int num_threads = 10;
@@ -268,7 +270,6 @@ TEST_CASE("Catalog Version Thread Safety", "[boilstream][catalog_versions][threa
 			}
 		}
 	}
-
 }
 
 //===----------------------------------------------------------------------===//
@@ -334,7 +335,9 @@ TEST_CASE("Secret Expiration in Connection State", "[boilstream][catalog_version
 TEST_CASE("Catalog polling rate limit expires and remains connection-owned", "[boilstream][catalog_versions]") {
 	TestFixture fixture;
 	auto http = RecordCatalogVersionRequests(fixture);
-	auto poll = [&] { BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state); };
+	auto poll = [&] {
+		BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+	};
 	poll();
 	REQUIRE(http->requests.size() == 1);
 	poll();
@@ -357,9 +360,15 @@ TEST_CASE("Catalog polling rate limit expires and remains connection-owned", "[b
 }
 
 TEST_CASE("Signed catalog versions drive exact credential invalidation", "[boilstream][catalog_versions]") {
-	struct VersionCase { uint64_t old_version, new_version; bool known, refresh; };
-	for (const auto &value : {VersionCase{0, 0, false, false}, {5, 6, true, true}, {5, 5, true, false},
-	                         {5, 4, true, false}, {UINT64_MAX - 1, UINT64_MAX, true, true}}) {
+	struct VersionCase {
+		uint64_t old_version, new_version;
+		bool known, refresh;
+	};
+	for (const auto &value : {VersionCase {0, 0, false, false},
+	                          {5, 6, true, true},
+	                          {5, 5, true, false},
+	                          {5, 4, true, false},
+	                          {UINT64_MAX - 1, UINT64_MAX, true, true}}) {
 		DYNAMIC_SECTION(value.old_version << " -> " << value.new_version << " known=" << value.known) {
 			TestFixture fixture;
 			auto http = RecordCatalogVersionRequests(fixture);
@@ -374,14 +383,14 @@ TEST_CASE("Signed catalog versions drive exact credential invalidation", "[boils
 			other.StoreExpiration("alpha", future);
 			other.catalog_versions[id] = {99, "alpha"};
 			http->response_body = "{\"catalogs\":{\"" + id + "\":{\"version\":" + std::to_string(value.new_version) +
-			    ",\"catalog_name\":\"alpha\"}}}";
+			                      ",\"catalog_name\":\"alpha\"}}}";
 			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
 			REQUIRE(http->requests.size() == 1);
 			REQUIRE(fixture.conn_state.catalog_versions.size() == 1);
 			REQUIRE(fixture.conn_state.catalog_versions.at(id).version == value.new_version);
 			REQUIRE(fixture.conn_state.catalog_versions.at(id).catalog_name == "alpha");
 			REQUIRE(fixture.conn_state.secret_expiration.at("alpha") ==
-			    (value.refresh ? std::chrono::system_clock::time_point::min() : future));
+			        (value.refresh ? std::chrono::system_clock::time_point::min() : future));
 			REQUIRE(fixture.conn_state.secret_expiration.at("unrelated") == future);
 			REQUIRE_FALSE(fixture.conn_state.session_key.empty());
 			REQUIRE(other.GetSecretExpiration("alpha") == future);
@@ -390,10 +399,12 @@ TEST_CASE("Signed catalog versions drive exact credential invalidation", "[boils
 	}
 }
 
-TEST_CASE("Catalog polling rejects a forged response and clears only its own session", "[boilstream][catalog_versions]") {
+TEST_CASE("Catalog polling rejects a forged response and clears only its own session",
+          "[boilstream][catalog_versions]") {
 	TestFixture fixture;
 	auto http = RecordCatalogVersionRequests(fixture);
-	http->response_body = R"({"catalogs":{"11111111-1111-4111-8111-111111111111":{"version":999,"catalog_name":"alpha"}}})";
+	http->response_body =
+	    R"({"catalogs":{"11111111-1111-4111-8111-111111111111":{"version":999,"catalog_name":"alpha"}}})";
 	http->corrupt_signature = true;
 	BoilstreamConnectionState other("https://localhost/secrets");
 	other.access_token = "unrelated-test-token";

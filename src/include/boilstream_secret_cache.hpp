@@ -48,7 +48,8 @@ public:
 	}
 	bool RecentlyFetched() {
 		lock_guard<mutex> guard(lock);
-		return !closed && complete_snapshot && earliest_expiry > std::chrono::system_clock::now() + std::chrono::minutes(5) &&
+		return !closed && complete_snapshot &&
+		       earliest_expiry > std::chrono::system_clock::now() + std::chrono::minutes(5) &&
 		       fetched != std::chrono::steady_clock::time_point::min() &&
 		       std::chrono::steady_clock::now() - fetched < std::chrono::seconds(10);
 	}
@@ -56,7 +57,8 @@ public:
 	shared_ptr<const SecretEntry> Get(const string &name, bool allow_expired = false) {
 		lock_guard<mutex> guard(lock);
 		auto it = entries.find(name);
-		if (closed || it == entries.end() || (!allow_expired && !Fresh(it->second))) return nullptr;
+		if (closed || it == entries.end() || (!allow_expired && !Fresh(it->second)))
+			return nullptr;
 		return it->second.secret;
 	}
 	vector<shared_ptr<const SecretEntry>> Snapshot(bool allow_expired = false) {
@@ -64,7 +66,9 @@ public:
 		lock_guard<mutex> guard(lock);
 		if (!closed) {
 			result.reserve(entries.size());
-			for (auto &it : entries) if (allow_expired || Fresh(it.second)) result.push_back(it.second.secret);
+			for (auto &it : entries)
+				if (allow_expired || Fresh(it.second))
+					result.push_back(it.second.secret);
 		}
 		return result;
 	}
@@ -100,7 +104,8 @@ public:
 	void Replace(Entries replacement, uint64_t expected, bool complete = true) {
 		idx_t total = 0;
 		auto earliest = Time::max();
-		if (replacement.size() > MAX_ENTRIES) throw IOException("Too many BoilStream secrets");
+		if (replacement.size() > MAX_ENTRIES)
+			throw IOException("Too many BoilStream secrets");
 		for (const auto &it : replacement) {
 			if (it.second.bytes > MAX_ENTRY_BYTES || it.second.bytes > MAX_BYTES - total)
 				throw IOException("BoilStream secret cache capacity exhausted");
@@ -152,12 +157,14 @@ public:
 			entries.swap(retired);
 		}
 	}
+
 private:
 	static bool Fresh(const Entry &entry) {
 		return entry.expires > std::chrono::system_clock::now() + std::chrono::minutes(5);
 	}
 	void CheckRevision(uint64_t expected) {
-		if (closed || revision != expected) throw IOException("BoilStream secret update was superseded");
+		if (closed || revision != expected)
+			throw IOException("BoilStream secret update was superseded");
 	}
 	void CheckAdmission(const Entry &entry, uint64_t expected) {
 		CheckRevision(expected);

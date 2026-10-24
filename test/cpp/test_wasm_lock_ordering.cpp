@@ -31,11 +31,13 @@ static bool Matches(const BoilstreamConnectionState::SessionSnapshot &snapshot, 
 
 static void Rendezvous(std::atomic<int> &ready, std::atomic<bool> &go) {
 	ready.fetch_add(1);
-	while (!go.load()) std::this_thread::yield();
+	while (!go.load())
+		std::this_thread::yield();
 }
 
 static void Start(std::atomic<int> &ready, std::atomic<bool> &go, int threads) {
-	while (ready.load() != threads) std::this_thread::yield();
+	while (ready.load() != threads)
+		std::this_thread::yield();
 	go.store(true);
 }
 
@@ -53,7 +55,8 @@ TEST_CASE("Production session snapshots have exact sequences under contention", 
 			std::vector<uint64_t> sequences;
 			for (int call = 0; call < CALLS; ++call) {
 				auto snapshot = state.GetSessionSnapshot();
-				if (!Matches(snapshot, 1)) mismatches.fetch_add(1);
+				if (!Matches(snapshot, 1))
+					mismatches.fetch_add(1);
 				sequences.push_back(snapshot.sequence);
 			}
 			return sequences;
@@ -94,7 +97,8 @@ TEST_CASE("Production snapshots stay coherent during credential changes and logo
 					             snapshot.access_token.empty() && snapshot.region.empty();
 					for (int identity = 1; identity <= THREADS && !valid; ++identity)
 						valid = Matches(snapshot, uint8_t(identity));
-					if (!valid) mismatches.fetch_add(1);
+					if (!valid)
+						mismatches.fetch_add(1);
 					snapshots.fetch_add(1);
 				}
 				completed.fetch_add(1);
@@ -102,7 +106,8 @@ TEST_CASE("Production snapshots stay coherent during credential changes and logo
 		}));
 	}
 	Start(ready, go, THREADS);
-	for (auto &worker : workers) worker.get();
+	for (auto &worker : workers)
+		worker.get();
 	REQUIRE(completed.load() == THREADS * OPERATIONS);
 	REQUIRE(snapshots.load() == THREADS * OPERATIONS * 4 / 5);
 	REQUIRE(state.authentication_generation.load() == THREADS * OPERATIONS / 5);
@@ -133,7 +138,8 @@ TEST_CASE("Production session counters and logout remain owner-local", "[session
 		}));
 	}
 	Start(ready, go, CONNECTIONS);
-	for (auto &worker : workers) worker.get();
+	for (auto &worker : workers)
+		worker.get();
 	REQUIRE(mismatches.load() == 0);
 	states[0].ClearSession();
 	REQUIRE_FALSE(states[0].GetSessionSnapshot().has_session_key);

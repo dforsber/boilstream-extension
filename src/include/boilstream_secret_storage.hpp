@@ -18,7 +18,9 @@
 #include <unordered_map>
 #include <optional>
 
-namespace duckdb_yyjson { struct yyjson_val; }
+namespace duckdb_yyjson {
+struct yyjson_val;
+}
 
 // Forward declarations for test friend access (outside namespace)
 class BoilstreamCryptoTestAccess;
@@ -94,11 +96,12 @@ public:
 	//! Context-aware authority access; a changed tenant must authenticate again.
 	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
 
-    //! Private embedding API. No SQL binding or constructor from claimed IDs.
-    void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
-    string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-    BoilstreamLocalSecretProvider::Response RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-    void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
+	//! Private embedding API. No SQL binding or constructor from claimed IDs.
+	void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
+	string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+	BoilstreamLocalSecretProvider::Response
+	RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+	void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
 
 	//! Perform OPAQUE login with password
 	//! Authenticate private state, then publish it for this connection
@@ -262,15 +265,18 @@ private:
 	};
 	SecretOwner GetSecretOwner(optional_ptr<CatalogTransaction> transaction, bool create = false);
 	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
-	SecretMatch LookupCachedSecret(const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache);
+	SecretMatch LookupCachedSecret(const string &path, const string &type,
+	                               const shared_ptr<BoilstreamSecretCache> &cache);
 	struct FetchedSecret {
 		shared_ptr<const SecretEntry> secret;
 		std::optional<BoilstreamSecretCache::Time> expires;
 		unique_ptr<SecretEntry> CopyIfUsable() const;
 	};
-	FetchedSecret FetchSecret(const string &selector, const string &type, bool match, optional_ptr<CatalogTransaction> transaction,
-	                 const shared_ptr<BoilstreamSecretCache> &expected_cache);
-	vector<FetchedSecret> PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision);
+	FetchedSecret FetchSecret(const string &selector, const string &type, bool match,
+	                          optional_ptr<CatalogTransaction> transaction,
+	                          const shared_ptr<BoilstreamSecretCache> &expected_cache);
+	vector<FetchedSecret> PublishSecretList(const string &response, BoilstreamConnectionState &state,
+	                                        uint64_t revision);
 
 	//! Write secret with explicit connection state (called from StoreSecret)
 	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
@@ -291,7 +297,8 @@ private:
 
 	//! Build authenticated request headers with signature (uses connection state)
 	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-	                                      BoilstreamConnectionState &conn_state, vector<uint8_t> *response_key = nullptr);
+	                                      BoilstreamConnectionState &conn_state,
+	                                      vector<uint8_t> *response_key = nullptr);
 
 	//! Verify authenticated response signature and timestamp
 	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
@@ -367,7 +374,8 @@ private:
 
 	//! Fetch catalog versions from server (uses connection state)
 	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
-	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
+	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state,
+	                                                                optional_ptr<ClientContext> context = nullptr);
 
 	//! Force refresh credentials for a specific catalog by name (uses connection state)
 	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);

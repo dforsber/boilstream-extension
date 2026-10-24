@@ -59,8 +59,6 @@ public:
 	                                                               const HTTPHeaders &headers) {
 		return storage->ExtractBoilstreamHeaders(headers);
 	}
-
-
 };
 
 //===----------------------------------------------------------------------===//
@@ -182,7 +180,8 @@ TEST_CASE("Response Signature Verification - Missing Header Is Rejected", "[boil
 	// No x-boilstream-response-signature header
 
 	REQUIRE_THROWS_AS(BoilstreamCryptoTestAccess::VerifyResponseSignature(fixture.storage.get(), response_body,
-	                                                                    status_code, headers, fixture.session_key), IOException);
+	                                                                      status_code, headers, fixture.session_key),
+	                  IOException);
 }
 
 TEST_CASE("Response Signature Verification - Invalid Signature", "[boilstream][crypto][signature]") {
@@ -683,5 +682,4 @@ TEST_CASE("Refresh Token - Binary Encoding", "[boilstream][crypto][refresh-token
 		// Verify first byte is null
 		REQUIRE(static_cast<uint8_t>(decoded[0]) == 0x00);
 	}
-
 }
