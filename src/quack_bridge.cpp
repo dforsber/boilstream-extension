@@ -5,9 +5,12 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
+// Fork-only: the privacy API and the completeness-reporting tokenizer the classifier needs.
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "boilstream_diagnostics.hpp"
 #include "boilstream_query_privacy.hpp"
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -153,7 +156,7 @@ void InstallQueryErrorPrivacyIfHosted() {
 	for (auto it = targets.databases.begin(); it != targets.databases.end();) {
 		if (auto db = it->lock()) {
 			ExtensionCallbackManager::Get(*db).RegisterQueryErrorPrivacyCallback(BoilstreamPrivateQueryError,
-			                                                                      BoilstreamPrivateErrorMessage);
+			                                                                     BoilstreamPrivateErrorMessage);
 			++it;
 		} else {
 			it = targets.databases.erase(it);

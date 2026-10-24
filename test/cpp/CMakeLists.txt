@@ -12,17 +12,25 @@ set(RUST_LIB_PATH "")
 
 # Use DuckDB libraries from the extension build (not system DuckDB). Honour the
 # workspace's direnv-managed external build when configured, while keeping the
-# repository-local path as the standalone fallback.
-# Cached so an automatic re-configure (without the environment) keeps the same trees.
+# repository-local path as the standalone fallback. Cached so an automatic
+# re-configure (without the environment) keeps the same trees.
 if(DEFINED ENV{DUCKDB_BUILD_DIR} AND NOT "$ENV{DUCKDB_BUILD_DIR}" STREQUAL "")
-  set(EXTENSION_BUILD_DIR "$ENV{DUCKDB_BUILD_DIR}" CACHE PATH "DuckDB build the tests link" FORCE)
+  set(EXTENSION_BUILD_DIR
+      "$ENV{DUCKDB_BUILD_DIR}"
+      CACHE PATH "DuckDB build the tests link" FORCE)
 else()
-  set(EXTENSION_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build/release" CACHE PATH "DuckDB build the tests link")
+  set(EXTENSION_BUILD_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../build/release"
+      CACHE PATH "DuckDB build the tests link")
 endif()
 if(DEFINED ENV{DUCKDB_SOURCE_DIR} AND NOT "$ENV{DUCKDB_SOURCE_DIR}" STREQUAL "")
-  set(DUCKDB_SOURCE_DIR "$ENV{DUCKDB_SOURCE_DIR}" CACHE PATH "DuckDB source the tests compile against" FORCE)
+  set(DUCKDB_SOURCE_DIR
+      "$ENV{DUCKDB_SOURCE_DIR}"
+      CACHE PATH "DuckDB source the tests compile against" FORCE)
 else()
-  set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb" CACHE PATH "DuckDB source the tests compile against")
+  set(DUCKDB_SOURCE_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb"
+      CACHE PATH "DuckDB source the tests compile against")
 endif()
 
 option(
@@ -483,9 +491,11 @@ target_include_directories(
   quack_bridge_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
                             ${DUCKDB_SOURCE_DIR}/src/include)
 
-# Mirror the extension build: the fork-only privacy registration compiles only where the API exists.
+# Mirror the extension build: the fork-only privacy registration compiles only
+# where the API exists.
 set(BOILSTREAM_ECM_HEADER
-    "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/extension_callback_manager.hpp")
+    "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/extension_callback_manager.hpp"
+)
 if(EXISTS "${BOILSTREAM_ECM_HEADER}")
   file(READ "${BOILSTREAM_ECM_HEADER}" BOILSTREAM_ECM_SOURCE)
   if(BOILSTREAM_ECM_SOURCE MATCHES "RegisterQueryErrorPrivacyCallback")

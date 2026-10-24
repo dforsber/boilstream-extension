@@ -23,12 +23,11 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 		// though the query only contains its ID. Protect this table function too.
 		idx_t next = i + 1;
 		// The tokenizer splits U&"..." [UESCAPE 'x'] into U, &, the quoted name and the escape clause.
-		bool unicode_name = token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && i + 2 < tokens.size() &&
-		                    StringUtil::CIEquals(query.substr(token.start, 1), "u") &&
-		                    tokens[i + 1].start == token.start + 1 && query[tokens[i + 1].start] == '&' &&
-		                    tokens[i + 2].start == token.start + 2 &&
-		                    tokens[i + 2].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
-		                    query[tokens[i + 2].start] == '"';
+		bool unicode_name =
+		    token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && i + 2 < tokens.size() &&
+		    StringUtil::CIEquals(query.substr(token.start, 1), "u") && tokens[i + 1].start == token.start + 1 &&
+		    query[tokens[i + 1].start] == '&' && tokens[i + 2].start == token.start + 2 &&
+		    tokens[i + 2].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && query[tokens[i + 2].start] == '"';
 		if (unicode_name) {
 			next = i + 3;
 			if (next + 1 < tokens.size() && tokens[next].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
