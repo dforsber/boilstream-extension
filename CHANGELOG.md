@@ -46,7 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authenticated responses must carry a response signature; a missing `x-boilstream-response-signature`
   header is an error, not a pass-through.
 - Authentication errors are reported with private, safe diagnostics; raw server text is not echoed.
-  In the BoilStream fork the extension also registers a query error privacy policy.
+  In the BoilStream fork the extension also installs a query error privacy policy, but only once a
+  BoilStream host has registered through the Quack bridge: a standalone DuckDB keeps its full
+  diagnostics.
+- The query error privacy classifier follows the DuckDB 2.0 tokenizer: an input that ends inside an
+  open comment, string, dollar quote or hidden NUL stays private, and `U&"..."` identifiers and
+  comments before an argument list are recognized.
 - Secret metadata bytes are preserved exactly through JSON serialization; malformed secret inputs,
   signing text and inconsistent payload lengths fail closed.
 - Secret list replacement is atomic and validated as a whole; conflicts on remote writes are resolved
