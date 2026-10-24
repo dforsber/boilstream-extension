@@ -5,6 +5,9 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/extension_callback_manager.hpp"
+#include "boilstream_diagnostics.hpp"
+#include "boilstream_query_privacy.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -127,6 +130,38 @@ QuackHookSetterSlots &QuackHookSetters() {
 	return *slots;
 }
 
+// Databases that loaded the extension before a host registered; the host may arrive later.
+struct LoadedDatabases {
+	std::mutex mutex;
+	std::vector<weak_ptr<DatabaseInstance>> databases;
+};
+
+LoadedDatabases &PrivacyPolicyTargets() {
+	static auto *targets = new LoadedDatabases();
+	return *targets;
+}
+
+// Query-error redaction only makes sense for a hosted, multi-tenant server: a standalone DuckDB
+// keeps its full diagnostics. Idempotent per database.
+void InstallQueryErrorPrivacyIfHosted() {
+#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
+	if (!CatalogPlannerSlot().load(std::memory_order_acquire)) {
+		return;
+	}
+	auto &targets = PrivacyPolicyTargets();
+	std::lock_guard<std::mutex> guard(targets.mutex);
+	for (auto it = targets.databases.begin(); it != targets.databases.end();) {
+		if (auto db = it->lock()) {
+			ExtensionCallbackManager::Get(*db).RegisterQueryErrorPrivacyCallback(BoilstreamPrivateQueryError,
+			                                                                      BoilstreamPrivateErrorMessage);
+			++it;
+		} else {
+			it = targets.databases.erase(it);
+		}
+	}
+#endif
+}
+
 struct SessionRegistry {
 	std::mutex mutex;
 	std::unordered_map<std::string, std::shared_ptr<const SessionCtx>> sessions;
@@ -221,6 +256,11 @@ std::shared_ptr<const SessionCtx> GetQuackSessionCtx(const std::string &session_
 }
 
 void RegisterQuackBridge(ExtensionLoader &loader) {
+	{
+		auto &targets = PrivacyPolicyTargets();
+		std::lock_guard<std::mutex> guard(targets.mutex);
+		targets.databases.emplace_back(loader.GetDatabaseInstance().shared_from_this());
+	}
 	loader.RegisterFunction(ScalarFunction("boilstream_quack_authn",
 	                                       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                       LogicalType::BOOLEAN, BoilstreamQuackAuthnFunction));
@@ -244,6 +284,7 @@ void InstallQuackAdmissionHooksIfHosted() {
 	if (!CatalogPlannerSlot().load(std::memory_order_acquire)) {
 		return; // no host yet
 	}
+	InstallQueryErrorPrivacyIfHosted();
 	auto &setters = QuackHookSetters();
 	if (!setters.installed.exchange(true)) {
 		if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {

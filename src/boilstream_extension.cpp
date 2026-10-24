@@ -1,5 +1,3 @@
-#include "duckdb/main/extension_callback_manager.hpp"
-#include "boilstream_query_privacy.hpp"
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
@@ -2162,10 +2160,6 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 
 //! Load the extension
 static void LoadInternal(ExtensionLoader &loader) {
-#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
-	ExtensionCallbackManager::Get(loader.GetDatabaseInstance())
-	    .RegisterQueryErrorPrivacyCallback(BoilstreamPrivateQueryError, BoilstreamPrivateErrorMessage);
-#endif
 	BOILSTREAM_LOG("LoadInternal: Extension loading started");
 
 	// Register global storage
