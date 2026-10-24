@@ -91,7 +91,8 @@ SET active_grammar_extensions = ['shell', 'boilstream']; -- DuckDB CLI, keeps th
 ```
 
 `RESET active_grammar_extensions` turns the statements back into syntax errors; the PRAGMA forms always
-work. Note that DuckDB 2.0 parses dotted setting names only when quoted: `SET "boilstream.tenant_id" = ...`.
+work. To stop the automatic activation for a whole process, `SET boilstream_grammar_auto_activate = false`
+or export `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` before the first connection opens. Note that DuckDB 2.0 parses dotted setting names only when quoted: `SET "boilstream.tenant_id" = ...`.
 
 ## Local development: skipping TLS verification
 

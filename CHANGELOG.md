@@ -29,6 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opened after the extension loaded; earlier connections and the DuckDB CLI (which selects its own
   `shell` grammar) run `SET active_grammar_extensions = ['boilstream']`.
 - `PRAGMA boilstream_help` lists the statement forms.
+- Extension option `boilstream_grammar_auto_activate` (default `true`) and the environment variable
+  `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` opt a process out of activating the boilstream syntax on new
+  connections; the PRAGMA forms keep working either way.
+- CI builds and tests against stock DuckDB v2.0.0 with extension-ci-tools v2.0.0.
+- Host hooks for the BoilStream server: `boilstream_quack_set_capability_context_factory` retains an
+  immutable capability context for native session callbacks, and `boilstream_install_local_session_v2`
+  installs a local native session with a private authority. Both are inert unless a host registers.
+- Login credentials, registration and MFA state, and generic remote secrets are owned by the DuckDB
+  connection and the authenticated identity (tenant-aware in the BoilStream fork). Nothing is written
+  to files or browser storage; credential files left by older releases are ignored. See the README
+  section "Login lifetime" for the cache limits.
+
+### Changed
+
+- Authenticated responses must carry a response signature; a missing `x-boilstream-response-signature`
+  header is an error, not a pass-through.
+- Authentication errors are reported with private, safe diagnostics; raw server text is not echoed.
+  In the BoilStream fork the extension also registers a query error privacy policy.
+- Secret metadata bytes are preserved exactly through JSON serialization; malformed secret inputs,
+  signing text and inconsistent payload lengths fail closed.
+- Secret list replacement is atomic and validated as a whole; conflicts on remote writes are resolved
+  by the server's authoritative result, and retry keys are scoped to one authenticated call.
+
+### Fixed
+
+- The Quack admission hooks (catalog planner, authorizer, post-execute) are installed only once a host
+  has registered its callbacks. A statically linked Quack without the BoilStream host keeps its stock
+  behaviour instead of failing closed with "Catalog planner is not registered".
 
 ### Tests
 
