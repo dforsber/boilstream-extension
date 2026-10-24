@@ -57,8 +57,8 @@ TEST_CASE("Per-Connection Session Routing", "[boilstream][session-routing]") {
 		s.SetActiveSessionKeyForConnection(id1, "key-alpha");
 		s.SetActiveSessionKeyForConnection(id2, "key-beta");
 
-		REQUIRE(s.GetSessionForConnection(id1) == &sess1);
-		REQUIRE(s.GetSessionForConnection(id2) == &sess2);
+		REQUIRE(s.GetSessionForConnection(id1).get() == &sess1);
+		REQUIRE(s.GetSessionForConnection(id2).get() == &sess2);
 		REQUIRE(s.GetSessionForConnection(id1) != s.GetSessionForConnection(id2));
 	}
 
@@ -74,8 +74,8 @@ TEST_CASE("Per-Connection Session Routing", "[boilstream][session-routing]") {
 		s.SetActiveSessionKeyForConnection(con1.context->GetConnectionId(), "shared-key");
 		s.SetActiveSessionKeyForConnection(con2.context->GetConnectionId(), "shared-key");
 
-		auto *r1 = s.GetSessionForConnection(con1.context->GetConnectionId());
-		auto *r2 = s.GetSessionForConnection(con2.context->GetConnectionId());
+		auto r1 = s.GetSessionForConnection(con1.context->GetConnectionId());
+		auto r2 = s.GetSessionForConnection(con2.context->GetConnectionId());
 		REQUIRE(r1 != nullptr);
 		REQUIRE(r1 == r2);
 	}
@@ -108,7 +108,7 @@ TEST_CASE("GetSession Transaction Routing", "[boilstream][session-routing]") {
 		con.Query("BEGIN TRANSACTION");
 		auto tx = CatalogTransaction::GetSystemCatalogTransaction(*con.context);
 		REQUIRE(tx.HasContext());
-		REQUIRE(s.GetSession(&tx) == &sess);
+		REQUIRE(s.GetSession(&tx).get() == &sess);
 		con.Query("COMMIT");
 	}
 
@@ -172,9 +172,9 @@ TEST_CASE("ClearSession Isolation", "[boilstream][session-routing]") {
 
 		s.ClearSession(*con.context);
 
-		auto *result = s.GetSessionForConnection(con.context->GetConnectionId());
+		auto result = s.GetSessionForConnection(con.context->GetConnectionId());
 		REQUIRE(result != nullptr);
-		REQUIRE(result == &sess);
+		REQUIRE(result.get() == &sess);
 		{
 			lock_guard<mutex> l(sess.session_lock);
 			REQUIRE(sess.access_token.empty());
@@ -197,7 +197,7 @@ TEST_CASE("ClearSession Isolation", "[boilstream][session-routing]") {
 		// Clearing via con1 wipes the shared object
 		s.ClearSession(*con1.context);
 
-		auto *via_con2 = s.GetSessionForConnection(con2.context->GetConnectionId());
+		auto via_con2 = s.GetSessionForConnection(con2.context->GetConnectionId());
 		REQUIRE(via_con2 != nullptr);
 		{
 			lock_guard<mutex> l(via_con2->session_lock);
@@ -256,7 +256,7 @@ TEST_CASE("ClearConnectionMapping", "[boilstream][session-routing]") {
 		s.ClearConnectionMapping(id);
 
 		// Session still accessible by key
-		auto *by_key = s.GetSessionByKey("surv-key");
+		auto by_key = s.GetSessionByKey("surv-key");
 		REQUIRE(by_key != nullptr);
 		{
 			lock_guard<mutex> l(by_key->session_lock);
@@ -284,13 +284,13 @@ TEST_CASE("Re-bootstrap Cycle", "[boilstream][session-routing]") {
 		auto &new_sess = s.GetOrCreateSession("new-key");
 
 		s.SetActiveSessionKeyForConnection(id, "old-key");
-		REQUIRE(s.GetSessionForConnection(id) == &old_sess);
+		REQUIRE(s.GetSessionForConnection(id).get() == &old_sess);
 
 		s.SetActiveSessionKeyForConnection(id, "new-key");
-		REQUIRE(s.GetSessionForConnection(id) == &new_sess);
+		REQUIRE(s.GetSessionForConnection(id).get() == &new_sess);
 
 		// Old session still exists by key
-		REQUIRE(s.GetSessionByKey("old-key") == &old_sess);
+		REQUIRE(s.GetSessionByKey("old-key").get() == &old_sess);
 	}
 
 	SECTION("ClearSession then re-login with new key") {
@@ -308,7 +308,7 @@ TEST_CASE("Re-bootstrap Cycle", "[boilstream][session-routing]") {
 		s.ClearSession(*con.context);
 
 		// Mapping still exists but session data is empty
-		auto *cleared = s.GetSessionForConnection(id);
+		auto cleared = s.GetSessionForConnection(id);
 		REQUIRE(cleared != nullptr);
 		{
 			lock_guard<mutex> l(cleared->session_lock);
@@ -323,8 +323,8 @@ TEST_CASE("Re-bootstrap Cycle", "[boilstream][session-routing]") {
 		}
 		s.SetActiveSessionKeyForConnection(id, "v2-key");
 
-		auto *fresh = s.GetSessionForConnection(id);
-		REQUIRE(fresh == &sess_v2);
+		auto fresh = s.GetSessionForConnection(id);
+		REQUIRE(fresh.get() == &sess_v2);
 		{
 			lock_guard<mutex> l(fresh->session_lock);
 			REQUIRE(fresh->access_token == "v2-token-pad0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -377,14 +377,14 @@ TEST_CASE("Session Pointer Stability", "[boilstream][session-routing]") {
 			s.GetOrCreateSession("bulk-" + std::to_string(i));
 		}
 
-		REQUIRE(s.GetSessionByKey("stable-1") == ptr);
+		REQUIRE(s.GetSessionByKey("stable-1").get() == ptr);
 	}
 
 	SECTION("GetSessionForConnection returns same pointer as GetOrCreateSession") {
 		Connection con(f.db);
 		auto &sess = s.GetOrCreateSession("ptr-key");
 		s.SetActiveSessionKeyForConnection(con.context->GetConnectionId(), "ptr-key");
-		REQUIRE(s.GetSessionForConnection(con.context->GetConnectionId()) == &sess);
+		REQUIRE(s.GetSessionForConnection(con.context->GetConnectionId()).get() == &sess);
 	}
 }
 
@@ -484,7 +484,7 @@ TEST_CASE("Concurrent Session Routing", "[boilstream][session-routing][threading
 			s.SetActiveSessionKeyForConnection(conns.back()->context->GetConnectionId(), "shared-conc");
 		}
 
-		auto *shared = s.GetSessionByKey("shared-conc");
+		auto shared = s.GetSessionByKey("shared-conc");
 		REQUIRE(shared != nullptr);
 		{
 			lock_guard<mutex> l(shared->session_lock);

@@ -12,9 +12,13 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "boilstream_connection_state.hpp"
+#include "boilstream_registration_state.hpp"
 #include <string>
 #include <chrono>
 #include <unordered_map>
+#include <optional>
+
+namespace duckdb_yyjson { struct yyjson_val; }
 
 // Forward declarations for test friend access (outside namespace)
 class BoilstreamCryptoTestAccess;
@@ -22,6 +26,7 @@ class BoilstreamConformanceTestAccess;
 class BoilstreamEncryptionTestAccess;
 class BoilstreamCatalogVersionTestAccess;
 class BoilstreamInputValidationTestAccess;
+class BoilstreamSessionPublicationTestAccess;
 
 namespace duckdb {
 
@@ -53,6 +58,7 @@ class RestApiSecretStorage : public CatalogSetSecretStorage {
 	friend class ::BoilstreamEncryptionTestAccess;
 	friend class ::BoilstreamCatalogVersionTestAccess;
 	friend class ::BoilstreamInputValidationTestAccess;
+	friend class ::BoilstreamSessionPublicationTestAccess;
 
 public:
 	//! Use CatalogVersionInfo from BoilstreamConnectionState
@@ -64,41 +70,50 @@ public:
 	void SetEndpoint(const string &endpoint);
 
 	//! Get active session from transaction context
-	//! Looks up session by endpoint_url (there's typically one active session per endpoint)
+	//! Returns an owning handle retained through each authenticated operation
 	//! Returns nullptr if no active session exists
-	BoilstreamConnectionState *GetSession(optional_ptr<CatalogTransaction> transaction);
+	shared_ptr<BoilstreamConnectionState> GetSession(optional_ptr<CatalogTransaction> transaction);
 
 	//! Get or create session for a specific session key (bootstrap_token_hash)
 	//! Creates new session if none exists for this key
-	//! This is the primary method for PRAGMA to establish/retrieve sessions
+	//! Explicit storage clients use this helper; PRAGMA authenticates private state
 	BoilstreamConnectionState &GetOrCreateSession(const string &session_key);
 
 	//! Check if a session exists for a session key
 	bool HasSession(const string &session_key);
 
 	//! Get session by key (returns nullptr if not found)
-	BoilstreamConnectionState *GetSessionByKey(const string &session_key);
+	shared_ptr<BoilstreamConnectionState> GetSessionByKey(const string &session_key);
 
 	//! Set the active session key for a specific connection (concurrent-safe)
 	void SetActiveSessionKeyForConnection(idx_t connection_id, const string &session_key);
 
 	//! Get session by connection ID (returns nullptr if not found)
-	BoilstreamConnectionState *GetSessionForConnection(idx_t connection_id);
+	shared_ptr<BoilstreamConnectionState> GetSessionForConnection(idx_t connection_id);
+
+	//! Context-aware authority access; a changed tenant must authenticate again.
+	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
+
+    //! Private embedding API. No SQL binding or constructor from claimed IDs.
+    void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
+    string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+    BoilstreamLocalSecretProvider::Response RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
+    void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
 
 	//! Perform OPAQUE login with password
-	//! session_key is the bootstrap_token_hash, used to store/retrieve session
-	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &session_key);
+	//! Authenticate private state, then publish it for this connection
+	void PerformOpaqueLogin(ClientContext &context, const string &password, const string &token_hash,
+	                        const string &endpoint);
 
-	//! Perform OPAQUE session resumption with stored refresh token
+	//! Perform OPAQUE resumption using only this connection's in-memory refresh token
 	void PerformOpaqueResume(ClientContext &context);
 
 	//! Clear the active session (on error or logout)
 	void ClearSession(ClientContext &context);
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
-	//! session_key identifies which session to use
-	void PerformOpaqueLoginCommon(ClientContext &context, const string &password, bool is_resume,
-	                              const string &session_key);
+	//! Only receives unpublished state; returns whether the server supports in-memory resumption
+	bool PerformOpaqueLoginCommon(const string &password, bool is_resume, BoilstreamConnectionState &pending);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);
@@ -139,7 +154,7 @@ public:
 	//! be observable through the just-built CatalogTransaction, so GetSession()
 	//! cannot be relied on to find it.
 	vector<SecretEntry> FetchAllSecretsFromServer(optional_ptr<CatalogTransaction> transaction,
-	                                              BoilstreamConnectionState *explicit_conn_state = nullptr);
+	                                              shared_ptr<BoilstreamConnectionState> explicit_conn_state = nullptr);
 
 	//! Override to lookup secrets from REST API
 	SecretMatch LookupSecret(const string &path, const string &type,
@@ -170,12 +185,6 @@ public:
 	string HttpPostWithState(const string &url, const string &body, BoilstreamConnectionState &conn_state,
 	                         HTTPHeaders *out_headers = nullptr);
 
-	//! Set session cookie for authenticated requests (used for email/password registration flow)
-	void SetSessionCookie(const string &session_id);
-
-	//! Clear session cookie
-	void ClearSessionCookie();
-
 	//! Get expiration timestamp for a secret from connection state (for table functions)
 	std::chrono::system_clock::time_point GetSecretExpiration(const string &secret_name,
 	                                                          optional_ptr<CatalogTransaction> transaction);
@@ -188,6 +197,8 @@ public:
 
 	//! Get the endpoint URL (for constructing API URLs in table functions)
 	string GetEndpointUrl();
+	//! Authenticated routing never falls back to the database default.
+	string GetEndpointUrl(ClientContext &context);
 
 	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
 	static bool IsMultiTenantMode(ClientContext &context);
@@ -222,15 +233,20 @@ public:
 	//! Append platform query parameters using transaction context
 	string AppendPlatformParams(const string &url, optional_ptr<CatalogTransaction> transaction);
 
-	//! Store registration state (base_url, session_token, and totp_uri) for MFA verification
-	void StoreRegistrationState(const string &base_url, const string &session_token, const string &totp_uri);
-
-	//! Get registration state (returns base_url, session_token, and totp_uri)
-	//! Throws IOException if no registration state is stored
-	std::tuple<string, string, string> GetRegistrationState();
-
-	//! Clear registration state after successful MFA verification
-	void ClearRegistrationState();
+	//! Begin one exclusive registration/MFA operation for this connection and tenant.
+	//! A ready registration is reusable only for the same authority and email.
+	BoilstreamRegistrationSnapshot BeginRegistration(ClientContext &context, const string &base_url,
+	                                                 const string &email);
+	BoilstreamRegistrationSnapshot BeginMfaVerification(ClientContext &context);
+	void StoreRegistrationState(ClientContext &context, uint64_t generation, const string &session_token,
+	                            const string &totp_uri);
+	uint64_t CompleteRegistration(ClientContext &context, uint64_t generation,
+	                              unique_ptr<BoilstreamRegistrationOutput> output = nullptr);
+	uint64_t PublishRegistrationOutput(ClientContext &context, uint64_t generation,
+	                                   unique_ptr<BoilstreamRegistrationOutput> output);
+	unique_ptr<BoilstreamRegistrationOutput> TakeRegistrationOutput(ClientContext &context, uint64_t id);
+	//! Release a failed operation; cancellation/failed signup discard its state.
+	void EndRegistrationOperation(ClientContext &context, uint64_t generation) noexcept;
 
 protected:
 	//! Override WriteSecret to persist to REST API
@@ -240,23 +256,31 @@ protected:
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
 
 private:
+	struct SecretOwner {
+		shared_ptr<BoilstreamConnectionState> session;
+		shared_ptr<BoilstreamSecretCache> cache;
+	};
+	SecretOwner GetSecretOwner(optional_ptr<CatalogTransaction> transaction, bool create = false);
+	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
+	SecretMatch LookupCachedSecret(const string &path, const string &type, const shared_ptr<BoilstreamSecretCache> &cache);
+	struct FetchedSecret {
+		shared_ptr<const SecretEntry> secret;
+		std::optional<BoilstreamSecretCache::Time> expires;
+		unique_ptr<SecretEntry> CopyIfUsable() const;
+	};
+	FetchedSecret FetchSecret(const string &selector, const string &type, bool match, optional_ptr<CatalogTransaction> transaction,
+	                 const shared_ptr<BoilstreamSecretCache> &expected_cache);
+	vector<FetchedSecret> PublishSecretList(const string &response, BoilstreamConnectionState &state, uint64_t revision);
+
 	//! Write secret with explicit connection state (called from StoreSecret)
 	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
-	                          BoilstreamConnectionState &conn_state);
+	                          BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction);
 
 	//! Request signing result containing all required headers
 	struct SigningResult {
 		string signature;        // Base64-encoded HMAC signature
 		string date_time;        // ISO8601 timestamp (YYYYMMDDTHHMMSSZ)
 		string credential_scope; // AWS-style credential scope
-	};
-
-	//! Stored refresh token metadata
-	struct RefreshTokenData {
-		vector<uint8_t> refresh_token;
-		string endpoint_url;
-		string region;
-		std::chrono::system_clock::time_point expires_at;
 	};
 
 	//! Use SessionSnapshot from BoilstreamConnectionState
@@ -267,7 +291,7 @@ private:
 
 	//! Build authenticated request headers with signature (uses connection state)
 	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-	                                      BoilstreamConnectionState &conn_state);
+	                                      BoilstreamConnectionState &conn_state, vector<uint8_t> *response_key = nullptr);
 
 	//! Verify authenticated response signature and timestamp
 	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
@@ -319,6 +343,7 @@ private:
 	unique_ptr<BaseSecret> DeserializeSecret(const string &json_data, SecretManager &manager);
 
 	//! Parse an RFC3339 timestamp to system_clock time_point
+	std::optional<BoilstreamSecretCache::Time> ParseSecretExpiry(duckdb_yyjson::yyjson_val *root);
 	std::chrono::system_clock::time_point ParseExpiresAt(const string &expires_at_str);
 	//! Check the authoritative expiry without applying the cache refresh window
 	bool IsManagedCatalogCredentialExpiredAt(const string &expires_at_str, std::chrono::system_clock::time_point now);
@@ -333,32 +358,16 @@ private:
 	//! Clear expiration data for a secret (uses connection state)
 	void ClearExpiration(const string &secret_name, BoilstreamConnectionState &conn_state);
 
-	//! Add or update secret in local catalog
-	void AddOrUpdateSecretInCatalog(unique_ptr<BaseSecret> secret, optional_ptr<CatalogTransaction> transaction);
-
 	//! Make HTTP DELETE request to REST API (uses connection state)
 	void HttpDelete(const string &url, BoilstreamConnectionState &conn_state);
 
-	//! Get the file path for stored refresh token
-	string GetRefreshTokenPath();
-
-	//! Save refresh token to file on disk (uses connection state)
-	void SaveRefreshToken(BoilstreamConnectionState &conn_state, bool resumption_enabled);
-
-	//! Load refresh token from encrypted file on disk into connection state
-	//! Returns true if loaded successfully, false if not found or expired
-	bool LoadRefreshToken(BoilstreamConnectionState &conn_state);
-
-	//! Delete refresh token file from disk
-	void DeleteRefreshToken();
-
 	//! Check catalog versions and refresh credentials for changed catalogs (uses connection state)
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
-	void CheckCatalogVersions(BoilstreamConnectionState &conn_state);
+	void CheckCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
 
 	//! Fetch catalog versions from server (uses connection state)
 	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
-	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state);
+	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
 
 	//! Force refresh credentials for a specific catalog by name (uses connection state)
 	void RefreshCatalogCredentials(const string &catalog_name, BoilstreamConnectionState &conn_state);
@@ -389,6 +398,10 @@ private:
 	// Shared State (across all connections)
 	//========================================================================
 
+	void PublishSession(ClientContext &context, shared_ptr<BoilstreamConnectionState> pending,
+	                    const shared_ptr<BoilstreamConnectionState> &previous, uint64_t generation,
+	                    bool supports_resumption);
+
 	//! Base URL for REST API endpoint (e.g., "https://api.example.com/secrets")
 	string endpoint_url;
 
@@ -401,26 +414,17 @@ private:
 	//! Lock for connection user map
 	mutex connection_lock;
 
-	//! Session cookie for email/password authentication flow (shared for registration)
-	string session_cookie;
-
-	//! Lock for session cookie
-	mutex cookie_lock;
-
-	//! Registration state (stored during email/password registration for MFA verification)
-	string registration_base_url;
-	string registration_session_token;
-	string registration_totp_uri;
-
-	//! Lock for registration state
-	mutex registration_lock;
+	shared_ptr<BoilstreamRegistrationContext> RegistrationOwner(ClientContext &context, bool create);
 
 	//! Version check interval in seconds (default 60)
 	static constexpr int VERSION_CHECK_INTERVAL_SECONDS = 60;
 
 	//========================================================================
 	// Session Storage (database-level, shared across all ClientContexts)
-	// Sessions are keyed by bootstrap_token_hash which provides:
+	// Authenticated sessions are published under connection-owned keys.
+	// Legacy explicit keys remain available for direct storage/test clients.
+	// Owning handles preserve in-flight request lifetimes during replacement.
+	// Historical explicit-key semantics provide:
 	// - Session reuse: same token = same session (across connections)
 	// - Isolation: different tokens = different sessions
 	// - Works with vanilla DuckDB (no TenantIsolation dependency)
@@ -431,16 +435,11 @@ private:
 	//! Map of session_key (bootstrap_token_hash) -> session state
 	std::unordered_map<string, shared_ptr<BoilstreamConnectionState>> sessions_;
 
-	//! Map of refresh_token_hash -> session_key (trusted mapping for resume)
-	//! This is stored in database-level storage, NOT in tenant-controlled files
-	//! Prevents malicious tenants from hijacking sessions by modifying their refresh token file
-	std::unordered_map<string, string> refresh_to_session_;
-
 	//! Per-connection session keys: connection_id -> session_key
 	//! Prevents concurrent bootstrap from clobbering each other's sessions
 	std::unordered_map<idx_t, string> connection_session_keys_;
 
-	//! Lock for sessions_ map, refresh_to_session_, and connection_session_keys_
+	//! Lock for sessions_ and connection_session_keys_
 	mutex sessions_lock_;
 };
 

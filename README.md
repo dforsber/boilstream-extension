@@ -11,6 +11,23 @@ It incorporates industrial grade e2e application level security even inside the 
 DuckDB **v2.0.0 or newer**. The extension is built against the DuckDB 2.0 C++ API and does not load
 into DuckDB 1.x. The standalone build (`make`) needs the `duckdb` submodule on a v2.0 tag.
 
+## Login lifetime
+
+Login credentials remain only in the DuckDB connection's memory. New connections
+and process restarts require login again. The extension does not save credentials
+to files or browser storage, and ignores credential files left by older releases.
+Secure restart login is deferred.
+
+Generic remote secrets are private to the authenticated session and active tenant,
+including worker-thread tenant context in the BoilStream DuckDB fork. A tenant
+change requires login again. Logout, replacement and connection teardown retire
+the owner's cache; credentials are never copied into shared `memory` storage.
+Complete secret lists replace the cache atomically after validation. Each owner
+has at most 10,000 entries, 10 MiB of serialized entries, and 1 MiB per entry;
+capacity errors preserve existing entries. Explicit secrets created without login
+remain local to that connection and tenant. Provider compatibility is qualified
+against the BoilStream DuckDB fork's secret lookup behavior.
+
 ## Running the extension
 
 1. Download and run [boilstream](https://github.com/boilingdata/boilstream)

@@ -73,18 +73,7 @@ public:
 		return storage.ParseExpiresAt(expires_at_str);
 	}
 
-	static bool LoadRefreshToken(RestApiSecretStorage &storage, BoilstreamConnectionState &conn_state) {
-		return storage.LoadRefreshToken(conn_state);
-	}
 
-	static void SaveRefreshToken(RestApiSecretStorage &storage, BoilstreamConnectionState &conn_state,
-	                             bool resumption_enabled) {
-		storage.SaveRefreshToken(conn_state, resumption_enabled);
-	}
-
-	static std::string GetRefreshTokenPath(RestApiSecretStorage &storage) {
-		return storage.GetRefreshTokenPath();
-	}
 };
 
 //===----------------------------------------------------------------------===//
@@ -136,6 +125,7 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Managed catalog forced expiration 
                  "[input_validation][expiry_regression]") {
 	Connection connection(*db);
 	connection.BeginTransaction();
+	storage->SetEndpoint("");
 	auto &state = storage->GetOrCreateSession("expiry-test");
 	storage->SetActiveSessionKeyForConnection(connection.context->GetConnectionId(), "expiry-test");
 	const string catalog_id = "9a927d1b-30f5-48da-91eb-af1492bf31c0";
@@ -630,26 +620,22 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Extension handles malicious JSON p
 		std::string long_value(1000000, 'a'); // 1MB string
 		std::string json = R"({"data": ")" + long_value + R"("})";
 
-		// Should not crash - may throw due to invalid base64
-		try {
-			auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-			// Either nullptr or valid result - both acceptable
-		} catch (const std::exception &) {
-			// Throwing is acceptable for malformed input
-		}
-		REQUIRE(true); // Test passes if we reach here without crash
+		// The base64 decodes to invalid serialized secret bytes. A successful
+		// object, or silently swallowing the decoding error, must fail this test.
+		REQUIRE_THROWS_AS(
+		    BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager), IOException);
 	}
 
 	SECTION("Unicode and special characters are handled") {
 		std::string json = R"({"data": "🔐\u0000\x00\r\n\t"})";
 		auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-		// Should not crash
+		REQUIRE(result == nullptr);
 	}
 
 	SECTION("Control characters in JSON strings are handled") {
 		std::string json = "{\"data\": \"\x01\x02\x03\x04\x05\"}";
 		auto result = BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, json, secret_manager);
-		// Should not crash
+		REQUIRE(result == nullptr);
 	}
 }
 
@@ -693,45 +679,16 @@ TEST_CASE_METHOD(InputValidationTestFixture, "VerifyResponseSignature validates 
                  "[input_validation][signature][headers]") {
 	case_insensitive_map_t<std::string> headers;
 
-	SECTION("Empty headers - verify behavior") {
-		// VerifyResponseSignature may not throw for missing headers if they're optional
-		// The key is it doesn't crash and handles gracefully
-		try {
-			BoilstreamInputValidationTestAccess::VerifyResponseSignature(*storage, "{}", 200, headers,
-			                                                             valid_session_key);
-			// If it doesn't throw, that's acceptable
-		} catch (const std::exception &) {
-			// Throwing is also acceptable
-		}
-		REQUIRE(true); // Test passes if no crash
+	SECTION("Missing response signature is rejected") {
 	}
-
-	SECTION("Invalid signature header is handled") {
-		headers["x-boilstream-date"] = "20250101T120000Z";
-		headers["x-boilstream-status"] = "200";
-		headers["x-boilstream-signature"] = "invalid-signature-format";
-		// Should either throw or handle gracefully - no crash
-		try {
-			BoilstreamInputValidationTestAccess::VerifyResponseSignature(*storage, "{}", 200, headers,
-			                                                             valid_session_key);
-		} catch (const std::exception &) {
-			// Expected - invalid signature should fail verification
-		}
-		REQUIRE(true); // Test passes if no crash
+	SECTION("Invalid response signature is rejected") {
+		headers["x-boilstream-response-signature"] = "invalid-signature-format";
 	}
-
-	SECTION("Malformed date header is handled") {
-		headers["x-boilstream-date"] = "not-a-valid-date";
-		headers["x-boilstream-status"] = "200";
-		headers["x-boilstream-signature"] = "YWJjZGVm"; // Some base64
-		try {
-			BoilstreamInputValidationTestAccess::VerifyResponseSignature(*storage, "{}", 200, headers,
-			                                                             valid_session_key);
-		} catch (const std::exception &) {
-			// Expected
-		}
-		REQUIRE(true); // Test passes if no crash
+	SECTION("Request signature cannot replace a response signature") {
+		headers["x-boilstream-signature"] = "YWJjZGVm";
 	}
+	REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::VerifyResponseSignature(
+	                     *storage, "{}", 200, headers, valid_session_key), IOException);
 }
 
 //===----------------------------------------------------------------------===//

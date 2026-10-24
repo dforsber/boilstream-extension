@@ -8,6 +8,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "opaque_wrapper.hpp"
+#include "boilstream_diagnostics.hpp"
+#include <memory>
 #include "duckdb/common/exception.hpp"
 
 namespace duckdb {
@@ -56,6 +58,8 @@ RegistrationFinishResult OpaqueClientWrapper::RegistrationFinish(RegistrationSta
 	if (state == nullptr) {
 		throw InvalidInputException("OPAQUE registration finish: NULL state");
 	}
+	std::unique_ptr<RegistrationState, decltype(&opaque_free_registration_state)> owned_state(
+	    state, opaque_free_registration_state);
 
 	// Security: Validate message size before decoding
 	if (registration_response_base64.size() > MAX_OPAQUE_MESSAGE_SIZE) {
@@ -64,14 +68,20 @@ RegistrationFinishResult OpaqueClientWrapper::RegistrationFinish(RegistrationSta
 		                  std::to_string(MAX_OPAQUE_MESSAGE_SIZE) + ")");
 	}
 
-	// Decode base64 registration response
-	auto response_decoded = Blob::FromBase64(string_t(registration_response_base64));
+	// DuckDB decoding errors can contain the input. Keep both data and cleanup
+	// inside this boundary until the Rust call consumes the state.
+	string response_decoded;
+	try {
+		response_decoded = Blob::FromBase64(string_t(registration_response_base64));
+	} catch (const std::exception &e) {
+		BoilstreamRethrowSafe("OPAQUE registration finish: Invalid server response", e);
+	}
 
 	OpaqueBuffer upload_buffer = {nullptr, 0};
 	OpaqueBuffer export_key_buffer = {nullptr, 0};
 
 	OpaqueError error =
-	    opaque_client_registration_finish(state, // state is consumed
+	    opaque_client_registration_finish(owned_state.release(), // state is consumed
 	                                      reinterpret_cast<const uint8_t *>(response_decoded.c_str()),
 	                                      response_decoded.length(), &upload_buffer, &export_key_buffer);
 
@@ -147,6 +157,7 @@ LoginFinishResult OpaqueClientWrapper::LoginFinish(LoginState *state, const stri
 	if (state == nullptr) {
 		throw InvalidInputException("OPAQUE login finish: NULL state");
 	}
+	std::unique_ptr<LoginState, decltype(&opaque_free_login_state)> owned_state(state, opaque_free_login_state);
 
 	// Security: Validate message size before decoding
 	if (credential_response_base64.size() > MAX_OPAQUE_MESSAGE_SIZE) {
@@ -155,14 +166,20 @@ LoginFinishResult OpaqueClientWrapper::LoginFinish(LoginState *state, const stri
 		                  std::to_string(MAX_OPAQUE_MESSAGE_SIZE) + ")");
 	}
 
-	// Decode base64 credential response
-	auto response_decoded = Blob::FromBase64(string_t(credential_response_base64));
+	// DuckDB decoding errors can contain the input. Keep both data and cleanup
+	// inside this boundary until the Rust call consumes the state.
+	string response_decoded;
+	try {
+		response_decoded = Blob::FromBase64(string_t(credential_response_base64));
+	} catch (const std::exception &e) {
+		BoilstreamRethrowSafe("OPAQUE login finish: Invalid server response", e);
+	}
 
 	OpaqueBuffer finalization_buffer = {nullptr, 0};
 	OpaqueBuffer session_key_buffer = {nullptr, 0};
 	OpaqueBuffer export_key_buffer = {nullptr, 0};
 
-	OpaqueError error = opaque_client_login_finish(state, // state is consumed
+	OpaqueError error = opaque_client_login_finish(owned_state.release(), // state is consumed
 	                                               reinterpret_cast<const uint8_t *>(response_decoded.c_str()),
 	                                               response_decoded.length(), &finalization_buffer, &session_key_buffer,
 	                                               &export_key_buffer);

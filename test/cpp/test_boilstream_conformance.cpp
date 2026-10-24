@@ -1147,4 +1147,3 @@ TEST_CASE("Tier 4: A.10.10 - Security Invariants", "[conformance][tier4][encrypt
 
 	INFO("✓ All security invariants passed!");
 }
-

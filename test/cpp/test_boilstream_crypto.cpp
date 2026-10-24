@@ -60,19 +60,7 @@ public:
 		return storage->ExtractBoilstreamHeaders(headers);
 	}
 
-	// Refresh token test helpers - now use connection state
-	static void SaveRefreshTokenForTest(RestApiSecretStorage *storage, BoilstreamConnectionState &conn_state,
-	                                    bool resumption_enabled) {
-		storage->SaveRefreshToken(conn_state, resumption_enabled);
-	}
 
-	static bool LoadRefreshTokenForTest(RestApiSecretStorage *storage, BoilstreamConnectionState &conn_state) {
-		return storage->LoadRefreshToken(conn_state);
-	}
-
-	static string GetRefreshTokenPath(RestApiSecretStorage *storage) {
-		return storage->GetRefreshTokenPath();
-	}
 };
 
 //===----------------------------------------------------------------------===//
@@ -185,7 +173,7 @@ TEST_CASE("HKDF Key Derivation - Integrity Key", "[boilstream][crypto][hkdf]") {
 //===----------------------------------------------------------------------===//
 // Test: Response Signature Verification (Success Cases)
 //===----------------------------------------------------------------------===//
-TEST_CASE("Response Signature Verification - Valid Signature - Missing Header", "[boilstream][crypto][signature]") {
+TEST_CASE("Response Signature Verification - Missing Header Is Rejected", "[boilstream][crypto][signature]") {
 	TestFixture fixture;
 
 	string response_body = "{\"test\":\"data\"}";
@@ -193,8 +181,8 @@ TEST_CASE("Response Signature Verification - Valid Signature - Missing Header", 
 	case_insensitive_map_t<string> headers;
 	// No x-boilstream-response-signature header
 
-	REQUIRE_NOTHROW(BoilstreamCryptoTestAccess::VerifyResponseSignature(fixture.storage.get(), response_body,
-	                                                                    status_code, headers, fixture.session_key));
+	REQUIRE_THROWS_AS(BoilstreamCryptoTestAccess::VerifyResponseSignature(fixture.storage.get(), response_body,
+	                                                                    status_code, headers, fixture.session_key), IOException);
 }
 
 TEST_CASE("Response Signature Verification - Invalid Signature", "[boilstream][crypto][signature]") {
@@ -661,93 +649,7 @@ TEST_CASE("Refresh Token - resume_user_id Calculation", "[boilstream][crypto][re
 	}
 }
 
-TEST_CASE("Refresh Token - Storage Round-Trip", "[boilstream][crypto][refresh-token][storage]") {
-	auto db = duckdb::make_uniq<DuckDB>(nullptr);
-	auto storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
-	BoilstreamConnectionState conn_state;
-
-	// Clean up any existing token file
-	string token_path = BoilstreamCryptoTestAccess::GetRefreshTokenPath(storage.get());
-	auto &fs = FileSystem::GetFileSystem(*db->instance);
-	if (fs.FileExists(token_path)) {
-		fs.RemoveFile(token_path);
-	}
-
-	SECTION("Storage round-trip with user_id verification") {
-		// This test manually creates and saves a token file, then loads it back
-		// to verify the user_id computation is identical
-
-		// 1. Create a test refresh token (32 bytes)
-		std::vector<uint8_t> original_token(32);
-		for (size_t i = 0; i < 32; i++) {
-			original_token[i] = static_cast<uint8_t>(i * 7 % 256);
-		}
-
-		// 2. Compute ORIGINAL user_id from the token
-		string original_password;
-		original_password.assign(reinterpret_cast<const char *>(original_token.data()), 32);
-
-		char original_hash[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
-		duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(original_password.c_str(), 32, original_hash);
-
-		string original_user_id;
-		original_user_id.reserve(64);
-		const char *hex_chars = "0123456789abcdef";
-		for (size_t i = 0; i < duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES; i++) {
-			unsigned char byte = static_cast<unsigned char>(original_hash[i]);
-			original_user_id += hex_chars[(byte >> 4) & 0xF];
-			original_user_id += hex_chars[byte & 0xF];
-		}
-
-		REQUIRE(original_user_id.length() == 64);
-
-		// 3. Manually create a JSON file with the refresh token
-		string token_b64 = Blob::ToBase64(string_t(string(original_token.begin(), original_token.end())));
-
-		auto now = std::chrono::system_clock::now();
-		auto future = now + std::chrono::hours(24);
-		auto future_time_t = std::chrono::system_clock::to_time_t(future);
-		std::tm tm_utc;
-#ifdef _WIN32
-		gmtime_s(&tm_utc, &future_time_t);
-#else
-		gmtime_r(&future_time_t, &tm_utc);
-#endif
-		char expires_str[64];
-		std::strftime(expires_str, sizeof(expires_str), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
-
-		string json_content = "{\"version\":1,\"refresh_token\":\"" + token_b64 +
-		                      "\",\"endpoint_url\":\"https://localhost/secrets\"," +
-		                      "\"region\":\"us-east-1\",\"expires_at\":\"" + string(expires_str) + "\"}";
-
-		// Write the file
-		if (fs.FileExists(token_path)) {
-			fs.RemoveFile(token_path);
-		}
-		auto handle = fs.OpenFile(token_path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
-		fs.Write(*handle, const_cast<char *>(json_content.data()), json_content.size());
-		handle->Close();
-
-		// 4. Load the token back using LoadRefreshToken
-		bool loaded = BoilstreamCryptoTestAccess::LoadRefreshTokenForTest(storage.get(), conn_state);
-		REQUIRE(loaded);
-
-		// 5. Verify the loaded token matches original
-		REQUIRE(conn_state.refresh_token.size() == 32);
-		REQUIRE(memcmp(conn_state.refresh_token.data(), original_token.data(), 32) == 0);
-
-		// Instead, let's verify the loaded file can be read back correctly
-		auto read_handle = fs.OpenFile(token_path, FileFlags::FILE_FLAGS_READ);
-		auto file_size = fs.GetFileSize(*read_handle);
-		string file_contents(file_size, '\0');
-		fs.Read(*read_handle, const_cast<char *>(file_contents.data()), file_size);
-		read_handle->Close();
-
-		// Parse and verify
-		REQUIRE(file_contents.find(token_b64) != string::npos);
-		REQUIRE(file_contents.find("https://localhost/secrets") != string::npos);
-	}
-
+TEST_CASE("Refresh Token - Binary Encoding", "[boilstream][crypto][refresh-token]") {
 	SECTION("Base64 encoding round-trip") {
 		// Create test data
 		std::vector<uint8_t> test_data = {0x00, 0xFF, 0xAB, 0xCD, 0x12, 0x34, 0x56, 0x78};
@@ -782,8 +684,4 @@ TEST_CASE("Refresh Token - Storage Round-Trip", "[boilstream][crypto][refresh-to
 		REQUIRE(static_cast<uint8_t>(decoded[0]) == 0x00);
 	}
 
-	// Cleanup
-	if (fs.FileExists(token_path)) {
-		fs.RemoveFile(token_path);
-	}
 }

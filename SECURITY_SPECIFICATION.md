@@ -1,5 +1,15 @@
 # Boilstream Security Specification v1.0
 
+## Current release: credentials remain in memory
+
+The DuckDB extension keeps authentication and refresh credentials only in the
+owning connection's memory, on native platforms and in the browser. It MUST NOT
+read, write, or remove credential files or browser localStorage entries. A new
+connection or a process restart requires login again. The server's resumption
+header permits an in-memory protocol exchange; it does not grant permission to
+persist credentials. Secure, explicit restart login is deferred to later work.
+Existing credential files from older releases are ignored, not migrated or deleted.
+
 ## Overview
 
 This document specifies the authentication, key derivation, encryption, and integrity protection mechanisms for the Boilstream DuckDB extension and compatible server implementations.
@@ -34,7 +44,7 @@ This document specifies the authentication, key derivation, encryption, and inte
 | ------------------ | ------------------------- | ----------------- | ------------ | ------------------- | --------------------------- |
 | `access_token`     | Server-generated (random) | Server-determined | Yes (HTTPS)  | In-memory           | HTTP session identifier     |
 | `session_key`      | OPAQUE-derived (64 bytes) | Server-determined | Never        | In-memory only      | Root key for HKDF           |
-| `refresh_token`    | HKDF(session_key)         | Server-determined | Never        | Encrypted on disk   | Session resumption          |
+| `refresh_token`    | HKDF(session_key)         | Server-determined | Never        | In-memory only      | Session resumption          |
 | `base_signing_key` | HKDF(session_key)         | Server-determined | Never        | In-memory (derived) | Base for request signing    |
 | `encryption_key`   | HKDF(session_key)         | Server-determined | Never        | In-memory (derived) | Response decryption         |
 | `integrity_key`    | HKDF(session_key)         | Server-determined | Never        | In-memory (derived) | Response HMAC verification  |
@@ -230,9 +240,9 @@ X-Boilstream-Session-Resumption: enabled
 12. **Client verifies response signature and stores credentials**:
 
     - **Verify response signature**: Using `integrity_key` derived from `session_key`, verify `X-Boilstream-Response-Signature` header
-    - **Check X-Boilstream-Session-Resumption**: If `enabled`, client MAY persist `refresh_token`; if `disabled` or absent, client MUST NOT persist
+    - **Check X-Boilstream-Session-Resumption**: If `enabled`, client MAY retain `refresh_token` in the owning connection's memory; if `disabled` or absent, discard it
     - **In-memory**: `access_token`, `session_key` (from OPAQUE), derived keys (`base_signing_key`, `encryption_key`, `integrity_key`), `region`, `client_sequence = 0`
-    - **Encrypted on disk** (if resumption enabled): `refresh_token` (from HKDF), `expires_at`, `region`, `endpoint`
+    - **Connection-owned memory** (if resumption enabled): `refresh_token` (from HKDF), `expires_at`, `region`, `endpoint`
 
 **Result**: Client authenticated, ready to make signed/encrypted requests.
 
@@ -274,17 +284,17 @@ resume_user_id = lowercase_hex(SHA256(refresh_token))
 
 ### Session Resumption Flow
 
-**Trigger**: DuckDB restarts, finds stored `refresh_token` with remaining TTL
+**Trigger**: An authenticated connection explicitly resumes using its own unexpired in-memory `refresh_token`. Restart resumption is not supported.
 
 **Design**: Session resumption reuses the OPAQUE login endpoint with full OPAQUE protocol. refresh_token serves as OPAQUE password (never transmitted). Server distinguishes resume from bootstrap login by checking which identity namespace (user_id vs resume_user_id) the hash belongs to.
 
 **Steps**:
 
-1. **Client loads stored credentials**:
+1. **Client snapshots its own in-memory credentials**:
 
-   - Read `refresh_token`, `expires_at`, `region`, `endpoint` from encrypted storage
+   - Read `refresh_token`, `expires_at`, and `endpoint` from the owning connection; never borrow another connection's credentials
    - Verify: `now() < expires_at`
-   - If expired: delete credentials, require new PRAGMA
+   - If absent or expired: require new PRAGMA; do not access persistent storage
    - Compute resume_user_id: `resume_user_id = lowercase_hex(SHA256(refresh_token))`
    - Call `OPAQUE::ClientLogin::start(refresh_token)` → generates `CredentialRequest`
    - Client prepares request with both resume_user_id (hash) and credential_request (OPAQUE output)
@@ -414,11 +424,11 @@ X-Boilstream-Session-Resumption: enabled
 12. **Client verifies response and updates credentials**:
 
     - **Verify response signature**: Using NEW `integrity_key` derived from NEW `session_key`, verify `X-Boilstream-Response-Signature` header
-    - **Check X-Boilstream-Session-Resumption**: If `enabled`, client MAY persist NEW `refresh_token`; if `disabled`, client MUST NOT persist
+    - **Check X-Boilstream-Session-Resumption**: If `enabled`, client MAY retain NEW `refresh_token` in memory; if `disabled` or absent, discard it
     - **In-memory**: Store NEW `access_token`, NEW `session_key` (from OPAQUE), derive NEW keys (`base_signing_key`, `encryption_key`, `integrity_key`), `region`, reset `client_sequence = 0`
-    - **Encrypted storage** (if resumption enabled): DELETE old refresh_token, STORE NEW refresh_token (derived from NEW session_key via HKDF)
+    - **Connection-owned memory** (if resumption enabled): replace the old refresh token with the new token after successful authentication
 
-**Result**: Transparent reconnection without re-authentication. User does not need to re-run PRAGMA.
+**Result**: A successful in-memory resumption replaces the owning connection's session. It does not provide login across process restarts.
 
 **Security**:
 
@@ -434,12 +444,12 @@ X-Boilstream-Session-Resumption: enabled
 
 Session resumption introduces a security trade-off between usability and risk:
 
-- **Risk**: If an attacker compromises disk encryption and steals the `refresh_token`, they can resume the session before the legitimate user and access all secrets during the session lifetime (up to 24 hours maximum)
+- **Risk**: If an attacker reads process memory and steals the `refresh_token`, they can resume the session before the legitimate user and access all secrets during the session lifetime (up to 24 hours maximum)
 - **Detection**: Theft is only detected when the legitimate user attempts to resume and discovers the key has already been used
 - **Time window**: The attacker has a window from theft until either (a) legitimate user attempts resume or (b) session expires
 - **Mitigation options**:
   - Servers can **disable session resumption** by omitting or setting `X-Boilstream-Session-Resumption: disabled` in login responses
-  - When disabled, clients MUST NOT persist `refresh_token` to disk
+  - When disabled, clients MUST discard the in-memory `refresh_token`; persistence is prohibited regardless of this header
   - High-security deployments SHOULD disable session resumption to eliminate this attack vector
   - If resumption is enabled, session lifetimes SHOULD be kept short (e.g., 1-4 hours instead of 24 hours)
   - Servers SHOULD monitor for multiple resume attempts from different locations/IPs as potential theft indicators
@@ -508,7 +518,7 @@ refresh_token = T(1)[0:32]  // 32 bytes
 - refresh_token is used as OPAQUE password for session resumption
 - refresh_token rotates on every session resumption (new session_key → new refresh_token)
 - refresh_token MUST NEVER be transmitted over network
-- refresh_token stored encrypted on disk for automatic reconnection
+- refresh_token retained only in the owning connection's memory; restart requires login
 
 ### Request Signing Key Derivation (AWS SigV4 Style)
 
@@ -882,19 +892,19 @@ Content-Type: application/json
   - `enabled`: Server supports session resumption (will accept resumption_key-based resume)
   - `disabled`: Server does NOT support session resumption (client MUST NOT store resumption_key)
 - **When to send**: MUST be present in `/auth/api/opaque-login-finish` responses
-- **Client behavior**: If `disabled` or header absent, client MUST NOT persist resumption_key to disk
-- **Security**: Allows high-security deployments to disable on-disk credential storage
+- **Client behavior**: If `disabled` or header absent, client MUST discard the in-memory resumption key. Even when enabled, the key MUST NOT be persisted
+- **Security**: Allows deployments to disable the in-memory resumption capability; persistent credential storage is always disabled in this release.
 
 ### Client Response Verification
 
-Client MUST verify response signatures when received:
+Once a session key exists, the client MUST require and verify response signatures, including the login-finish reply:
 
-1. **Check for signature header**: If `X-Boilstream-Response-Signature` present, verify it
-2. **Derive integrity key**: `integrity_key = HKDF-Expand(session_key, "response-integrity-v1", 32)`
+1. **Require signature header**: Reject a missing or empty `X-Boilstream-Response-Signature`
+2. **Derive integrity key**: `prk = HKDF-Extract("boilstream-session-v1", session_key)`, then `integrity_key = HKDF-Expand(prk, "response-integrity-v1", 32)`
 3. **Hash response body**: `payload_hash = lowercase_hex(SHA256(response_body))`
 4. **Reconstruct canonical response**: Build same canonical response as server (status code + headers + hashed payload)
 5. **Verify signature**: `HMAC-SHA256(integrity_key, canonical_response) == base64_decode(received_signature)` (constant-time comparison)
-6. **Validate timestamp**: `|now() - parse_iso8601(X-Boilstream-Date)| <= 60 seconds`
+6. **Validate timestamp**: Require exact ASCII `YYYYMMDDTHHMMSSZ`, a valid calendar date and time, and `|now() - parse_iso8601(X-Boilstream-Date)| <= 60 seconds`
 7. **On failure**: Treat as tampering, reject response, terminate session
 
 **Constant-Time Comparison**: MUST use cryptographic library's constant-time comparison function to prevent timing attacks.
@@ -1232,7 +1242,7 @@ Each resumption key MUST store:
 8. Register NEW resumption_key with OPAQUE (server simulates full registration)
 9. Delete old OPAQUE password file from storage
 10. Return session info to client (after finalization)
-11. Client MUST delete old resumption_key, store NEW resumption_key (derived from NEW session_key)
+11. Client MUST replace the old in-memory resumption_key with the NEW resumption_key after successful authentication (derived from NEW session_key)
 
 **Theft detection**: If attacker uses stolen resumption_key first, legitimate user's resume attempt fails (resumption_key already marked used).
 
@@ -1254,48 +1264,26 @@ Each resumption key MUST store:
 - `region`
 - `client_sequence` (not persisted; after crash/restart, client MUST re-authenticate to establish new session with sequence 0)
 
-**Encrypted Persistent Storage**:
+**Additional connection-owned memory**:
 
-- `resumption_key`
+- `resumption_key` (only when supported by the server)
 - `expires_at`
-- `region`
 - `endpoint_url`
 
-### Platform-Specific Encryption
+### Startup and connection lifetime
 
-**macOS**: Use Keychain Services API to encrypt resumption_key
+A new connection starts without authentication credentials. The extension does
+not inspect old token files or browser storage. Login is required after restart,
+after logout, or when there is no valid credential owned by that connection.
+Connection teardown releases its state; outstanding requests retain ownership
+until they finish, then the credentials are zeroized.
 
-**Linux**: Use libsecret (GNOME Keyring) or fallback to encrypted file with AES-256-GCM
+### Deferred secure restart login
 
-**Windows**: Use Data Protection API (DPAPI) to encrypt resumption_key
-
-**Browser (WASM)**: Store in localStorage (unencrypted, but resumption_key is time-limited and one-time use)
-
-### Storage Format
-
-Stored credentials file (encrypted at rest):
-
-```json
-{
-  "resumption_key": "<base64-encoded>",
-  "expires_at": 1234567890,
-  "region": "us-east-1",
-  "endpoint": "https://api.example.com/secrets"
-}
-```
-
-### Auto-Resume on Startup
-
-**Client behavior**:
-
-1. On extension initialization, attempt to load stored credentials
-2. If `resumption_key` found AND `now() < expires_at`:
-   - Attempt session resume (reuse OPAQUE login flow with resumption_key as password)
-   - On success: Restore session state, user can query immediately
-   - On failure: Delete stored credentials, require PRAGMA
-3. If no credentials or expired: Require PRAGMA for new authentication
-
-**User experience**: Transparent reconnection without re-running PRAGMA after DuckDB restarts.
+A future implementation requires explicit user opt-in, an OS credential store
+or equivalent protected browser design, authority and identity separation,
+rotation and concurrent-update safety, and dedicated failure tests. These are
+future requirements, not implemented behavior or permission to save plain JSON.
 
 ---
 
@@ -1355,7 +1343,7 @@ Stored credentials file (encrypted at rest):
 - ✅ Re-derive signing_key daily when date changes (UTC)
 - ✅ Implement exponential backoff on authentication failures
 - ✅ Log security events (sequence mismatches, signature failures) for monitoring
-- ✅ Use OS-native credential storage where available
+- ✅ Keep credentials in connection-owned memory; OS credential storage is deferred.
 - ✅ Implement graceful session expiry warnings
 
 ---
@@ -1669,7 +1657,7 @@ Implementations claiming conformance to this specification MUST:
 Implementations MAY:
 
 - Support additional cipher suites beyond 0x0001 (must define priority)
-- Implement platform-specific credential storage optimizations
+- Do not implement persistent credential storage without a separately approved secure restart-login design.
 - Support multiple regions with different region identifiers
 - Add proprietary extensions (MUST NOT break interoperability)
 

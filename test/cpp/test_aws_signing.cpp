@@ -12,6 +12,8 @@
 #include "opaque_client.h"
 #include <string>
 #include <cstring>
+#include <array>
+#include <algorithm>
 
 using namespace std;
 
@@ -401,4 +403,73 @@ TEST_CASE("AWS Signing Memory Safety", "[aws][signing][memory]") {
 		// Verify copy is still valid
 		REQUIRE(signature_copy.length() == 44);
 	}
+}
+
+TEST_CASE("Canonical signing rejects malformed UTF-8 in every text field", "[aws][signing][boundary]") {
+	for (size_t field = 0; field < 5; ++field) {
+		DYNAMIC_SECTION("field " << field) {
+			std::array<std::string, 5> fields = {"POST", "/secrets", "q=a", "x-test:yes\n", "x-test"};
+			fields[field].push_back(char(0xff));
+			auto result = aws_build_canonical_request(fields[0].data(), fields[0].size(), fields[1].data(), fields[1].size(),
+			    fields[2].data(), fields[2].size(), fields[3].data(), fields[3].size(), fields[4].data(), fields[4].size(), nullptr, 0);
+			BufferGuard guard(result.buffer);
+			REQUIRE(result.error == OPAQUE_INVALID_INPUT);
+			REQUIRE(result.buffer.data == nullptr);
+			REQUIRE(result.buffer.len == 0);
+		}
+	}
+}
+
+TEST_CASE("Signing key derivation rejects malformed UTF-8 scopes", "[aws][signing][boundary]") {
+	const uint8_t key[] = {1, 2, 3};
+	for (size_t field = 0; field < 3; ++field) {
+		DYNAMIC_SECTION("scope " << field) {
+			std::array<std::string, 3> fields = {"20251009", "eu-west-1", "secrets"};
+			fields[field].push_back(char(0xff));
+			auto result = aws_derive_signing_key(key, sizeof(key), fields[0].data(), fields[0].size(),
+			    fields[1].data(), fields[1].size(), fields[2].data(), fields[2].size());
+			BufferGuard guard(result.buffer);
+			REQUIRE(result.error == OPAQUE_INVALID_INPUT);
+			REQUIRE(result.buffer.data == nullptr);
+			REQUIRE(result.buffer.len == 0);
+		}
+	}
+}
+
+TEST_CASE("Canonical signing rejects a missing nonempty payload", "[aws][signing][boundary]") {
+	auto result = aws_build_canonical_request("GET", 3, "/", 1, "", 0, "", 0, "", 0, nullptr, 1);
+	BufferGuard guard(result.buffer);
+	REQUIRE(result.error == OPAQUE_INVALID_INPUT);
+	REQUIRE(result.buffer.data == nullptr);
+	REQUIRE(result.buffer.len == 0);
+}
+
+TEST_CASE("Signing matches independent binary-payload known answers", "[aws][signing][vectors]") {
+	// Reference vectors: Python hashlib/hmac SHA-256, without this Rust library.
+	const std::array<uint8_t, 32> base_key = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+	const std::array<uint8_t, 32> expected_key = {24, 47, 93, 210, 182, 242, 120, 177, 125, 185, 72, 76, 155, 58, 87, 11, 39, 23, 193, 30, 154, 221, 193, 188, 71, 18, 135, 142, 194, 156, 93, 186};
+	const uint8_t payload[] = {0, 255, 65};
+	const std::string headers = "x-boilstream-date:20251009T120000Z\n";
+	const std::string names = "x-boilstream-date";
+	const std::string expected_canonical = "POST\n/secrets\nq=a%20b\nx-boilstream-date:20251009T120000Z\n\nx-boilstream-date\na90a10503fbfc95789ff38a1bb5039cb71869ab9c0eb1cb51c4a9099f2933c6b";
+	auto key = aws_derive_signing_key(base_key.data(), base_key.size(), "20251009", 8, "eu-west-1", 9, "secrets", 7);
+	BufferGuard key_guard(key.buffer);
+	REQUIRE(key.error == OPAQUE_SUCCESS);
+	REQUIRE(key.buffer.data != nullptr);
+	REQUIRE(key.buffer.len == expected_key.size());
+	REQUIRE(std::equal(expected_key.begin(), expected_key.end(), key.buffer.data));
+	auto canonical = aws_build_canonical_request("POST", 4, "/secrets", 8, "q=a%20b", 7,
+	    headers.data(), headers.size(), names.data(), names.size(), payload, sizeof(payload));
+	BufferGuard canonical_guard(canonical.buffer);
+	REQUIRE(canonical.error == OPAQUE_SUCCESS);
+	REQUIRE(canonical.buffer.data != nullptr);
+	REQUIRE(canonical.buffer.len == expected_canonical.size());
+	REQUIRE(canonical_guard.to_string() == expected_canonical);
+	auto signature = aws_sign_canonical_request(key.buffer.data, key.buffer.len,
+	    reinterpret_cast<const char *>(canonical.buffer.data), canonical.buffer.len);
+	BufferGuard signature_guard(signature.buffer);
+	REQUIRE(signature.error == OPAQUE_SUCCESS);
+	REQUIRE(signature.buffer.data != nullptr);
+	REQUIRE(signature.buffer.len == 44);
+	REQUIRE(signature_guard.to_string() == "3ezGTaBS03EXVLK+JQqmaqWh0PjVrcDx3SMJ0Mu2Dlk=");
 }
