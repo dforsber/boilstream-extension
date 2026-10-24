@@ -13,6 +13,9 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_manager.hpp"
 #include "quack_bridge.hpp"
+#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
+#include "duckdb/main/extension_callback_manager.hpp"
+#endif
 
 #include <atomic>
 #include <future>
@@ -312,6 +315,18 @@ TEST_CASE("Session registry remains valid through late process teardown", "[quac
 	(void)SharedBridgeDatabase();
 	REQUIRE(true);
 }
+
+#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
+TEST_CASE("Query error privacy is installed once a host registers", "[quack][bridge][privacy]") {
+	boilstream_quack_set_catalog_planner(nullptr);
+	BridgeDatabase database;
+	auto &callbacks = ExtensionCallbackManager::Get(*database.db.instance);
+	REQUIRE_FALSE(callbacks.HasQueryErrorPrivacyCallbacks());
+	boilstream_quack_set_catalog_planner(&PlanSuccess);
+	REQUIRE(callbacks.HasQueryErrorPrivacyCallbacks());
+	boilstream_quack_set_catalog_planner(nullptr);
+}
+#endif
 
 TEST_CASE_METHOD(BridgeFixture, "Planner bridge forwards opaque execution alias independently of rewrite",
                  "[quack][bridge][abi]") {
