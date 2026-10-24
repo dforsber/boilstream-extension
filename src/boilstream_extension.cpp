@@ -1048,7 +1048,7 @@ struct RegistrationOutputState : GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 static unique_ptr<FunctionData> RegistrationOutputBind(ClientContext &, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &types, vector<string> &names) {
+                                                       vector<LogicalType> &types, vector<Identifier> &names) {
 	if (input.inputs[0].IsNull())
 		throw InvalidInputException("Authentication result ID is required");
 	types = {LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::BOOLEAN};
@@ -2153,8 +2153,10 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 
 //! Load the extension
 static void LoadInternal(ExtensionLoader &loader) {
+#ifdef BOILSTREAM_HAS_QUERY_ERROR_PRIVACY
 	ExtensionCallbackManager::Get(loader.GetDatabaseInstance())
 	    .RegisterQueryErrorPrivacyCallback(BoilstreamPrivateQueryError, BoilstreamPrivateErrorMessage);
+#endif
 	BOILSTREAM_LOG("LoadInternal: Extension loading started");
 
 	// Register global storage

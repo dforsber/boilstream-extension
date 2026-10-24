@@ -316,7 +316,9 @@ static inline string RequireStr(yyjson_val *val, const char *field_name) {
 }
 
 RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string &endpoint_url_p)
-    : CatalogSetSecretStorage(db_p, "boilstream", 5), // offset=5 for higher priority than built-in storages (10, 20)
+    // Tie-break offset 7: below the connection-scoped storage (5), so a secret a user created for this
+    // connection wins a tie, but ahead of the temporary (10) and local file (20) storages.
+    : CatalogSetSecretStorage(db_p, "boilstream", 7),
       endpoint_url(endpoint_url_p) {
 	secrets = make_uniq<CatalogSet>(Catalog::GetSystemCatalog(db));
 	persistent = true; // Acts as persistent storage
@@ -1594,9 +1596,12 @@ string RestApiSecretStorage::SerializeSecret(const BaseSecret &secret) {
 	auto obj = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, obj);
 
-	yyjson_mut_obj_add_strncpy(doc, obj, "name", secret.GetName().data(), secret.GetName().size());
-	yyjson_mut_obj_add_strncpy(doc, obj, "type", secret.GetType().data(), secret.GetType().size());
-	yyjson_mut_obj_add_strncpy(doc, obj, "provider", secret.GetProvider().data(), secret.GetProvider().size());
+	const auto &name = secret.GetName().GetIdentifierName();
+	const auto &type = secret.GetType().GetIdentifierName();
+	const auto &provider = secret.GetProvider().GetIdentifierName();
+	yyjson_mut_obj_add_strncpy(doc, obj, "name", name.data(), name.size());
+	yyjson_mut_obj_add_strncpy(doc, obj, "type", type.data(), type.size());
+	yyjson_mut_obj_add_strncpy(doc, obj, "provider", provider.data(), provider.size());
 
 	// Add scope array
 	auto scope_arr = yyjson_mut_arr(doc);
@@ -1729,7 +1734,7 @@ std::chrono::system_clock::time_point RestApiSecretStorage::ParseExpiresAt(const
 	const auto result = Timestamp::TryConvertTimestampTZ(expires_at_str.c_str(), expires_at_str.size(), parsed, true,
 	                                                     has_offset, timezone);
 	if (result != TimestampCastResult::SUCCESS || !has_offset || timezone.GetSize() != 0 ||
-	    !Timestamp::IsFinite(parsed)) {
+	    !parsed.IsFinite()) {
 		return std::chrono::system_clock::time_point::min();
 	}
 
@@ -2218,7 +2223,7 @@ SecretMatch RestApiSecretStorage::LookupCachedSecret(
 	SecretMatch best;
 	if (cache) {
 		for (auto &entry : cache->Snapshot()) {
-			if (StringUtil::CIEquals(entry->secret->GetType(), type)) {
+			if (StringUtil::CIEquals(entry->secret->GetType().GetIdentifierName(), type)) {
 				SecretEntry copy(*entry);
 				best = SelectBestMatch(copy, path, tie_break_offset, best);
 			}
@@ -2711,7 +2716,7 @@ unique_ptr<SecretEntry> RestApiSecretStorage::StoreSecret(unique_ptr<const BaseS
 	if (!cache) throw IOException("A live connection is required to store a BoilStream secret");
 	if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) throw InvalidInputException("Unsupported secret conflict mode");
 	const auto revision = cache->Revision();
-	const auto name = secret->GetName();
+	const auto name = secret->GetName().GetIdentifierName();
 	auto existing = cache->Get(name, true);
 	if (!state && existing) {
 		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) return nullptr;
@@ -2860,7 +2865,7 @@ RestApiSecretStorage::FetchedSecret RestApiSecretStorage::FetchSecret(const stri
 	bool expired = !match && cache->Get(selector, true) != nullptr;
 	if (match) {
 		for (auto &entry : cache->Snapshot(true)) {
-			if (StringUtil::CIEquals(entry->secret->GetType(), type) &&
+			if (StringUtil::CIEquals(entry->secret->GetType().GetIdentifierName(), type) &&
 			    entry->secret->MatchScore(selector) != NumericLimits<int64_t>::Minimum()) { expired = true; break; }
 		}
 	}
@@ -2889,8 +2894,8 @@ RestApiSecretStorage::FetchedSecret RestApiSecretStorage::FetchSecret(const stri
         if (match && yyjson_obj_size(root) == 0) return {};
 		auto expires = ParseSecretExpiry(root);
 		auto secret = DeserializeSecret(response, SecretManager::Get(db));
-		if (!secret || (!match && !StringUtil::CIEquals(secret->GetName(), selector)) ||
-		    (match && (!StringUtil::CIEquals(secret->GetType(), type) ||
+		if (!secret || (!match && !StringUtil::CIEquals(secret->GetName().GetIdentifierName(), selector)) ||
+		    (match && (!StringUtil::CIEquals(secret->GetType().GetIdentifierName(), type) ||
 		               secret->MatchScore(selector) == NumericLimits<int64_t>::Minimum()))) { if (state->IsLocalSession()) throw IOException("Invalid or mismatched serialized secret"); return {}; }
 		// The captured owner must still be current after network/deserialization.
 		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted()) return {};
@@ -2900,7 +2905,7 @@ RestApiSecretStorage::FetchedSecret RestApiSecretStorage::FetchSecret(const stri
 		} else {
 			// Retire any older known-expiry version. The new value belongs only
 			// to this request and is never admitted to the reusable cache.
-			cache->Remove(entry->secret->GetName(), revision);
+			cache->Remove(entry->secret->GetName().GetIdentifierName(), revision);
 		}
 		return {std::move(entry), expires};
 	} catch (...) {
@@ -2939,7 +2944,7 @@ vector<RestApiSecretStorage::FetchedSecret> RestApiSecretStorage::PublishSecretL
 		if (json.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) throw IOException("Oversized secret list entry");
 		auto secret = DeserializeSecret(json, SecretManager::Get(db));
 		if (!secret) throw IOException("Invalid serialized secret");
-		auto name = secret->GetName();
+		auto name = secret->GetName().GetIdentifierName();
 		if (!names.emplace(name, true).second) throw IOException("Duplicate secret name");
 		auto entry = BoilstreamSecretCache::PrepareSecret(std::move(secret), json.size());
 		fresh.push_back({entry, expires});
@@ -2997,8 +3002,9 @@ void RestApiSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_e
 	// RemoveSecret is not directly called - DropSecretByName handles the HTTP DELETE.
 }
 
-void RestApiSecretStorage::DropSecretByName(const string &name, OnEntryNotFound on_entry_not_found,
+void RestApiSecretStorage::DropSecretByName(const Identifier &secret_name, OnEntryNotFound on_entry_not_found,
                                             optional_ptr<CatalogTransaction> transaction) {
+	const auto &name = secret_name.GetIdentifierName();
 	auto owner = GetSecretOwner(transaction);
 	auto state = owner.session;
 	auto cache = owner.cache;
@@ -3187,7 +3193,7 @@ SecretMatch RestApiSecretStorage::BuildManagedCatalogSecretMatch(const string &s
                                                                  const ManagedCatalogCredentialEnvelope &credential) {
 	const string secret_name = "__quack__" + scope_path;
 	vector<string> scope {scope_path};
-	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", secret_name);
+	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", Identifier(secret_name));
 	secret->secret_map["token"] = Value(credential.token);
 	secret->secret_map["endpoint"] = Value(credential.endpoint);
 	secret->secret_map["catalog_id"] = Value(credential.catalog_id);

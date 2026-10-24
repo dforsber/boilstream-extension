@@ -12,10 +12,7 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 	// Bound diagnostic work even when the original parser failed on a huge input.
 	if (query.size() > 1024 * 1024)
 		return true;
-	bool complete = false;
-	auto tokens = Parser::Tokenize(query, complete);
-	if (!complete)
-		return true;
+	auto tokens = Parser::Tokenize(query);
 	idx_t headers = 0;
 	for (idx_t i = 0; i < tokens.size(); ++i) {
 		const auto &token = tokens[i];
@@ -33,11 +30,11 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 				const auto length = tokens[i + 1].start - token.start;
 				if (length > 4096)
 					return true;
-				Parser header;
+				auto header = Parser::GetBuiltinParser();
 				header.ParseQuery("PRAGMA " + query.substr(token.start, length) + ";");
 				if (header.statements.size() != 1 || header.statements[0]->type != StatementType::PRAGMA_STATEMENT)
 					return true;
-				if (StringUtil::CIEquals(header.statements[0]->Cast<PragmaStatement>().info->name, result_name))
+				if (StringUtil::CIEquals(header.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName(), result_name))
 					return true;
 			}
 		}
@@ -61,11 +58,11 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 		// Parse only the bounded pragma header, ending before the argument
 		// delimiter. Malformed headers remain bounded and fail closed.
 		// No ClientContext/catalog is consulted.
-		Parser parser;
+		auto parser = Parser::GetBuiltinParser();
 		parser.ParseQuery(query.substr(token.start, end - token.start) + ";");
 		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::PRAGMA_STATEMENT)
 			return true;
-		const auto name = StringUtil::Lower(parser.statements[0]->Cast<PragmaStatement>().info->name);
+		const auto name = StringUtil::Lower(parser.statements[0]->Cast<PragmaStatement>().info->name.GetIdentifierName());
 		if (name == "boilstream_login" || name == "boilstream_register_user" || name == "boilstream_verify_mfa" ||
 		    name == "boilstream_bootstrap_session")
 			return true;

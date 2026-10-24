@@ -160,6 +160,18 @@ set(EXTENSION_SOURCES src/boilstream_extension.cpp src/boilstream_secret_storage
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
+# Fork-only API: the BoilStream DuckDB fork lets extensions install a query error privacy policy.
+# Stock DuckDB lacks it, so the public community build compiles without that registration.
+set(BOILSTREAM_ECM_HEADER "${CMAKE_SOURCE_DIR}/src/include/duckdb/main/extension_callback_manager.hpp")
+if(EXISTS "${BOILSTREAM_ECM_HEADER}")
+    file(READ "${BOILSTREAM_ECM_HEADER}" BOILSTREAM_ECM_SOURCE)
+    if(BOILSTREAM_ECM_SOURCE MATCHES "RegisterQueryErrorPrivacyCallback")
+        target_compile_definitions(${EXTENSION_NAME} PRIVATE BOILSTREAM_HAS_QUERY_ERROR_PRIVACY=1)
+        target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE BOILSTREAM_HAS_QUERY_ERROR_PRIVACY=1)
+        message(STATUS "boilstream: query error privacy callback available (BoilStream fork)")
+    endif()
+endif()
+
 # Enable debug logging conditionally (set -DBOILSTREAM_DEBUG=ON to enable)
 # For WASM, always enable for easier browser debugging
 if(BOILSTREAM_DEBUG)

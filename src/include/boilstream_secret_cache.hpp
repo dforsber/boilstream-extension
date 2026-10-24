@@ -24,7 +24,7 @@ public:
 	static constexpr idx_t MAX_ENTRY_BYTES = 1024 * 1024;
 
 	static shared_ptr<const SecretEntry> PrepareSecret(unique_ptr<const BaseSecret> secret, idx_t bytes) {
-		if (!secret || secret->GetName().empty() || (bytes == 0 || bytes > MAX_ENTRY_BYTES)) {
+		if (!secret || secret->GetName().GetIdentifierName().empty() || (bytes == 0 || bytes > MAX_ENTRY_BYTES)) {
 			throw InvalidInputException("Invalid or oversized BoilStream secret");
 		}
 		auto entry = make_shared_ptr<SecretEntry>(std::move(secret));
@@ -79,7 +79,7 @@ public:
 		CheckAdmission(entry, expected);
 	}
 	void Put(Entry entry, uint64_t expected) {
-		const auto name = entry.secret->secret->GetName();
+		const auto &name = entry.secret->secret->GetName().GetIdentifierName();
 		Entry retired;
 		{
 			lock_guard<mutex> guard(lock);
@@ -161,7 +161,7 @@ private:
 	}
 	void CheckAdmission(const Entry &entry, uint64_t expected) {
 		CheckRevision(expected);
-		auto it = entries.find(entry.secret->secret->GetName());
+		auto it = entries.find(entry.secret->secret->GetName().GetIdentifierName());
 		const auto old_bytes = it == entries.end() ? 0 : it->second.bytes;
 		if (entry.bytes > MAX_ENTRY_BYTES || (it == entries.end() && entries.size() >= MAX_ENTRIES) ||
 		    entry.bytes > MAX_BYTES - (bytes - old_bytes)) {
