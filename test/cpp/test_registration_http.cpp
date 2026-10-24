@@ -30,8 +30,7 @@ struct Config : DBConfig {
 	}
 };
 static void QrPassthrough(DataChunk &args, ExpressionState &, Vector &result) {
-	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(),
-	                                           [](string_t input) { return input; });
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [](string_t input) { return input; });
 }
 static string Render(Connection &connection, const string &sql, bool qr) {
 	Require(sql.find("JBSWY3DPEHPK3PXP") == string::npos && sql.find("backup-b") == string::npos);
@@ -73,7 +72,8 @@ int main(int argc, char **argv) {
 	Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
 	Require(ExtensionHelper::LoadExtension(db, "core_functions") == ExtensionLoadResult::LOADED_EXTENSION);
 	db.LoadStaticExtension<BoilstreamExtension>();
-	CreateScalarFunctionInfo tp_qr(ScalarFunction("tp_qr", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QrPassthrough));
+	CreateScalarFunctionInfo tp_qr(
+	    ScalarFunction("tp_qr", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QrPassthrough));
 	a.context->RunFunctionInTransaction(
 	    [&]() { Catalog::GetSystemCatalog(*a.context).CreateFunction(*a.context, tp_qr); });
 	for (auto *c : {&a, &b}) {
