@@ -11,3 +11,4 @@ target/
 # Rust OPAQUE client test artifacts
 opaque-client/test-wasm/*.wasm
 opaque-client/test-wasm/*.js
+.cache/
