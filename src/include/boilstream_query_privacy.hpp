@@ -12,22 +12,41 @@ inline bool BoilstreamPrivateQueryError(const string &query) {
 	// Bound diagnostic work even when the original parser failed on a huge input.
 	if (query.size() > 1024 * 1024)
 		return true;
-	auto tokens = Parser::Tokenize(query);
+	bool complete = false;
+	auto tokens = Parser::Tokenize(query, complete);
+	if (!complete)
+		return true;
 	idx_t headers = 0;
 	for (idx_t i = 0; i < tokens.size(); ++i) {
 		const auto &token = tokens[i];
 		// Runtime conversion/renderer errors can contain a result value even
 		// though the query only contains its ID. Protect this table function too.
-		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && i + 1 < tokens.size() &&
-		    tokens[i + 1].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR && query[tokens[i + 1].start] == '(') {
+		idx_t next = i + 1;
+		// The tokenizer splits U&"..." [UESCAPE 'x'] into U, &, the quoted name and the escape clause.
+		bool unicode_name = token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && i + 2 < tokens.size() &&
+		                    StringUtil::CIEquals(query.substr(token.start, 1), "u") &&
+		                    tokens[i + 1].start == token.start + 1 && query[tokens[i + 1].start] == '&' &&
+		                    tokens[i + 2].start == token.start + 2 &&
+		                    tokens[i + 2].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
+		                    query[tokens[i + 2].start] == '"';
+		if (unicode_name) {
+			next = i + 3;
+			if (next + 1 < tokens.size() && tokens[next].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
+			    StringUtil::CIEquals(query.substr(tokens[next].start, 7), "uescape") &&
+			    tokens[next + 1].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT)
+				next += 2;
+		}
+		while (next < tokens.size() && tokens[next].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT)
+			++next;
+		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER && next < tokens.size() &&
+		    tokens[next].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR && query[tokens[next].start] == '(') {
 			constexpr char result_name[] = "boilstream_auth_result";
 			const auto name_start = token.start + (query[token.start] == '"' ? 1 : 0);
 			// Unicode escaped identifiers must be decoded by the parser before comparison.
-			if (StringUtil::CIEquals(query.substr(name_start, sizeof(result_name) - 1), result_name) ||
-			    StringUtil::CIEquals(query.substr(token.start, 2), "U&")) {
+			if (unicode_name || StringUtil::CIEquals(query.substr(name_start, sizeof(result_name) - 1), result_name)) {
 				if (++headers > 64)
 					return true;
-				const auto length = tokens[i + 1].start - token.start;
+				const auto length = tokens[next].start - token.start;
 				if (length > 4096)
 					return true;
 				auto header = Parser::GetBuiltinParser();

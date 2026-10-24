@@ -236,10 +236,10 @@ int main() {
 	test("cancellation_invalidates_pending_publication", [] {
 		Fixture f;
 		auto pending = f.storage.BeginRegistration(*f.a.context, "https://same.invalid", "same@example.com");
-		f.a.context->interrupted = true;
+		f.a.context->Interrupt();
 		Reject([&] { f.storage.StoreRegistrationState(*f.a.context, pending.generation, "token", "uri"); });
 		f.storage.EndRegistrationOperation(*f.a.context, pending.generation);
-		f.a.context->interrupted = false;
+		f.a.context->ClearInterrupt();
 		Reject([&] { Read(f.storage, *f.a.context); });
 		Store(f.storage, *f.a.context, "fresh");
 		Require(Read(f.storage, *f.a.context) == "fresh");
@@ -248,9 +248,9 @@ int main() {
 		Fixture f;
 		Store(f.storage, *f.a.context, "synthetic-a");
 		auto pending = f.storage.BeginMfaVerification(*f.a.context);
-		f.a.context->interrupted = true;
+		f.a.context->Interrupt();
 		f.storage.EndRegistrationOperation(*f.a.context, pending.generation);
-		f.a.context->interrupted = false;
+		f.a.context->ClearInterrupt();
 		Reject([&] { Read(f.storage, *f.a.context); });
 	});
 	test("connection_destruction_releases_registration_owner", [] {

@@ -33,7 +33,7 @@ static void Reject(F action) {
 }
 static unique_ptr<BaseSecret> Secret(const string &name, const string &value, const string &scope = "test://shared/",
                                      const string &type = "owned_test") {
-	auto secret = make_uniq<KeyValueSecret>(vector<string> {scope}, type, "config", name);
+	auto secret = make_uniq<KeyValueSecret>(vector<string> {scope}, Identifier(type), "config", Identifier(name));
 	secret->secret_map["key"] = Value(value);
 	return std::move(secret);
 }

@@ -129,14 +129,14 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 		INFO("Quack extension state error: " << loaded->GetError());
 		REQUIRE_FALSE(loaded->HasError());
 		REQUIRE(loaded->RowCount() == 1);
-		REQUIRE(loaded->GetValue(0, 0).GetValue<bool>());
+		REQUIRE(loaded->Collection().GetValue(0, 0).GetValue<bool>());
 
 		auto secret_type = con.Query("SELECT default_provider FROM duckdb_secret_types() "
 		                             "WHERE type = 'quack' AND extension = 'quack';");
 		INFO("Quack secret type error: " << secret_type->GetError());
 		REQUIRE_FALSE(secret_type->HasError());
 		REQUIRE(secret_type->RowCount() == 1);
-		REQUIRE(secret_type->GetValue(0, 0).ToString() == "config");
+		REQUIRE(secret_type->Collection().GetValue(0, 0).ToString() == "config");
 	}
 
 	SECTION("BoilStream still loads when the optional Quack client is unavailable") {
@@ -151,7 +151,7 @@ TEST_CASE("Extension Loading", "[boilstream][local]") {
 		auto loaded = con.Query("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'quack';");
 		REQUIRE_FALSE(loaded->HasError());
 		REQUIRE(loaded->RowCount() == 1);
-		REQUIRE_FALSE(loaded->GetValue(0, 0).GetValue<bool>());
+		REQUIRE_FALSE(loaded->Collection().GetValue(0, 0).GetValue<bool>());
 	}
 
 	SECTION("Load httpfs extension") {

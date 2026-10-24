@@ -1,6 +1,7 @@
 // Actual result-table execution plus storage lifecycle and ownership boundaries.
 #include "../../src/boilstream_extension.cpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/tenant/active_tenant_registry.hpp"
@@ -79,7 +80,7 @@ struct Fixture {
 	string Read(Connection &c, uint64_t id) {
 		auto r = c.Query(Sql(id));
 		Require(r && !r->HasError() && r->RowCount() == 1);
-		return r->GetValue(0, 0).ToString();
+		return r->Collection().GetValue(0, 0).ToString();
 	}
 };
 int main() {
@@ -127,7 +128,7 @@ int main() {
 		auto id = f.Publish(f.a);
 		auto prepared = f.a.Prepare(f.Sql(id));
 		Require(prepared && !prepared->HasError());
-		Require(prepared->query.find("synthetic-secret") == string::npos);
+		Require(prepared->GetQuery().find("synthetic-secret") == string::npos);
 		auto r = prepared->Execute();
 		Require(!r->HasError());
 		auto chunk = r->Fetch();
@@ -215,7 +216,7 @@ int main() {
 		auto r = f.a.Query(f.Sql(id));
 		Require(!r->HasError() && r->RowCount() == 128);
 		for (idx_t i = 0; i < 128; ++i)
-			Require(r->GetValue(0, i).ToString() == string(8192, char('a' + i % 26)));
+			Require(r->Collection().GetValue(0, i).ToString() == string(8192, char('a' + i % 26)));
 	});
 	test("interruption_retires_pending_result", [] {
 		Fixture f;
@@ -333,7 +334,7 @@ int main() {
 		auto id = f.Publish(f.a, value);
 		Require(f.Read(f.a, id) == value);
 		auto r = f.a.Query("SELECT i FROM protected_data");
-		Require(!r->HasError() && r->RowCount() == 1 && r->GetValue(0, 0).GetValue<int32_t>() == 42);
+		Require(!r->HasError() && r->RowCount() == 1 && r->Collection().GetValue(0, 0).GetValue<int32_t>() == 42);
 	});
 	test("execution_error_cannot_restore_consumed_payload", [] {
 		Fixture f;
@@ -372,11 +373,13 @@ int main() {
 	});
 	test("actual_query_cancellation_retires_pending_result", [] {
 		Fixture f;
-		f.a.CreateVectorizedFunction<int64_t, int64_t>("cancel_auth_result",
+		CreateScalarFunctionInfo cancel(ScalarFunction("cancel_auth_result", {LogicalType::BIGINT}, LogicalType::BIGINT,
 		                                               [](DataChunk &, ExpressionState &state, Vector &) {
 			                                               state.GetContext().Interrupt();
 			                                               throw InterruptException();
-		                                               });
+		                                               }));
+		f.a.context->RunFunctionInTransaction(
+		    [&]() { Catalog::GetSystemCatalog(*f.a.context).CreateFunction(*f.a.context, cancel); });
 		auto id = f.Publish(f.a);
 		auto result = f.a.Query("SELECT cancel_auth_result(i) FROM range(1) t(i)");
 		Require(result->HasError() && result->GetErrorObject().Type() == ExceptionType::INTERRUPT);

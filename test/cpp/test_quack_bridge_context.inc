@@ -12,7 +12,7 @@ bool Login(BridgeFixture &fixture, const char *sid) {
 	auto result = fixture.connection.Query("SELECT boilstream_quack_authn('" + std::string(sid) + "', 'test-jwt', '')");
 	if (result->HasError())
 		throw std::runtime_error(result->GetError());
-	return result->GetValue(0, 0).GetValue<bool>();
+	return result->Collection().GetValue(0, 0).GetValue<bool>();
 }
 
 TEST_CASE_METHOD(BridgeFixture, "Repeated bridge callbacks retain one immutable authority", "[quack_bridge][context]") {

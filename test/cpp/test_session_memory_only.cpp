@@ -73,6 +73,11 @@ struct Fixture {
 		Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
 		auto transport = connection.Query("SET httpfs_client_implementation='curl'");
 		Require(transport && !transport->HasError());
+		// The loopback fixture is plain HTTP; with verification on, httpfs 2.0 would probe the
+		// system CA bundle locations through the tripwire file system before every request.
+		// The storage builds its HTTP parameters from the database, so the setting must be global.
+		auto verify = connection.Query("SET GLOBAL enable_curl_server_cert_verification=false");
+		Require(verify && !verify->HasError());
 		auto &config = DBConfig::GetConfig(*db.instance);
 		original = std::move(config.file_system);
 		auto tripwire = make_uniq<TripwireFS>();

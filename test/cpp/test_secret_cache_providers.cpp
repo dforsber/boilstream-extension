@@ -83,8 +83,8 @@ int main(int argc, char **argv) {
 		Query(b, "CREATE TABLE second.events(i INTEGER)");
 		Query(b, "INSERT INTO second.events VALUES (21),(22)");
 		auto one = a.Query("SELECT sum(i) FROM first.events"), two = b.Query("SELECT sum(i) FROM second.events");
-		Require(one && !one->HasError() && one->GetValue(0, 0).GetValue<int64_t>() == 23);
-		Require(two && !two->HasError() && two->GetValue(0, 0).GetValue<int64_t>() == 43);
+		Require(one && !one->HasError() && one->Collection().GetValue(0, 0).GetValue<int64_t>() == 23);
+		Require(two && !two->HasError() && two->Collection().GetValue(0, 0).GetValue<int64_t>() == 43);
 		Query(a, "DETACH first");
 		Query(b, "DETACH second");
 		auto missing = fresh.Query("ATTACH 'ducklake:owned_lake' AS forbidden");

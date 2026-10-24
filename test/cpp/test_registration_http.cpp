@@ -2,6 +2,7 @@
 // optional textplot installation. HTTPFS and registration FFI are real.
 #include "../../src/boilstream_extension.cpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -28,8 +29,9 @@ struct Config : DBConfig {
 		options.maximum_threads = 2;
 	}
 };
-static string_t QrPassthrough(string_t input) {
-	return input;
+static void QrPassthrough(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(),
+	                                           [](string_t input) { return input; });
 }
 static string Render(Connection &connection, const string &sql, bool qr) {
 	Require(sql.find("JBSWY3DPEHPK3PXP") == string::npos && sql.find("backup-b") == string::npos);
@@ -39,10 +41,10 @@ static string Render(Connection &connection, const string &sql, bool qr) {
 	Require(result && !result->HasError());
 	if (!qr) {
 		Require(result->RowCount() == 1);
-		return result->GetValue(0, 0).ToString();
+		return result->Collection().GetValue(0, 0).ToString();
 	}
-	Require(result->RowCount() == 3 && result->GetValue(0, 0).ToString() == "JBSW Y3DP EHPK 3PXP");
-	Require(result->GetValue(0, 1).ToString() == "PRAGMA boilstream_verify_mfa('123456');");
+	Require(result->RowCount() == 3 && result->Collection().GetValue(0, 0).ToString() == "JBSW Y3DP EHPK 3PXP");
+	Require(result->Collection().GetValue(0, 1).ToString() == "PRAGMA boilstream_verify_mfa('123456');");
 	return result->ToString();
 }
 static string Register(Connection &connection, const string &base, const string &email) {
@@ -71,7 +73,9 @@ int main(int argc, char **argv) {
 	Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
 	Require(ExtensionHelper::LoadExtension(db, "core_functions") == ExtensionLoadResult::LOADED_EXTENSION);
 	db.LoadStaticExtension<BoilstreamExtension>();
-	a.CreateScalarFunction<string_t, string_t>("tp_qr", QrPassthrough);
+	CreateScalarFunctionInfo tp_qr(ScalarFunction("tp_qr", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QrPassthrough));
+	a.context->RunFunctionInTransaction(
+	    [&]() { Catalog::GetSystemCatalog(*a.context).CreateFunction(*a.context, tp_qr); });
 	for (auto *c : {&a, &b}) {
 		auto r = c->Query("SET httpfs_client_implementation='curl'");
 		Require(r && !r->HasError());

@@ -91,14 +91,14 @@ int main() {
 	test("interruption_prevents_publication", [] {
 		Fixture f;
 		auto &ctx = *f.connection.context;
-		ctx.interrupted = true;
+		ctx.Interrupt();
 		bool rejected = false;
 		try {
 			BoilstreamSessionPublicationTestAccess::Publish(f.storage, ctx, Pending("https://new.invalid"));
 		} catch (const IOException &) {
 			rejected = true;
 		}
-		ctx.interrupted = false;
+		ctx.ClearInterrupt();
 		Require(rejected && !f.storage.GetSessionForConnection(ctx.GetConnectionId()));
 	});
 	test("connection_cleanup_releases_registry_not_inflight_request", [] {
