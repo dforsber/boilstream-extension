@@ -13,6 +13,16 @@ on:
         description: Absolute private fixture config on the dedicated quack-v3-isolated runner
         type: string
         required: true
+      runner_platform:
+        description: Reserved worker platform matching the pinned local artifacts
+        type: choice
+        options: [linux-x64, macos-arm64]
+        default: linux-x64
+      mode:
+        description: Public endpoint acceptance or the captured pre-v3 standalone expected failure
+        type: choice
+        options: [public, baseline]
+        default: public
 
 permissions:
   contents: read
@@ -20,16 +30,18 @@ permissions:
 jobs:
   stock-client:
     # A reserved runner is essential: never reuse the current-main release worker.
-    runs-on: [self-hosted, linux, x64, quack-v3-isolated]
+    runs-on: ${{ fromJSON(inputs.runner_platform == 'macos-arm64' && '["self-hosted","macOS","ARM64","quack-v3-isolated"]' || '["self-hosted","linux","x64","quack-v3-isolated"]') }}
     timeout-minutes: 5
     env:
       PRODUCT_COMMIT: ${{ inputs.product_commit }}
       QV3_STOCK_CONFIG: ${{ inputs.config_path }}
+      QV3_MODE: ${{ inputs.mode }}
     steps:
       - name: Require immutable harness source and explicit fixture
         shell: bash
         run: |
           [[ "$PRODUCT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QV3_MODE" == public || "$QV3_MODE" == baseline ]]
           [[ "$QV3_STOCK_CONFIG" = /* ]]
           test -f "$QV3_STOCK_CONFIG"
       - uses: actions/checkout@v4
@@ -44,7 +56,7 @@ jobs:
         with:
           node-version: '24'
       - name: Check the expected-failure classifier
-        run: node --test product/ingestion-agent/tests/quack/stock/run.test.mjs
+        run: node --test product/ingestion-agent/tests/quack/stock/*.test.mjs
       - name: Locate private receipt
         id: fixture
         shell: bash
@@ -52,14 +64,25 @@ jobs:
           node --input-type=module <<'JS'
           import { readFileSync, appendFileSync } from 'node:fs';
           import { join } from 'node:path';
+          import { isAbsolute } from 'node:path';
+          import assert from 'node:assert/strict';
           import { validateConfig } from './product/ingestion-agent/tests/quack/stock/run.mjs';
           const c = JSON.parse(readFileSync(process.env.QV3_STOCK_CONFIG, 'utf8'));
-          validateConfig(c);
-          appendFileSync(process.env.GITHUB_OUTPUT, 'receipt=' + join(c.runDirectory, 'receipt.json') + '\n');
+          const baseline = process.env.QV3_MODE === 'baseline';
+          if (baseline) {
+            assert.equal(c.expectedTransportFailure, true, 'CI must require the reviewed baseline contract');
+            assert.ok(isAbsolute(c.runDirectory) && !/[\r\n\0]/.test(c.runDirectory));
+          } else validateConfig(c);
+          appendFileSync(process.env.GITHUB_OUTPUT, 'receipt=' + join(c.runDirectory, baseline ? 'baseline.json' : 'receipt.json') + '\n');
           JS
       - name: Stock CLI against the prepared public endpoint
+        if: inputs.mode == 'public'
         shell: bash
         run: node product/ingestion-agent/tests/quack/stock/run.mjs "$QV3_STOCK_CONFIG"
+      - name: Capture the pinned standalone HTTP2 baseline expected failure
+        if: inputs.mode == 'baseline'
+        shell: bash
+        run: node product/ingestion-agent/tests/quack/stock/capture-baseline.mjs "$QV3_STOCK_CONFIG"
       - uses: actions/upload-artifact@v4
         if: always() && steps.fixture.outputs.receipt != ''
         with:
