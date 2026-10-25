@@ -1,0 +1,69 @@
+name: Quack v3 stock DuckDB compatibility
+
+# Explicit dispatch while stage-1 artifacts/listener are being prepared. This
+# becomes a required candidate lane when production wiring lands (stage 5).
+on:
+  workflow_dispatch:
+    inputs:
+      product_commit:
+        description: Full ingestion-agent repository commit containing the stock harness
+        type: string
+        required: true
+      config_path:
+        description: Absolute private fixture config on the dedicated quack-v3-isolated runner
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  stock-client:
+    # A reserved runner is essential: never reuse the current-main release worker.
+    runs-on: [self-hosted, linux, x64, quack-v3-isolated]
+    timeout-minutes: 5
+    env:
+      PRODUCT_COMMIT: ${{ inputs.product_commit }}
+      QV3_STOCK_CONFIG: ${{ inputs.config_path }}
+    steps:
+      - name: Require immutable harness source and explicit fixture
+        shell: bash
+        run: |
+          [[ "$PRODUCT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QV3_STOCK_CONFIG" = /* ]]
+          test -f "$QV3_STOCK_CONFIG"
+      - uses: actions/checkout@v4
+        with:
+          repository: boilingdata/ingestion-agent
+          ref: ${{ inputs.product_commit }}
+          token: ${{ secrets.QV3_SOURCE_READ_TOKEN }}
+          path: product
+          sparse-checkout: ingestion-agent/tests/quack/stock
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check the expected-failure classifier
+        run: node --test product/ingestion-agent/tests/quack/stock/run.test.mjs
+      - name: Locate private receipt
+        id: fixture
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { validateConfig } from './product/ingestion-agent/tests/quack/stock/run.mjs';
+          const c = JSON.parse(readFileSync(process.env.QV3_STOCK_CONFIG, 'utf8'));
+          validateConfig(c);
+          appendFileSync(process.env.GITHUB_OUTPUT, 'receipt=' + join(c.runDirectory, 'receipt.json') + '\n');
+          JS
+      - name: Stock CLI against the prepared public endpoint
+        shell: bash
+        run: node product/ingestion-agent/tests/quack/stock/run.mjs "$QV3_STOCK_CONFIG"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.fixture.outputs.receipt != ''
+        with:
+          name: quack-v3-stock-receipt
+          path: ${{ steps.fixture.outputs.receipt }}
+          if-no-files-found: warn
+          retention-days: 14
