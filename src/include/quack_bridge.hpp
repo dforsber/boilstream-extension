@@ -11,6 +11,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "quack_tenant_session_quota.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <cstddef>
@@ -29,6 +30,16 @@ struct boilstream_quack_capability_context_factory {
 	void (*destroy)(const void *context);
 };
 void boilstream_quack_set_capability_context_factory(const boilstream_quack_capability_context_factory *factory);
+
+//! V2 keeps requester identity and quota policy paired with the context factory.
+//! requester_tenant returns zero on denial; limit is host policy, not wire input.
+struct boilstream_quack_capability_context_factory_v2 {
+	const void *(*create)(const char *capability_bundle);
+	void (*destroy)(const void *context);
+	uint32_t (*requester_tenant)(const void *context);
+	uint32_t max_sessions_per_tenant;
+};
+void boilstream_quack_set_capability_context_factory_v2(const boilstream_quack_capability_context_factory_v2 *factory);
 
 //! Verify a Quack JWT and return the requester audit identity plus one opaque,
 //! versioned capability bundle. Returns 1 on success and 0 on denial.
@@ -91,6 +102,8 @@ namespace duckdb {
 
 struct SessionCtx {
 	std::string user_id;
+	// Release quota after the authority destructor has completed.
+	std::shared_ptr<QuackTenantSessionQuota::Lease> session_quota;
 	std::shared_ptr<const void> capability_context;
 };
 

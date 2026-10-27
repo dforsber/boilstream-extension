@@ -37,6 +37,11 @@ std::atomic<const boilstream_quack_capability_context_factory *> &ContextFactory
 	return slot;
 }
 
+std::atomic<const boilstream_quack_capability_context_factory_v2 *> &ContextFactoryV2Slot() {
+	static std::atomic<const boilstream_quack_capability_context_factory_v2 *> slot{nullptr};
+	return slot;
+}
+
 std::atomic<boilstream_quack_jwt_verifier_fn> &JwtVerifierSlot() {
 	static std::atomic<boilstream_quack_jwt_verifier_fn> slot {nullptr};
 	return slot;
@@ -93,7 +98,14 @@ void InstallQuackAdmissionHooksIfHosted();
 
 extern "C" void
 boilstream_quack_set_capability_context_factory(const boilstream_quack_capability_context_factory *factory) {
+	ContextFactoryV2Slot().store(nullptr, std::memory_order_release);
 	ContextFactorySlot().store(factory, std::memory_order_release);
+}
+
+extern "C" void
+boilstream_quack_set_capability_context_factory_v2(const boilstream_quack_capability_context_factory_v2 *factory) {
+	ContextFactorySlot().store(nullptr, std::memory_order_release);
+	ContextFactoryV2Slot().store(factory, std::memory_order_release);
 }
 
 extern "C" void boilstream_quack_set_jwt_verifier(boilstream_quack_jwt_verifier_fn fn) {
@@ -184,17 +196,21 @@ SessionRegistry &QuackSessionRegistry() {
 void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto verifier = JwtVerifierSlot().load(std::memory_order_acquire);
 	TernaryExecutor::Execute<string_t, string_t, string_t, bool>(
-	    args.data[0], args.data[1], args.data[2], result, [verifier](string_t sid, string_t client_auth, string_t) {
-		    try {
-			    auto factory = ContextFactorySlot().load(std::memory_order_acquire);
-			    if (!verifier || !factory || !factory->create || !factory->destroy) {
-				    return false;
-			    }
-			    const std::string session_id(sid.GetData(), sid.GetSize());
-			    if (session_id.empty()) {
-				    return false;
-			    }
-			    char user_id[128] = {};
+		args.data[0], args.data[1], args.data[2], result, [verifier](string_t sid, string_t client_auth, string_t) {
+			try {
+				auto factory_v2 = ContextFactoryV2Slot().load(std::memory_order_acquire);
+				auto factory = ContextFactorySlot().load(std::memory_order_acquire);
+				auto create = factory_v2 ? factory_v2->create : factory ? factory->create : nullptr;
+				auto destroy = factory_v2 ? factory_v2->destroy : factory ? factory->destroy : nullptr;
+				if (!verifier || !create || !destroy ||
+					(factory_v2 && (!factory_v2->requester_tenant || !factory_v2->max_sessions_per_tenant))) {
+					return false;
+				}
+				const std::string session_id(sid.GetData(), sid.GetSize());
+				if (session_id.empty()) {
+					return false;
+				}
+				char user_id[128] = {};
 			    constexpr size_t BUNDLE_CAPACITY = 64ULL * 1024;
 			    std::vector<char> bundle(BUNDLE_CAPACITY, '\0');
 			    const auto rc = verifier(client_auth.GetData(), client_auth.GetSize(), user_id, sizeof(user_id),
@@ -204,22 +220,29 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 			    if (rc != 1 || user_id[0] == '\0' || bundle[0] == '\0') {
 				    return false;
 			    }
-			    const auto authority = factory->create(bundle.data());
+			    const auto authority = create(bundle.data());
 			    if (!authority) {
 				    return false;
 			    }
 			    // Capture the exact deallocator before publishing the owner.
 			    // shared_ptr releases authority even if its allocation fails.
-			    std::shared_ptr<const void> owned_authority(authority, factory->destroy);
+			    std::shared_ptr<const void> owned_authority(authority, destroy);
 			    auto context = std::make_shared<SessionCtx>();
 			    context->user_id = user_id;
 			    context->capability_context = std::move(owned_authority);
-			    QuackSessionRegistry().Publish(session_id, std::move(context));
-			    return true;
-		    } catch (...) {
-			    return false;
-		    }
-	    });
+				if (factory_v2) {
+					const QuackRequesterTenant tenant(factory_v2->requester_tenant(authority));
+					context->session_quota =
+						QuackSessionRegistry().ReserveQuota(session_id, tenant, factory_v2->max_sessions_per_tenant);
+					if (!context->session_quota)
+						return false;
+				}
+				QuackSessionRegistry().Publish(session_id, std::move(context));
+				return true;
+			} catch (...) {
+				return false;
+			}
+		});
 }
 
 // Authentication binds the immutable opaque context. This scalar only verifies that the

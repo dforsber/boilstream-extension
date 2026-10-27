@@ -15,6 +15,29 @@ bool Login(BridgeFixture &fixture, const char *sid) {
 	return result->Collection().GetValue(0, 0).GetValue<bool>();
 }
 
+uint32_t QuotaRequester(const void *) { return 5001; }
+
+TEST_CASE_METHOD(BridgeFixture, "Tenant quota survives reauthentication and retained context",
+				 "[quack_bridge][quota]") {
+	static const boilstream_quack_capability_context_factory_v2 factory{CreateContext, DestroyContext, QuotaRequester,
+																		1};
+	boilstream_quack_set_capability_context_factory_v2(&factory);
+	struct Cleanup {
+		~Cleanup() { boilstream_quack_catalog_session_close("quota-second"); }
+	} cleanup;
+	REQUIRE(Login(*this, SESSION_ID));
+	auto retained = GetQuackSessionCtx(SESSION_ID);
+	REQUIRE(retained->session_quota);
+	REQUIRE(retained->session_quota->Tenant().Value() == 5001);
+	REQUIRE(Login(*this, SESSION_ID));
+	REQUIRE(GetQuackSessionCtx(SESSION_ID)->session_quota == retained->session_quota);
+	REQUIRE_FALSE(Login(*this, "quota-second"));
+	boilstream_quack_catalog_session_close(SESSION_ID);
+	REQUIRE_FALSE(Login(*this, "quota-second"));
+	retained.reset();
+	REQUIRE(Login(*this, "quota-second"));
+}
+
 TEST_CASE_METHOD(BridgeFixture, "Repeated bridge callbacks retain one immutable authority", "[quack_bridge][context]") {
 	const auto created = context_created.load();
 	const auto destroyed = context_destroyed.load();
