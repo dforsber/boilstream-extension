@@ -1,4 +1,5 @@
 #include "quack_bridge.hpp"
+#include "quack_session_admission_registry.hpp"
 
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -117,6 +118,9 @@ extern "C" void boilstream_quack_set_post_execute_hook(boilstream_quack_post_exe
 typedef void (*quack_set_catalog_admission_hooks_fn_t)(decltype(&boilstream_quack_catalog_plan) planner,
                                                        decltype(&boilstream_quack_catalog_authorize) authorizer,
                                                        void (*session_close)(const char *));
+typedef void (*quack_set_catalog_admission_hooks_v2_fn_t)(decltype(&boilstream_quack_catalog_plan),
+    decltype(&boilstream_quack_catalog_authorize), decltype(&boilstream_quack_catalog_session_close),
+    decltype(&boilstream_quack_session_begin), decltype(&boilstream_quack_session_finish));
 typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint32_t, const char *, char *, size_t));
 
 namespace duckdb {
@@ -124,6 +128,7 @@ namespace {
 
 struct QuackHookSetterSlots {
 	std::atomic<quack_set_catalog_admission_hooks_fn_t> admission {nullptr};
+	std::atomic<quack_set_catalog_admission_hooks_v2_fn_t> admission_v2 {nullptr};
 	std::atomic<quack_set_post_execute_hook_fn_t> post_execute {nullptr};
 	std::atomic<bool> installed {false};
 };
@@ -165,10 +170,6 @@ void InstallQueryErrorPrivacyIfHosted() {
 #endif
 }
 
-struct SessionRegistry {
-	std::mutex mutex;
-	std::unordered_map<std::string, std::shared_ptr<const SessionCtx>> sessions;
-};
 
 SessionRegistry &QuackSessionRegistry() {
 	// Quack closes its final sessions from DuckDB's database-owner callback.
@@ -213,15 +214,7 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 			    auto context = std::make_shared<SessionCtx>();
 			    context->user_id = user_id;
 			    context->capability_context = std::move(owned_authority);
-			    std::shared_ptr<const SessionCtx> retired;
-			    auto &registry = QuackSessionRegistry();
-			    {
-				    std::lock_guard<std::mutex> guard(registry.mutex);
-				    auto &slot = registry.sessions[session_id];
-				    retired = std::move(slot);
-				    slot = std::move(context);
-			    }
-			    // Any replaced session is destroyed after releasing the lock.
+			    QuackSessionRegistry().Publish(session_id, std::move(context));
 			    return true;
 		    } catch (...) {
 			    return false;
@@ -277,6 +270,8 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	QuackHookSetters().admission.store(reinterpret_cast<quack_set_catalog_admission_hooks_fn_t>(
 	                                       boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks")),
 	                                   std::memory_order_release);
+	QuackHookSetters().admission_v2.store(reinterpret_cast<quack_set_catalog_admission_hooks_v2_fn_t>(
+        boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks_v2")), std::memory_order_release);
 	QuackHookSetters().post_execute.store(reinterpret_cast<quack_set_post_execute_hook_fn_t>(
 	                                          boilstream_lookup_runtime_symbol("quack_set_post_execute_hook")),
 	                                      std::memory_order_release);
@@ -290,7 +285,11 @@ void InstallQuackAdmissionHooksIfHosted() {
 	InstallQueryErrorPrivacyIfHosted();
 	auto &setters = QuackHookSetters();
 	if (!setters.installed.exchange(true)) {
-		if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {
+		if (auto admission_setter = setters.admission_v2.load(std::memory_order_acquire)) {
+            admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
+                             &boilstream_quack_catalog_session_close, &boilstream_quack_session_begin,
+                             &boilstream_quack_session_finish);
+        } else if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {
 			admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
 			                 &boilstream_quack_catalog_session_close);
 		}
@@ -303,23 +302,21 @@ void InstallQuackAdmissionHooksIfHosted() {
 } // namespace duckdb
 
 extern "C" void boilstream_quack_catalog_session_close(const char *session_id) {
-	if (!session_id) {
-		return;
-	}
-	try {
-		std::shared_ptr<const duckdb::SessionCtx> retired;
-		auto &registry = duckdb::QuackSessionRegistry();
-		{
-			std::lock_guard<std::mutex> guard(registry.mutex);
-			auto found = registry.sessions.find(session_id);
-			if (found != registry.sessions.end()) {
-				retired = std::move(found->second);
-				registry.sessions.erase(found);
-			}
-		}
-	} catch (...) {
-		// Quack teardown callbacks are no-throw and idempotent.
-	}
+ if (!session_id) return;
+ try { duckdb::QuackSessionRegistry().Retire(session_id); } catch (...) {}
+}
+
+extern "C" void *boilstream_quack_session_begin(const char *session_id) {
+ if (!session_id || !*session_id) return nullptr;
+ try { return duckdb::QuackSessionRegistry().Begin(session_id).release(); } catch (...) { return nullptr; }
+}
+extern "C" void boilstream_quack_session_finish(void *owner, uint32_t outcome) {
+ if (!owner) return;
+ try {
+  duckdb::QuackSessionRegistry().Finish(
+      std::unique_ptr<duckdb::SessionRegistry::Admission>(static_cast<duckdb::SessionRegistry::Admission *>(owner)),
+      outcome == 1);
+ } catch (...) {}
 }
 
 extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char *declared_catalog_id,

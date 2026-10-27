@@ -81,6 +81,9 @@ int boilstream_quack_catalog_authorize(const char *session_id, uint32_t operatio
 int boilstream_quack_catalog_post_execute(const char *session_id, uint32_t operation, const char *catalog_id,
                                           char *error_out_buf, size_t error_out_size);
 void boilstream_quack_catalog_session_close(const char *session_id);
+void *boilstream_quack_session_begin(const char *session_id);
+// Consumes owner exactly once: 1 commits, every other outcome rolls back.
+void boilstream_quack_session_finish(void *owner, uint32_t outcome);
 
 } // extern "C"
 
