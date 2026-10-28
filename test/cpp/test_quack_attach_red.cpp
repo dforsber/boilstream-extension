@@ -35,6 +35,9 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/statement/attach_statement.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 
 using namespace duckdb;
 
@@ -193,13 +196,29 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 	credential.token = "must-not-enter-sql";
 	REQUIRE(ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id) ==
 	        "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0");
-	const auto attach_sql = BuildManagedCatalogAttachSql(credential, "shared \"duckie\"");
-	REQUIRE(attach_sql == "ATTACH 'quack:pod.example.test:9494' AS \"shared \"\"duckie\"\"\" (TYPE quack, "
-	                      "SECRET '__quack__quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0', "
-	                      "CATALOG_ID '9a927d1b-30f5-48da-91eb-af1492bf31c0', TENANT_ID '42', "
-	                      "CATALOG_GROUP '9a927d1b_30f5_48da_91eb_af1492bf31c0', DISABLE_SSL false)");
-	REQUIRE(attach_sql.find(credential.token) == string::npos);
-	REQUIRE(attach_sql.find("PRIVATE KEY") == string::npos);
+	for (const auto &alias : {string("shared \"duckie\""), string("x\"; DROP TABLE valuable; --")}) {
+		const auto attach_sql = BuildManagedCatalogAttachSql(credential, alias);
+		auto parser = Parser::GetBuiltinParser();
+		parser.ParseQuery(attach_sql);
+		REQUIRE(parser.statements.size() == 1);
+		auto &attach = *parser.statements[0]->Cast<AttachStatement>().info;
+		REQUIRE(attach.name == alias);
+		REQUIRE(attach.parsed_path);
+		REQUIRE(attach.parsed_path->Cast<ConstantExpression>().GetLiteral().ToValue().GetValue<string>() ==
+		        "quack:" + credential.endpoint);
+		auto option = [&](const char *name) {
+			return attach.options.at(name);
+		};
+		REQUIRE(option("secret").GetValue<string>() ==
+		        "__quack__" + ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id));
+		REQUIRE(option("catalog_id").GetValue<string>() == credential.catalog_id);
+		REQUIRE(option("tenant_id").GetValue<string>() == "42");
+		REQUIRE(option("catalog_group").GetValue<string>() == credential.catalog_group);
+		REQUIRE_FALSE(option("disable_ssl").GetValue<bool>());
+		REQUIRE(option("http_version").GetValue<string>() == "1.1");
+		REQUIRE(attach_sql.find(credential.token) == string::npos);
+		REQUIRE(attach_sql.find("PRIVATE KEY") == string::npos);
+	}
 	REQUIRE_THROWS_AS(BuildManagedCatalogAttachSql(credential, ""), InvalidInputException);
 }
 
