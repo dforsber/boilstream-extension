@@ -29,6 +29,7 @@
 #include "boilstream_secret_storage.hpp"
 #include "boilstream_connection_state.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -76,7 +77,10 @@ struct QuackAttachFixture {
 	duckdb::unique_ptr<RestApiSecretStorage> storage;
 
 	QuackAttachFixture() {
-		db = duckdb::make_uniq<DuckDB>(nullptr);
+		DBConfig config;
+		config.options.maximum_threads = 2;
+		config.options.async_threads = 2;
+		db = duckdb::make_uniq<DuckDB>(nullptr, &config);
 		// Empty endpoint URL == "no bootstrap_session yet". This is the
 		// state every fresh duckdb process starts in.
 		storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "");
@@ -191,6 +195,7 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 	        "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0");
 	const auto attach_sql = BuildManagedCatalogAttachSql(credential, "shared \"duckie\"");
 	REQUIRE(attach_sql == "ATTACH 'quack:pod.example.test:9494' AS \"shared \"\"duckie\"\"\" (TYPE quack, "
+	                      "SECRET '__quack__quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0', "
 	                      "CATALOG_ID '9a927d1b-30f5-48da-91eb-af1492bf31c0', TENANT_ID '42', "
 	                      "CATALOG_GROUP '9a927d1b_30f5_48da_91eb_af1492bf31c0', DISABLE_SSL false)");
 	REQUIRE(attach_sql.find(credential.token) == string::npos);
@@ -283,6 +288,35 @@ TEST_CASE("Catalog-qualified managed credential wins over a broader user secret"
 	REQUIRE(kv.secret_map.at("server_ca_pem").ToString().find("BEGIN CERTIFICATE") != string::npos);
 	REQUIRE(kv.secret_map.find("client_certificate_pem") == kv.secret_map.end());
 	REQUIRE(kv.secret_map.find("client_private_key_pem") == kv.secret_map.end());
+	auto named = storage.GetSecretByName("__quack__" + catalog_scope, &transaction);
+	REQUIRE(named);
+	REQUIRE(dynamic_cast<const KeyValueSecret &>(*named->secret).secret_map.at("token").ToString() ==
+	        "managed-catalog-token");
+	// A second connection with the same catalog/secret name retains its own
+	// capability. A connection without login cannot borrow either one.
+	Connection member(*fixture.db), anonymous(*fixture.db);
+	auto member_session = BoilstreamSessionPublicationTestAccess::Publish(storage, *member.context);
+	managed.token = "member-catalog-token";
+	member_session->StoreManagedCatalogCredential(catalog_scope, managed);
+	{
+		lock_guard<mutex> lock(member_session->expiration_lock);
+		member_session->secret_expiration["__quack__" + catalog_scope] =
+		    std::chrono::system_clock::now() + std::chrono::minutes(5);
+	}
+	member.BeginTransaction();
+	anonymous.BeginTransaction();
+	auto member_transaction = CatalogTransaction::GetSystemCatalogTransaction(*member.context);
+	auto anonymous_transaction = CatalogTransaction::GetSystemCatalogTransaction(*anonymous.context);
+	auto member_named = storage.GetSecretByName("__quack__" + catalog_scope, &member_transaction);
+	REQUIRE(member_named);
+	REQUIRE(dynamic_cast<const KeyValueSecret &>(*member_named->secret).secret_map.at("token").ToString() ==
+	        "member-catalog-token");
+	REQUIRE_FALSE(storage.GetSecretByName("__quack__" + catalog_scope, &anonymous_transaction));
+	REQUIRE_FALSE(storage.GetSecretByName("__quack__quack:non-routable.invalid:1/catalog/not-a-uuid", &transaction));
+	REQUIRE_FALSE(storage.GetSecretByName("__quack__quack:non-routable.invalid:1", &transaction));
+	REQUIRE_FALSE(storage.GetSecretByName("__quack__" + catalog_scope, nullptr));
+	member.Commit();
+	anonymous.Commit();
 	connection.Commit();
 }
 
@@ -331,7 +365,7 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	const string user_path = "quack:127.0.0.1:9494";
 	const string user_token = "user-supplied-token";
 	vector<string> scope {user_path};
-	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "smk");
+	auto secret = make_uniq<KeyValueSecret>(scope, "quack", "config", "__quack__user");
 	secret->secret_map["token"] = Value(user_token);
 
 	// The real StoreSecret API requires a connection even before login.
@@ -342,8 +376,10 @@ TEST_CASE("LookupSecret returns user-supplied quack secret without bootstrap_ses
 	REQUIRE(match.HasMatch());
 
 	auto &returned = match.GetSecret();
-	REQUIRE(returned.GetName() == "smk");
+	REQUIRE(returned.GetName() == "__quack__user");
 	REQUIRE(returned.GetType() == "quack");
+	REQUIRE(s.GetSecretByName("__quack__user", &transaction));
+	REQUIRE_FALSE(s.GetSecretByName("__quack__user", &fresh_transaction));
 
 	// The token field must round-trip — that's the entire contract: the
 	// user supplied a token, ATTACH consumes it.

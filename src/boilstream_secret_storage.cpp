@@ -96,6 +96,8 @@ using namespace duckdb_yyjson;
 
 namespace duckdb {
 
+static bool ParseManagedCatalogSecretScope(const string &path, string &catalog_id);
+
 // Read BOILSTREAM_INSECURE_TLS env var and, when set to "1"/"true"/"yes",
 // disable TLS certificate verification on the supplied HTTPParams.
 //
@@ -296,7 +298,9 @@ string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &cred
 		throw InvalidInputException("Managed DuckDB ATTACH requires a complete authoritative catalog scope");
 	}
 	return "ATTACH 'quack:" + EscapeManagedAttachLiteral(credential.endpoint) + "' AS " +
-	       QuoteManagedAttachIdentifier(alias) + " (TYPE quack, CATALOG_ID '" +
+	       QuoteManagedAttachIdentifier(alias) + " (TYPE quack, SECRET '" +
+	       EscapeManagedAttachLiteral("__quack__" + ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id)) +
+	       "', CATALOG_ID '" +
 	       EscapeManagedAttachLiteral(credential.catalog_id) + "', TENANT_ID '" +
 	       std::to_string(credential.storage_owner_tenant_id) + "', CATALOG_GROUP '" +
 	       EscapeManagedAttachLiteral(credential.catalog_group) + "', DISABLE_SSL false)";
@@ -2856,6 +2860,18 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 
 unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name,
                                                               optional_ptr<CatalogTransaction> transaction) {
+	// Stock Quack supports named secrets, but does not know our catalog-qualified
+	// lookup convention. Resolve the exact managed name through the caller's
+	// authenticated session; never publish a JWT into the database-global store.
+	if (StringUtil::StartsWith(name, "__quack__quack:")) {
+		const auto path = name.substr(sizeof("__quack__") - 1);
+		string catalog_id;
+		if (!ParseManagedCatalogSecretScope(path, catalog_id)) {
+			return nullptr;
+		}
+		auto match = LookupQuackSecret(path, transaction);
+		return match.HasMatch() ? std::move(match.secret_entry) : nullptr;
+	}
 	auto cache = GetSecretCache(transaction);
 	auto owned_entry = cache ? cache->Get(name) : nullptr;
 	auto cached = owned_entry ? make_uniq<SecretEntry>(*owned_entry) : nullptr;

@@ -94,9 +94,24 @@ SET active_grammar_extensions = ['shell', 'boilstream']; -- DuckDB CLI, keeps th
 work. To stop the automatic activation for a whole process, `SET boilstream_grammar_auto_activate = false`
 or export `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` before the first connection opens. Note that DuckDB 2.0 parses dotted setting names only when quoted: `SET "boilstream.tenant_id" = ...`.
 
-## Local development: skipping TLS verification
+## Local development: trust the test server's CA
 
-The extension's HTTP client (DuckDB's `HTTPUtil` → libcurl) verifies the server certificate by default. When pointing at a local boilstream auth server with a self-signed cert this fails — and on macOS the standard knobs don't help: DuckDB's libcurl is statically linked against OpenSSL with `CURLSSLOPT_NATIVE_CA`, which silently ignores `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, and the DuckDB `ca_cert_file` setting on Darwin.
+The extension verifies server certificates by default. For a local server signed by
+your own CA, load `httpfs` and set its CA file **globally within the DuckDB database**
+before login. The extension creates HTTP requests from the database instance, so
+a connection-local `SET ca_cert_file` does not reach those requests.
+
+```sql
+LOAD httpfs;
+SET GLOBAL ca_cert_file = '/absolute/path/to/test-ca.crt';
+PRAGMA boilstream_bootstrap_session('https://localhost:443/secrets:<token>');
+```
+
+This was verified with stock DuckDB 2.0 on macOS using local extension files. It
+does not modify the operating system's trust store. Keep certificate verification
+enabled for both authentication and the managed Quack connection.
+
+### Diagnostic opt-out
 
 For local-dev only, set `BOILSTREAM_INSECURE_TLS=1` in the duckdb process's environment. The extension reads it on every outgoing request and, when set to `1`/`true`/`yes`, flips `HTTPParams.override_verify_ssl=true` and `HTTPParams.verify_ssl=false` — equivalent to `curl --insecure` but scoped to the extension's own calls.
 
