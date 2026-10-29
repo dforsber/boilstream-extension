@@ -95,6 +95,8 @@ void boilstream_quack_catalog_session_close(const char *session_id);
 void *boilstream_quack_session_begin(const char *session_id);
 // Consumes owner exactly once: 1 commits, every other outcome rolls back.
 void boilstream_quack_session_finish(void *owner, uint32_t outcome);
+// Returns the immutable authenticated requester, or zero if unavailable.
+uint32_t boilstream_quack_session_requester_tenant(const char *session_id);
 
 } // extern "C"
 

@@ -21,6 +21,7 @@ TEST_CASE_METHOD(BridgeFixture, "Tenant quota survives reauthentication and reta
 				 "[quack_bridge][quota]") {
 	static const boilstream_quack_capability_context_factory_v2 factory{CreateContext, DestroyContext, QuotaRequester,
 																		1};
+	REQUIRE(boilstream_quack_session_requester_tenant(SESSION_ID) == 0);
 	boilstream_quack_set_capability_context_factory_v2(&factory);
 	struct Cleanup {
 		~Cleanup() { boilstream_quack_catalog_session_close("quota-second"); }
@@ -29,10 +30,15 @@ TEST_CASE_METHOD(BridgeFixture, "Tenant quota survives reauthentication and reta
 	auto retained = GetQuackSessionCtx(SESSION_ID);
 	REQUIRE(retained->session_quota);
 	REQUIRE(retained->session_quota->Tenant().Value() == 5001);
+	REQUIRE(boilstream_quack_session_requester_tenant(SESSION_ID) == 5001);
+	REQUIRE(boilstream_quack_session_requester_tenant(nullptr) == 0);
+	REQUIRE(boilstream_quack_session_requester_tenant("") == 0);
+	REQUIRE(boilstream_quack_session_requester_tenant("missing-requester") == 0);
 	REQUIRE(Login(*this, SESSION_ID));
 	REQUIRE(GetQuackSessionCtx(SESSION_ID)->session_quota == retained->session_quota);
 	REQUIRE_FALSE(Login(*this, "quota-second"));
 	boilstream_quack_catalog_session_close(SESSION_ID);
+	REQUIRE(boilstream_quack_session_requester_tenant(SESSION_ID) == 0);
 	REQUIRE_FALSE(Login(*this, "quota-second"));
 	retained.reset();
 	REQUIRE(Login(*this, "quota-second"));
