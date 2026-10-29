@@ -303,7 +303,8 @@ string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &cred
 	       "', CATALOG_ID '" +
 	       EscapeManagedAttachLiteral(credential.catalog_id) + "', TENANT_ID '" +
 	       std::to_string(credential.storage_owner_tenant_id) + "', CATALOG_GROUP '" +
-	       EscapeManagedAttachLiteral(credential.catalog_group) + "', DISABLE_SSL false, HTTP_VERSION '1.1')";
+	       EscapeManagedAttachLiteral(credential.catalog_group) +
+	       "', DISABLE_SSL false, HTTP_VERSION '1.1', CATALOG_MODE 'product', READ_ONLY)";
 }
 
 //! Safe string extraction with required validation - throws if NULL or empty

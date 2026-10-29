@@ -216,6 +216,8 @@ TEST_CASE("Managed catalog attach uses canonical scope and escapes only the pres
 		REQUIRE(option("catalog_group").GetValue<string>() == credential.catalog_group);
 		REQUIRE_FALSE(option("disable_ssl").GetValue<bool>());
 		REQUIRE(option("http_version").GetValue<string>() == "1.1");
+		REQUIRE(option("catalog_mode").GetValue<string>() == "product");
+		REQUIRE(option("read_only").GetValue<bool>());
 		REQUIRE(attach_sql.find(credential.token) == string::npos);
 		REQUIRE(attach_sql.find("PRIVATE KEY") == string::npos);
 	}
