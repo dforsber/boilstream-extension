@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
+#include "boilstream_security.hpp"
 
 #include "duckdb/main/client_context_state.hpp"
 #include "boilstream_secret_cache.hpp"
@@ -26,6 +27,25 @@ namespace duckdb {
 //! authenticated connection state so concurrent tenants can never overwrite
 //! each other's capability or server trust in DuckDB's catalog-global secret set.
 struct ManagedCatalogCredentialEnvelope {
+	ManagedCatalogCredentialEnvelope() = default;
+	ManagedCatalogCredentialEnvelope(const ManagedCatalogCredentialEnvelope &) = default;
+	~ManagedCatalogCredentialEnvelope() {
+		boilstream::Wipe(token);
+	}
+	ManagedCatalogCredentialEnvelope &operator=(const ManagedCatalogCredentialEnvelope &other) {
+		if (this != &other) {
+			boilstream::Wipe(token);
+			token = other.token;
+			expires_at = other.expires_at;
+			endpoint = other.endpoint;
+			catalog_id = other.catalog_id;
+			storage_owner_tenant_id = other.storage_owner_tenant_id;
+			catalog_group = other.catalog_group;
+			server_ca_pem = other.server_ca_pem;
+		}
+		return *this;
+	}
+
 	string token;
 	string expires_at;
 	string endpoint;
@@ -48,11 +68,16 @@ public:
 
 	//! Session state snapshot for thread-safe access
 	struct SessionSnapshot {
+		SessionSnapshot &operator=(const SessionSnapshot &) = delete;
 		string access_token;
 		vector<uint8_t> session_key;
 		string region;
 		uint64_t sequence;
 		bool has_session_key;
+		~SessionSnapshot() {
+			boilstream::Wipe(access_token);
+			boilstream::Wipe(session_key);
+		}
 	};
 
 	explicit BoilstreamConnectionState(string endpoint = "")
@@ -130,7 +155,7 @@ public:
 	//! RAII guard for secret lookup recursion prevention
 	class SecretLookupGuard {
 	public:
-		SecretLookupGuard(BoilstreamConnectionState &state) : state_(state), acquired_(false) {
+		explicit SecretLookupGuard(BoilstreamConnectionState &state) : state_(state), acquired_(false) {
 			// Try to acquire the guard - if already held, we're in recursion
 			bool expected = false;
 			acquired_ = state_.in_secret_lookup.compare_exchange_strong(expected, true);
@@ -194,8 +219,9 @@ public:
 	//! Check if session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid() {
 		lock_guard<mutex> lock(session_lock);
-		if (local_provider)
+		if (local_provider) {
 			return !local_provider->Expired();
+		}
 		if (access_token.empty() || session_key.empty()) {
 			return false;
 		}

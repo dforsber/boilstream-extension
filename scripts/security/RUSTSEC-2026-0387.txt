@@ -1,0 +1,34 @@
+RUSTSEC-2026-0387 applicability evidence — 2026-11-06
+
+Status: dependency match confirmed; proposed non-reachability assessment needs
+independent review. This file does not suppress cargo audit or authorize release.
+
+The locked crypto-bigint 0.5.5 is in the affected version range. The compatible
+opaque-ke 3.0.0 -> elliptic-curve 0.13.8 chain cannot use crypto-bigint >=0.7.6
+without upstream API changes. A version override would not repair that chain.
+
+Production DefaultCipherSuite in opaque-client/src/lib.rs selects Ristretto255
+for both OprfCs and KeGroup, TripleDh, and Identity KSF. No caller negotiates a
+second ciphersuite. In the locked registry sources:
+
+- opaque-ke-3.0.0/src/key_exchange/group/ristretto255.rs defines secret keys as
+  curve25519_dalek::scalar::Scalar; DH multiplies Ristretto points and Scalars.
+  Its OPRF Group implementation delegates to voprf::Ristretto255.
+- voprf-0.5.0/src/group/ristretto.rs defines Scalar and Elem using curve25519-dalek.
+  Scalar inversion, multiplication, reduction and equality therefore do not use
+  crypto-bigint. The elliptic-curve import is hash2curve's ExpandMsgXmd.
+- elliptic-curve-0.13.8/src/hash2curve/hash2field/expand_msg/xmd.rs expands hashes
+  into bytes with digest/GenericArray. It does not perform bigint arithmetic.
+
+These source paths support non-reachability of the advisory's secret-integer
+operations in this specific ciphersuite. They do not prove constant-time behavior
+of all other crypto code, compilers or targets, and do not apply to another Rust
+bridge embedding this crate with other cryptographic consumers.
+
+The production C ABI registration/login roundtrip tests now verify matching
+server/client session and export keys, wrong-password rejection and tampered
+server-proof rejection. These are functional tests, not timing proofs.
+
+Reassess on any Cargo.lock, ciphersuite, OPRF/group implementation or embedding
+change. Keep the raw audit result and dependency graph in release evidence.
+Source: https://rustsec.org/advisories/RUSTSEC-2026-0387.html

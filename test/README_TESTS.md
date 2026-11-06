@@ -1,8 +1,14 @@
 # Boilstream Extension Test Suite
 
-Two lanes: SQL logic tests under `test/sql/` run inside DuckDB's `unittest` binary, and C++ Catch2 tests
+Native SQL logic tests under `test/sql/` run inside DuckDB's `unittest` binary, and C++ Catch2 tests
 under `test/cpp/` build as standalone executables against the same DuckDB build. Both need DuckDB
-**v2.0.0 or newer**.
+**v2.0.0** for this qualified baseline; later hosts require requalification.
+
+The [WASM lane](wasm/README.md) runs a pinned DuckDB **v2.0.0** in real Chromium
+workers for both `wasm_eh` and `wasm_threads`. It also runs the compatible shared
+SQL corpus. `wasm_lock_ordering_test` below is a native executable and does not
+replace browser testing. Rust WASM FFI vectors run separately against the same
+archive linked into each extension.
 
 ## SQL tests (`test/sql/`)
 
@@ -33,7 +39,11 @@ statically linked extensions themselves).
 ```bash
 export DUCKDB_BUILD_DIR=<duckdb-build>        # dir containing src/libduckdb_static.a, extension/boilstream/...
 export DUCKDB_SOURCE_DIR=<duckdb-source>      # fork checkout, for headers and extension/loader/*.cpp
-cmake -G Ninja -DBOILSTREAM_INTEGRATION_TESTS=OFF -S test/cpp -B build/cpp-tests
+# Install matching core artifacts: INSTALL httpfs; INSTALL quack;
+cmake -G Ninja -DBOILSTREAM_INTEGRATION_TESTS=ON \
+  -DBOILSTREAM_HTTPFS_EXTENSION_PATH=<version/platform/httpfs.duckdb_extension> \
+  -DBOILSTREAM_QUACK_EXTENSION_PATH=<version/platform/quack.duckdb_extension> \
+  -S test/cpp -B build/cpp-tests
 ninja -C build/cpp-tests
 ctest --test-dir build/cpp-tests --output-on-failure
 ```
@@ -57,13 +67,19 @@ submodule. The Rust library is found under `<build>/cargo/build/*/release/` as e
 | `aws_signing_test`, `registration_ffi_test` | `[aws]`, `[registration]` | Rust FFI: SigV4 signing, registration validation, TOTP URI. |
 | `wasm_lock_ordering_test` | `[wasm]` | Lock ordering patterns, no DuckDB dependency. |
 
-### Integration lane (off in the commands above)
+### Integration lane (enabled above and in CI)
 
 `boilstream_integration_test` (`-DBOILSTREAM_INTEGRATION_TESTS=ON`, the default) loads the *loadable*
 `boilstream.duckdb_extension` into DuckDB together with stock `httpfs` and `quack` artifacts from one
 extension directory (`BOILSTREAM_HTTPFS_EXTENSION_PATH`, `BOILSTREAM_QUACK_EXTENSION_PATH`). The
 `[local]` cases run in CTest; the `[server]` cases need a running boilstream server and single-use
 bootstrap tokens (`BOILSTREAM_TEST_ENDPOINT`). It needs 2.0-compatible httpfs and quack artifacts.
+
+The standalone Rust tests include successful registration/login through the production
+C ABI against an in-process OPAQUE server, plus wrong-password and modified-proof
+rejection. Run `cargo test --locked --manifest-path opaque-client/Cargo.toml`.
+The dependency-free `transport_security_test` exercises the production URL policy,
+bounded append and exceptional secret erasure. Native tests have subprocess deadlines. `CredentialCleanup` observes actual JSON allocation/reallocation erasure before free, checks binary serializer contents and erasure, and verifies HTTP cleanup preserves borrowed provider headers.
 
 ## Not covered without a server
 

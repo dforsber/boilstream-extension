@@ -251,19 +251,13 @@ if(BOILSTREAM_INTEGRATION_TESTS)
   target_compile_definitions(boilstream_integration_test
                              PRIVATE BOILSTREAM_DEBUG)
 
-  # Integration tests use system DuckDB and load the extension dynamically So we
-  # link against system DuckDB (not extension's build)
-  if(EXISTS "/opt/homebrew/lib/libduckdb.dylib")
-    target_link_libraries(
-      boilstream_integration_test PRIVATE /opt/homebrew/lib/libduckdb.dylib
-                                          Catch2::Catch2)
-  elseif(EXISTS "/usr/local/lib/libduckdb.dylib")
-    target_link_libraries(boilstream_integration_test
-                          PRIVATE /usr/local/lib/libduckdb.dylib Catch2::Catch2)
-  else()
-    target_link_libraries(boilstream_integration_test PRIVATE Catch2::Catch2)
-    message(WARNING "System DuckDB not found - integration tests may not run")
-  endif()
+  # Use the exact host built with this extension, never an unrelated system
+  # install.
+  target_link_libraries(
+    boilstream_integration_test
+    PRIVATE "${EXTENSION_BUILD_DIR}/src/libduckdb${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            Catch2::Catch2)
+
 endif()
 
 # AWS Signing test executable (links with Rust library)
@@ -588,6 +582,7 @@ target_link_libraries(
   session_memory_only_test
   PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
           "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+link_rust_dependencies(session_memory_only_test)
 find_package(
   Python3
   COMPONENTS Interpreter
@@ -767,3 +762,44 @@ if(EXISTS
     AuthQueryPrivacy PROPERTIES TIMEOUT 40 ENVIRONMENT
                                 "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endif()
+
+# Dependency-free production URL, bounded append and erasure regressions.
+add_executable(transport_security_test test_transport_security.cpp)
+target_include_directories(transport_security_test PRIVATE ../../src/include)
+add_test(NAME TransportSecurity COMMAND transport_security_test)
+
+# Stock core has no statically linked POST provider. The filesystem-tripwire
+# test must load the exact compatible HTTPFS artifact before installing the
+# tripwire.
+if(NOT EXISTS
+   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+  if(NOT EXISTS "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+    message(
+      FATAL_ERROR
+        "SessionMemoryOnly requires BOILSTREAM_HTTPFS_EXTENSION_PATH for stock DuckDB"
+    )
+  endif()
+  set_property(
+    TEST SessionMemoryOnly
+    APPEND
+    PROPERTY
+      ENVIRONMENT
+      "BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+endif()
+get_property(
+  BOILSTREAM_TESTS
+  DIRECTORY
+  PROPERTY TESTS)
+set_tests_properties(${BOILSTREAM_TESTS} PROPERTIES TIMEOUT 90)
+
+add_executable(credential_cleanup_test test_credential_cleanup.cpp)
+target_include_directories(
+  credential_cleanup_test
+  PRIVATE ../../src/include "${DUCKDB_SOURCE_DIR}/src/include"
+          "${DUCKDB_SOURCE_DIR}/third_party/yyjson/include")
+target_link_libraries(
+  credential_cleanup_test
+  PRIVATE "${EXTENSION_BUILD_DIR}/src/libduckdb${CMAKE_SHARED_LIBRARY_SUFFIX}"
+          "${EXTENSION_BUILD_DIR}/third_party/yyjson/libduckdb_yyjson.a")
+add_test(NAME CredentialCleanup COMMAND credential_cleanup_test)
+set_tests_properties(CredentialCleanup PROPERTIES TIMEOUT 30)

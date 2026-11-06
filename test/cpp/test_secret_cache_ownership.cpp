@@ -136,13 +136,19 @@ int main() {
 			std::cout << "CASE " << name << " FAIL" << std::endl;
 		}
 	};
-	test("manager_memory_fallback_preserves_user_isolation", [] {
+	test("manager_backend_selection_preserves_user_isolation", [] {
 		Fixture f;
 		f.Login(f.a);
 		f.Login(f.b, "synthetic-b");
 		f.Cache(f.a);
 		f.Cache(f.b, "owned", "synthetic-b");
+#ifdef TEST_TENANT_CONTEXT
 		Require(f.Read(f.a, "owned", "memory") == "synthetic-a" && f.Read(f.b, "owned", "memory") == "synthetic-b");
+#else
+		// Stock DuckDB does not redirect the memory backend to BoilStream.
+		Require(f.Read(f.a, "owned", "memory") == "absent" && f.Read(f.b, "owned", "memory") == "absent");
+#endif
+		Require(f.Read(f.a) == "synthetic-a" && f.Read(f.b) == "synthetic-b");
 		Require(f.Match(f.a) == "synthetic-a" && f.Match(f.b) == "synthetic-b");
 	});
 #ifdef TEST_TENANT_CONTEXT
@@ -298,7 +304,12 @@ int main() {
 		Reject([&] { f.storage->StoreSecret(Secret("manual", "wrong"), OnCreateConflict::ERROR_ON_CONFLICT, &tx); });
 		Require(!f.storage->StoreSecret(Secret("manual", "wrong"), OnCreateConflict::IGNORE_ON_CONFLICT, &tx));
 		f.storage->StoreSecret(Secret("manual", "second"), OnCreateConflict::REPLACE_ON_CONFLICT, &tx);
+#ifdef TEST_TENANT_CONTEXT
 		Require(f.Read(f.a, "manual", "memory") == "second");
+#else
+		Require(f.Read(f.a, "manual", "memory") == "absent");
+#endif
+		Require(f.Read(f.a, "manual") == "second" && f.Read(f.b, "manual") == "absent");
 		f.storage->DropSecretByName("manual", OnEntryNotFound::THROW_EXCEPTION, &tx);
 		Require(f.Read(f.a, "manual") == "absent");
 	});

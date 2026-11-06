@@ -12,8 +12,9 @@ public:
 		uint32_t status;
 		string body;
 		string TakeBody() {
-			if (status < 200 || status >= 300)
+			if (status < 200 || status >= 300) {
 				throw IOException("Local credential request rejected (status %u)", status);
+			}
 			return std::move(body);
 		}
 	};
@@ -22,8 +23,9 @@ public:
 		    !host.request || !host.release_reply || Expired() ||
 		    host.expires_at_us > std::chrono::duration_cast<std::chrono::microseconds>(
 		                             std::chrono::system_clock::time_point::max().time_since_epoch())
-		                             .count())
+		                             .count()) {
 			throw InvalidInputException("Invalid local credential host");
+		}
 		host.retain(host.owner);
 	}
 	~BoilstreamLocalSecretProvider() {
@@ -47,31 +49,39 @@ public:
 		                                 .count();
 	}
 	Response RequestResponse(ClientContext &context, const string &request) const {
-		if (context.IsInterrupted())
+		if (context.IsInterrupted()) {
 			throw InterruptException();
-		if (Expired())
+		}
+		if (Expired()) {
 			throw IOException("Local credential authority expired");
-		static constexpr size_t LIMIT = 10 * 1024 * 1024;
-		if (request.size() > LIMIT)
+		}
+		static constexpr size_t LIMIT = 10ULL * 1024 * 1024;
+		if (request.size() > LIMIT) {
 			throw InvalidInputException("Oversized local credential request");
+		}
 		BoilstreamLocalSecretReplyV1 reply {};
 		struct Release {
 			const BoilstreamLocalSecretHostV2 &host;
 			BoilstreamLocalSecretReplyV1 &reply;
 			~Release() {
-				if (reply.owner)
+				if (reply.owner) {
 					host.release_reply(reply.owner);
+				}
 			}
 		} release {host, reply};
 		if (host.request(host.owner, &context, reinterpret_cast<const uint8_t *>(request.data()), request.size(),
-		                 &reply) != 1)
+		                 &reply) != 1) {
 			throw IOException("Local credential callback failed");
-		if (context.IsInterrupted() || reply.status == 408)
+		}
+		if (context.IsInterrupted() || reply.status == 408) {
 			throw InterruptException();
-		if (Expired())
+		}
+		if (Expired()) {
 			throw IOException("Local credential authority expired");
-		if (reply.length > LIMIT || (reply.length && (!reply.data || !reply.owner)))
+		}
+		if (reply.length > LIMIT || (reply.length && (!reply.data || !reply.owner))) {
 			throw IOException("Invalid local credential response");
+		}
 		return {reply.status,
 		        reply.length ? string(reinterpret_cast<const char *>(reply.data), reply.length) : string()};
 	}

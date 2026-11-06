@@ -38,7 +38,7 @@ std::atomic<const boilstream_quack_capability_context_factory *> &ContextFactory
 }
 
 std::atomic<const boilstream_quack_capability_context_factory_v2 *> &ContextFactoryV2Slot() {
-	static std::atomic<const boilstream_quack_capability_context_factory_v2 *> slot{nullptr};
+	static std::atomic<const boilstream_quack_capability_context_factory_v2 *> slot {nullptr};
 	return slot;
 }
 
@@ -131,12 +131,16 @@ typedef void (*quack_set_catalog_admission_hooks_fn_t)(decltype(&boilstream_quac
                                                        decltype(&boilstream_quack_catalog_authorize) authorizer,
                                                        void (*session_close)(const char *));
 typedef void (*quack_set_catalog_admission_hooks_v2_fn_t)(decltype(&boilstream_quack_catalog_plan),
-    decltype(&boilstream_quack_catalog_authorize), decltype(&boilstream_quack_catalog_session_close),
-    decltype(&boilstream_quack_session_begin), decltype(&boilstream_quack_session_finish));
+                                                          decltype(&boilstream_quack_catalog_authorize),
+                                                          decltype(&boilstream_quack_catalog_session_close),
+                                                          decltype(&boilstream_quack_session_begin),
+                                                          decltype(&boilstream_quack_session_finish));
 typedef void (*quack_set_catalog_admission_hooks_v3_fn_t)(decltype(&boilstream_quack_catalog_plan),
-    decltype(&boilstream_quack_catalog_authorize), decltype(&boilstream_quack_catalog_session_close),
-    decltype(&boilstream_quack_session_begin), decltype(&boilstream_quack_session_finish),
-    decltype(&boilstream_quack_session_requester_tenant));
+                                                          decltype(&boilstream_quack_catalog_authorize),
+                                                          decltype(&boilstream_quack_catalog_session_close),
+                                                          decltype(&boilstream_quack_session_begin),
+                                                          decltype(&boilstream_quack_session_finish),
+                                                          decltype(&boilstream_quack_session_requester_tenant));
 typedef void (*quack_set_post_execute_hook_fn_t)(int (*hook)(const char *, uint32_t, const char *, char *, size_t));
 
 namespace duckdb {
@@ -187,7 +191,6 @@ void InstallQueryErrorPrivacyIfHosted() {
 #endif
 }
 
-
 SessionRegistry &QuackSessionRegistry() {
 	// Quack closes its final sessions from DuckDB's database-owner callback.
 	// A process-global DuckDB may run that callback during static destruction,
@@ -201,21 +204,21 @@ SessionRegistry &QuackSessionRegistry() {
 void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto verifier = JwtVerifierSlot().load(std::memory_order_acquire);
 	TernaryExecutor::Execute<string_t, string_t, string_t, bool>(
-		args.data[0], args.data[1], args.data[2], result, [verifier](string_t sid, string_t client_auth, string_t) {
-			try {
-				auto factory_v2 = ContextFactoryV2Slot().load(std::memory_order_acquire);
-				auto factory = ContextFactorySlot().load(std::memory_order_acquire);
-				auto create = factory_v2 ? factory_v2->create : factory ? factory->create : nullptr;
-				auto destroy = factory_v2 ? factory_v2->destroy : factory ? factory->destroy : nullptr;
-				if (!verifier || !create || !destroy ||
-					(factory_v2 && (!factory_v2->requester_tenant || !factory_v2->max_sessions_per_tenant))) {
-					return false;
-				}
-				const std::string session_id(sid.GetData(), sid.GetSize());
-				if (session_id.empty()) {
-					return false;
-				}
-				char user_id[128] = {};
+	    args.data[0], args.data[1], args.data[2], result, [verifier](string_t sid, string_t client_auth, string_t) {
+		    try {
+			    auto factory_v2 = ContextFactoryV2Slot().load(std::memory_order_acquire);
+			    auto factory = ContextFactorySlot().load(std::memory_order_acquire);
+			    auto create = factory_v2 ? factory_v2->create : factory ? factory->create : nullptr;
+			    auto destroy = factory_v2 ? factory_v2->destroy : factory ? factory->destroy : nullptr;
+			    if (!verifier || !create || !destroy ||
+			        (factory_v2 && (!factory_v2->requester_tenant || !factory_v2->max_sessions_per_tenant))) {
+				    return false;
+			    }
+			    const std::string session_id(sid.GetData(), sid.GetSize());
+			    if (session_id.empty()) {
+				    return false;
+			    }
+			    char user_id[128] = {};
 			    constexpr size_t BUNDLE_CAPACITY = 64ULL * 1024;
 			    std::vector<char> bundle(BUNDLE_CAPACITY, '\0');
 			    const auto rc = verifier(client_auth.GetData(), client_auth.GetSize(), user_id, sizeof(user_id),
@@ -235,19 +238,20 @@ void BoilstreamQuackAuthnFunction(DataChunk &args, ExpressionState &, Vector &re
 			    auto context = std::make_shared<SessionCtx>();
 			    context->user_id = user_id;
 			    context->capability_context = std::move(owned_authority);
-				if (factory_v2) {
-					const QuackRequesterTenant tenant(factory_v2->requester_tenant(authority));
-					context->session_quota =
-						QuackSessionRegistry().ReserveQuota(session_id, tenant, factory_v2->max_sessions_per_tenant);
-					if (!context->session_quota)
-						return false;
-				}
-				QuackSessionRegistry().Publish(session_id, std::move(context));
-				return true;
-			} catch (...) {
-				return false;
-			}
-		});
+			    if (factory_v2) {
+				    const QuackRequesterTenant tenant(factory_v2->requester_tenant(authority));
+				    context->session_quota =
+				        QuackSessionRegistry().ReserveQuota(session_id, tenant, factory_v2->max_sessions_per_tenant);
+				    if (!context->session_quota) {
+					    return false;
+				    }
+			    }
+			    QuackSessionRegistry().Publish(session_id, std::move(context));
+			    return true;
+		    } catch (...) {
+			    return false;
+		    }
+	    });
 }
 
 // Authentication binds the immutable opaque context. This scalar only verifies that the
@@ -299,9 +303,11 @@ void RegisterQuackBridge(ExtensionLoader &loader) {
 	                                       boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks")),
 	                                   std::memory_order_release);
 	QuackHookSetters().admission_v2.store(reinterpret_cast<quack_set_catalog_admission_hooks_v2_fn_t>(
-        boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks_v2")), std::memory_order_release);
+	                                          boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks_v2")),
+	                                      std::memory_order_release);
 	QuackHookSetters().admission_v3.store(reinterpret_cast<quack_set_catalog_admission_hooks_v3_fn_t>(
-        boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks_v3")), std::memory_order_release);
+	                                          boilstream_lookup_runtime_symbol("quack_set_catalog_admission_hooks_v3")),
+	                                      std::memory_order_release);
 	QuackHookSetters().post_execute.store(reinterpret_cast<quack_set_post_execute_hook_fn_t>(
 	                                          boilstream_lookup_runtime_symbol("quack_set_post_execute_hook")),
 	                                      std::memory_order_release);
@@ -316,14 +322,14 @@ void InstallQuackAdmissionHooksIfHosted() {
 	auto &setters = QuackHookSetters();
 	if (!setters.installed.exchange(true)) {
 		if (auto admission_setter = setters.admission_v3.load(std::memory_order_acquire)) {
-            admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
-                             &boilstream_quack_catalog_session_close, &boilstream_quack_session_begin,
-                             &boilstream_quack_session_finish, &boilstream_quack_session_requester_tenant);
-        } else if (auto admission_setter = setters.admission_v2.load(std::memory_order_acquire)) {
-            admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
-                             &boilstream_quack_catalog_session_close, &boilstream_quack_session_begin,
-                             &boilstream_quack_session_finish);
-        } else if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {
+			admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
+			                 &boilstream_quack_catalog_session_close, &boilstream_quack_session_begin,
+			                 &boilstream_quack_session_finish, &boilstream_quack_session_requester_tenant);
+		} else if (auto admission_setter = setters.admission_v2.load(std::memory_order_acquire)) {
+			admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
+			                 &boilstream_quack_catalog_session_close, &boilstream_quack_session_begin,
+			                 &boilstream_quack_session_finish);
+		} else if (auto admission_setter = setters.admission.load(std::memory_order_acquire)) {
 			admission_setter(&boilstream_quack_catalog_plan, &boilstream_quack_catalog_authorize,
 			                 &boilstream_quack_catalog_session_close);
 		}
@@ -336,29 +342,47 @@ void InstallQuackAdmissionHooksIfHosted() {
 } // namespace duckdb
 
 extern "C" void boilstream_quack_catalog_session_close(const char *session_id) {
- if (!session_id) return;
- try { duckdb::QuackSessionRegistry().Retire(session_id); } catch (...) {}
+	if (!session_id) {
+		return;
+	}
+	try {
+		duckdb::QuackSessionRegistry().Retire(session_id);
+	} catch (...) {
+	}
 }
 
 extern "C" uint32_t boilstream_quack_session_requester_tenant(const char *session_id) {
- if (!session_id || !*session_id) return 0;
- try {
-  const auto context = duckdb::GetQuackSessionCtx(session_id);
-  return context && context->session_quota ? context->session_quota->Tenant().Value() : 0;
- } catch (...) { return 0; }
+	if (!session_id || !*session_id) {
+		return 0;
+	}
+	try {
+		const auto context = duckdb::GetQuackSessionCtx(session_id);
+		return context && context->session_quota ? context->session_quota->Tenant().Value() : 0;
+	} catch (...) {
+		return 0;
+	}
 }
 
 extern "C" void *boilstream_quack_session_begin(const char *session_id) {
- if (!session_id || !*session_id) return nullptr;
- try { return duckdb::QuackSessionRegistry().Begin(session_id).release(); } catch (...) { return nullptr; }
+	if (!session_id || !*session_id) {
+		return nullptr;
+	}
+	try {
+		return duckdb::QuackSessionRegistry().Begin(session_id).release();
+	} catch (...) {
+		return nullptr;
+	}
 }
 extern "C" void boilstream_quack_session_finish(void *owner, uint32_t outcome) {
- if (!owner) return;
- try {
-  duckdb::QuackSessionRegistry().Finish(
-      std::unique_ptr<duckdb::SessionRegistry::Admission>(static_cast<duckdb::SessionRegistry::Admission *>(owner)),
-      outcome == 1);
- } catch (...) {}
+	if (!owner) {
+		return;
+	}
+	try {
+		duckdb::QuackSessionRegistry().Finish(std::unique_ptr<duckdb::SessionRegistry::Admission>(
+		                                          static_cast<duckdb::SessionRegistry::Admission *>(owner)),
+		                                      outcome == 1);
+	} catch (...) {
+	}
 }
 
 extern "C" int boilstream_quack_catalog_plan(const char *session_id, const char *declared_catalog_id,

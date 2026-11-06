@@ -1,3 +1,6 @@
+#include "boilstream_security.hpp"
+#include "boilstream_json.hpp"
+#include "boilstream_http_cleanup.hpp"
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
@@ -35,12 +38,13 @@ namespace duckdb {
 
 // Serialize a yyjson mutable doc to string, throwing on allocation failure.
 static string SafeJsonSerialize(duckdb_yyjson::yyjson_mut_doc *doc) {
-	auto json_str = duckdb_yyjson::yyjson_mut_write(doc, 0, nullptr);
+	boilstream::JsonArena writer_arena;
+	size_t length = 0;
+	auto json_str = duckdb_yyjson::yyjson_mut_write_opts(doc, 0, &writer_arena.Allocator(), &length, nullptr);
 	if (!json_str) {
 		throw IOException("Failed to serialize JSON document");
 	}
-	string result(json_str);
-	free(json_str);
+	string result(json_str, length);
 	return result;
 }
 
@@ -62,7 +66,10 @@ static string EscapeSqlLiteral(const string &s) {
 // Per-DatabaseInstance storage map (set during extension load)
 // Each DatabaseInstance gets its own RestApiSecretStorage registered with its SecretManager.
 // A process-global pointer would be wrong when multiple DatabaseInstance objects exist.
+// Database registrations are shared and every access is protected by global_storage_lock.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static unordered_map<DatabaseInstance *, RestApiSecretStorage *> global_rest_storages;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables) -- protects the registration map
 static mutex global_storage_lock;
 
 //! Helper to get the extension version string from a single source
@@ -124,28 +131,28 @@ static unique_ptr<FunctionData> BoilstreamDucklakesBind(ClientContext &context, 
                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("catalog_id");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("catalog_name");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("description");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("access_mode");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("ownership");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("granted_by");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("granted_at");
-	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 
 	names.emplace_back("created_at");
-	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 
 	return make_uniq<BoilstreamDucklakesBindData>();
 }
@@ -186,6 +193,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	// Make HTTP GET request
 	string response;
+	boilstream::WipeOnExit wipe_response(response);
 	try {
 		response = (conn_state->IsLocalSession()
 		                ? storage->RequestLocal(context, *conn_state,
@@ -205,7 +213,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 
 	// Parse JSON response
 	BOILSTREAM_LOG("BoilstreamDucklakesInit: Parsing JSON response");
-	auto doc = duckdb_yyjson::yyjson_read(response.c_str(), response.size(), 0);
+	boilstream::JsonArena doc_arena;
+	auto doc = doc_arena.Read(response.c_str(), response.size(), 0);
 	if (!doc) {
 		throw IOException("Failed to parse ducklakes JSON response");
 	}
@@ -251,50 +260,50 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 		// catalog_id
 		auto catalog_id_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_id");
 		if (catalog_id_val && duckdb_yyjson::yyjson_is_str(catalog_id_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(catalog_id_val)));
+			row.emplace_back(SafeYyjsonGetStr(catalog_id_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// catalog_name (strip tenant prefix for display)
 		auto catalog_name_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_name");
 		if (catalog_name_val && duckdb_yyjson::yyjson_is_str(catalog_name_val)) {
 			string catalog_name = SafeYyjsonGetStr(catalog_name_val);
-			row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(catalog_name, context)));
+			row.emplace_back(RestApiSecretStorage::StripTenantPrefix(catalog_name, context));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// description
 		auto description_val = duckdb_yyjson::yyjson_obj_get(val, "description");
 		if (description_val && duckdb_yyjson::yyjson_is_str(description_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(description_val)));
+			row.emplace_back(SafeYyjsonGetStr(description_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// access_mode
 		auto access_mode_val = duckdb_yyjson::yyjson_obj_get(val, "access_mode");
 		if (access_mode_val && duckdb_yyjson::yyjson_is_str(access_mode_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(access_mode_val)));
+			row.emplace_back(SafeYyjsonGetStr(access_mode_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// ownership
 		auto ownership_val = duckdb_yyjson::yyjson_obj_get(val, "ownership");
 		if (ownership_val && duckdb_yyjson::yyjson_is_str(ownership_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(ownership_val)));
+			row.emplace_back(SafeYyjsonGetStr(ownership_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// granted_by (optional)
 		auto granted_by_val = duckdb_yyjson::yyjson_obj_get(val, "granted_by");
 		if (granted_by_val && duckdb_yyjson::yyjson_is_str(granted_by_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(granted_by_val)));
+			row.emplace_back(SafeYyjsonGetStr(granted_by_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// granted_at (optional, ISO8601 timestamp)
@@ -305,13 +314,13 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 				if (!granted_at_str.empty()) {
 					row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(granted_at_str, true)));
 				} else {
-					row.emplace_back(Value());
+					row.emplace_back();
 				}
 			} catch (...) {
-				row.emplace_back(Value());
+				row.emplace_back();
 			}
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// created_at (ISO8601 timestamp)
@@ -322,13 +331,13 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 				if (!created_at_str.empty()) {
 					row.emplace_back(Value::TIMESTAMP(Timestamp::FromString(created_at_str, true)));
 				} else {
-					row.emplace_back(Value());
+					row.emplace_back();
 				}
 			} catch (...) {
-				row.emplace_back(Value());
+				row.emplace_back();
 			}
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		result->ducklakes_data.push_back(std::move(row));
@@ -348,7 +357,7 @@ static void BoilstreamDucklakesFunction(ClientContext &context, TableFunctionInp
 
 		// Set each column value
 		for (idx_t col_idx = 0; col_idx < row.size(); col_idx++) {
-			output.SetValue(col_idx, count, row[col_idx]);
+			output.data[col_idx].SetValue(count, row[col_idx]);
 		}
 
 		state.current_idx++;
@@ -378,19 +387,19 @@ static unique_ptr<FunctionData> BoilstreamSecretsBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("name");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("type");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("provider");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("scope");
 	return_types.emplace_back(LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
 
 	names.emplace_back("expires_at");
-	return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 
 	return make_uniq<BoilstreamSecretsBindData>();
 }
@@ -443,19 +452,19 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		vector<Value> row;
 
 		// name (strip tenant prefix for display)
-		row.emplace_back(Value(RestApiSecretStorage::StripTenantPrefix(secret.GetName().GetIdentifierName(), context)));
+		row.emplace_back(RestApiSecretStorage::StripTenantPrefix(secret.GetName().GetIdentifierName(), context));
 
 		// type
-		row.emplace_back(Value(secret.GetType()));
+		row.emplace_back(secret.GetType());
 
 		// provider
-		row.emplace_back(Value(secret.GetProvider()));
+		row.emplace_back(secret.GetProvider());
 
 		// scope (as list)
 		auto &scope = secret.GetScope();
 		vector<Value> scope_values;
 		for (const auto &scope_item : scope) {
-			scope_values.emplace_back(Value(scope_item));
+			scope_values.emplace_back(scope_item);
 		}
 		row.emplace_back(Value::LIST(LogicalType(LogicalTypeId::VARCHAR), scope_values));
 
@@ -463,7 +472,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		auto expiration = storage->GetSecretExpiration(secret.GetName().GetIdentifierName(), expiration_transaction);
 		if (expiration == std::chrono::system_clock::time_point()) {
 			// No expiration data
-			row.emplace_back(Value());
+			row.emplace_back();
 		} else {
 			auto expires_time_t = std::chrono::system_clock::to_time_t(expiration);
 			row.emplace_back(Value::TIMESTAMP(Timestamp::FromEpochSeconds(expires_time_t)));
@@ -484,7 +493,7 @@ static void BoilstreamSecretsFunction(ClientContext &context, TableFunctionInput
 
 		// Set each column value
 		for (idx_t col_idx = 0; col_idx < row.size(); col_idx++) {
-			output.SetValue(col_idx, count, row[col_idx]);
+			output.data[col_idx].SetValue(count, row[col_idx]);
 		}
 
 		state.current_idx++;
@@ -514,22 +523,22 @@ static unique_ptr<FunctionData> BoilstreamBucketsBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Define output columns
 	names.emplace_back("bucket_id");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("bucket_name");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("region");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("cloud_provider");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("access_mode");
-	return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	names.emplace_back("can_create_ducklake");
-	return_types.emplace_back(LogicalType(LogicalTypeId::BOOLEAN));
+	return_types.emplace_back(LogicalTypeId::BOOLEAN);
 
 	return make_uniq<BoilstreamBucketsBindData>();
 }
@@ -565,6 +574,7 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	// Make HTTP GET request
 	string response;
+	boilstream::WipeOnExit wipe_response(response);
 	try {
 		response = (conn_state->IsLocalSession()
 		                ? storage->RequestLocal(context, *conn_state, "{\"operation\":\"list_buckets\"}")
@@ -582,7 +592,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 
 	// Parse JSON response
 	BOILSTREAM_LOG("BoilstreamBucketsInit: Parsing JSON response");
-	auto doc = duckdb_yyjson::yyjson_read(response.c_str(), response.size(), 0);
+	boilstream::JsonArena doc_arena;
+	auto doc = doc_arena.Read(response.c_str(), response.size(), 0);
 	if (!doc) {
 		throw IOException("Failed to parse buckets JSON response");
 	}
@@ -612,41 +623,41 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamBucketsInit(ClientContext 
 		// bucket_id
 		auto bucket_id_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_id");
 		if (bucket_id_val && duckdb_yyjson::yyjson_is_str(bucket_id_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(bucket_id_val)));
+			row.emplace_back(SafeYyjsonGetStr(bucket_id_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// bucket_name
 		auto bucket_name_val = duckdb_yyjson::yyjson_obj_get(val, "bucket_name");
 		if (bucket_name_val && duckdb_yyjson::yyjson_is_str(bucket_name_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(bucket_name_val)));
+			row.emplace_back(SafeYyjsonGetStr(bucket_name_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// region
 		auto region_val = duckdb_yyjson::yyjson_obj_get(val, "region");
 		if (region_val && duckdb_yyjson::yyjson_is_str(region_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(region_val)));
+			row.emplace_back(SafeYyjsonGetStr(region_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// cloud_provider
 		auto provider_val = duckdb_yyjson::yyjson_obj_get(val, "cloud_provider");
 		if (provider_val && duckdb_yyjson::yyjson_is_str(provider_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(provider_val)));
+			row.emplace_back(SafeYyjsonGetStr(provider_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// access_mode
 		auto access_mode_val = duckdb_yyjson::yyjson_obj_get(val, "access_mode");
 		if (access_mode_val && duckdb_yyjson::yyjson_is_str(access_mode_val)) {
-			row.emplace_back(Value(SafeYyjsonGetStr(access_mode_val)));
+			row.emplace_back(SafeYyjsonGetStr(access_mode_val));
 		} else {
-			row.emplace_back(Value());
+			row.emplace_back();
 		}
 
 		// can_create_ducklake
@@ -674,7 +685,7 @@ static void BoilstreamBucketsFunction(ClientContext &context, TableFunctionInput
 
 		// Set each column value
 		for (idx_t col_idx = 0; col_idx < row.size(); col_idx++) {
-			output.SetValue(col_idx, count, row[col_idx]);
+			output.data[col_idx].SetValue(count, row[col_idx]);
 		}
 
 		state.current_idx++;
@@ -734,7 +745,8 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	create_url = RestApiSecretStorage::AppendMultiTenantParam(create_url, context);
 
 	// Build request body using yyjson
-	auto doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena doc_arena;
+	auto doc = doc_arena.New();
 	auto obj = duckdb_yyjson::yyjson_mut_obj(doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(doc, obj);
 
@@ -756,6 +768,7 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 
 	// Make HTTP POST request
 	string response;
+	boilstream::WipeOnExit wipe_response(response);
 	try {
 		response = (conn_state->IsLocalSession()
 		                ? storage->RequestLocal(context, *conn_state,
@@ -820,6 +833,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	BOILSTREAM_LOG("Step 2: Getting parameter");
 	string input = params.values[0].ToString();
+	boilstream::WipeOnExit wipe_input(input);
 
 	// Validate input format
 	if (input.empty()) {
@@ -861,6 +875,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 	// Split into endpoint and bootstrap token
 	string endpoint_url = input.substr(0, token_delimiter);
 	string bootstrap_token = input.substr(token_delimiter + 1);
+	boilstream::WipeOnExit wipe_bootstrap_token(bootstrap_token);
 
 	// Remove trailing slash from endpoint if present (from /path/:token format)
 	if (!endpoint_url.empty() && endpoint_url.back() == '/') {
@@ -871,31 +886,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		throw InvalidInputException("rest_set_endpoint: Bootstrap token cannot be empty");
 	}
 
-	// Require HTTPS for security (unless localhost for testing)
-	// Properly extract and validate hostname to prevent bypass
-	bool is_localhost = false;
-	auto proto_end = endpoint_url.find("://");
-	if (proto_end != string::npos) {
-		auto host_start = proto_end + 3;
-		auto host_end = endpoint_url.find('/', host_start);
-		auto port_pos = endpoint_url.find(':', host_start);
-
-		// Port comes before path
-		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
-			host_end = port_pos;
-		}
-
-		string hostname =
-		    endpoint_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
-
-		// Check for localhost variants (including IPv6)
-		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
-	}
-
-	BOILSTREAM_LOG("Step 9: Checking HTTPS requirement");
-	if (!is_localhost && endpoint_url.find("https://") != 0) {
-		throw InvalidInputException("rest_set_endpoint: URL must use HTTPS (or localhost for testing)");
-	}
+	boilstream::ValidateEndpoint(endpoint_url);
 
 	// Update the REST API storage with endpoint first
 	BOILSTREAM_LOG("Step 10: Getting storage from context");
@@ -916,6 +907,7 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Convert to hex string (lowercase)
 	string incoming_token_hash;
+	boilstream::WipeOnExit wipe_incoming_token_hash(incoming_token_hash);
 	incoming_token_hash.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
 	for (size_t i = 0; i < 32; i++) {
@@ -1054,8 +1046,9 @@ struct RegistrationOutputState : GlobalTableFunctionState {
 };
 static unique_ptr<FunctionData> RegistrationOutputBind(ClientContext &, TableFunctionBindInput &input,
                                                        vector<LogicalType> &types, vector<Identifier> &names) {
-	if (input.inputs[0].IsNull())
+	if (input.inputs[0].IsNull()) {
 		throw InvalidInputException("Authentication result ID is required");
+	}
 	types = {LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::BOOLEAN};
 	names = {"ordinal", "value", "encode_qr"};
 	return make_uniq<RegistrationOutputBindData>(input.inputs[0].GetValue<uint64_t>());
@@ -1063,8 +1056,9 @@ static unique_ptr<FunctionData> RegistrationOutputBind(ClientContext &, TableFun
 static unique_ptr<GlobalTableFunctionState> RegistrationOutputInit(ClientContext &context,
                                                                    TableFunctionInitInput &input) {
 	auto storage = GetStorageFromContext(context);
-	if (!storage)
+	if (!storage) {
 		throw IOException("Authentication result is unavailable");
+	}
 	auto state = make_uniq<RegistrationOutputState>();
 	state->output = storage->TakeRegistrationOutput(context, input.bind_data->Cast<RegistrationOutputBindData>().id);
 	return std::move(state);
@@ -1074,9 +1068,9 @@ static void RegistrationOutputScan(ClientContext &, TableFunctionInput &input, D
 	const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.output->rows.size() - state.offset);
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &row = state.output->rows[state.offset + i];
-		chunk.SetValue(0, i, Value::UBIGINT(state.offset + i));
-		chunk.SetValue(1, i, Value(row.value));
-		chunk.SetValue(2, i, Value::BOOLEAN(row.encode_qr));
+		chunk.data[0].SetValue(i, Value::UBIGINT(state.offset + i));
+		chunk.data[1].SetValue(i, Value(row.value));
+		chunk.data[2].SetValue(i, Value::BOOLEAN(row.encode_qr));
 	}
 	state.offset += count;
 	chunk.SetChildCardinality(count);
@@ -1084,13 +1078,15 @@ static void RegistrationOutputScan(ClientContext &, TableFunctionInput &input, D
 static string RegistrationQrResult(ClientContext &context, RestApiSecretStorage &storage, uint64_t generation,
                                    const string &uri) {
 	const auto start = uri.find("secret=");
-	if (start == string::npos)
+	if (start == string::npos) {
 		throw IOException("TOTP secret is missing");
+	}
 	const auto begin = start + 7;
 	const auto end = uri.find('&', begin);
 	const auto length = (end == string::npos ? uri.size() : end) - begin;
-	if (!length || length > 8192)
+	if (!length || length > 8192) {
 		throw IOException("Invalid TOTP secret length");
+	}
 	auto output = make_uniq<BoilstreamRegistrationOutput>();
 	output->rows.reserve(3);
 	output->rows.push_back({"", false});
@@ -1098,8 +1094,9 @@ static string RegistrationQrResult(ClientContext &context, RestApiSecretStorage 
 	// Build directly in the wiping owner, including allocation-failure paths.
 	formatted.reserve(length + (length - 1) / 4);
 	for (size_t i = 0; i < length; i += 4) {
-		if (i)
+		if (i) {
 			formatted += " ";
+		}
 		formatted.append(uri, begin + i, std::min(size_t(4), length - i));
 	}
 	output->rows.push_back({"PRAGMA boilstream_verify_mfa('123456');", false});
@@ -1137,6 +1134,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	string url_with_email = params.values[0].ToString();
 	string password = params.values[1].ToString();
+	boilstream::WipeOnExit wipe_password(password);
 
 	// Parse URL/email format: https://host:port/path/email@domain.com
 	// Find the last '/' to separate base_url from email
@@ -1154,28 +1152,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		throw InvalidInputException("boilstream_register_user: URL must start with http:// or https://");
 	}
 
-	// Require HTTPS for security (unless localhost for testing)
-	bool is_localhost = false;
-	auto proto_end = base_url.find("://");
-	if (proto_end != string::npos) {
-		auto host_start = proto_end + 3;
-		auto host_end = base_url.find('/', host_start);
-		auto port_pos = base_url.find(':', host_start);
-
-		// Port comes before path
-		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
-			host_end = port_pos;
-		}
-
-		string hostname = base_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
-
-		// Check for localhost variants (including IPv6)
-		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
-	}
-
-	if (!is_localhost && base_url.find("https://") != 0) {
-		throw InvalidInputException("boilstream_register_user: URL must use HTTPS (or localhost for testing)");
-	}
+	boilstream::ValidateEndpoint(base_url);
 
 	// Validate email format using Rust FFI
 	if (registration_validate_email(email.c_str()) != 0) {
@@ -1209,27 +1186,35 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		try {
 			auto &db = DatabaseInstance::GetDatabase(context);
 			auto &http_util = HTTPUtil::Get(db);
+			boilstream::ValidateEndpoint(url);
 			auto params = http_util.InitializeParameters(db, url);
+			boilstream::ParamsCleanup wipe_params(params.get());
 			if (!params) {
 				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
 			}
 			HTTPHeaders headers(db);
+			boilstream::HeaderCleanup wipe_headers_headers(headers);
 			headers.Insert("Content-Type", "application/json");
 
 			// Response handlers for capturing body
 			string response_body;
+			boilstream::WipeOnExit wipe_response_body(response_body);
 			auto response_handler = [&](const HTTPResponse &response) {
 				// Don't use response.body - it may be empty when using content_handler
 				return true;
 			};
 			auto content_handler = [&](const_data_ptr_t data, idx_t size) {
 				// Build response body from streamed chunks
-				response_body.append(reinterpret_cast<const char *>(data), size);
+				boilstream::AppendResponse(response_body, reinterpret_cast<const char *>(data), size);
 				return true;
 			};
 
 			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
+			boilstream::RequestCleanup wipe_request(request);
+			params->follow_location = false;
 			auto response = http_util.Request(request);
+			boilstream::ResponseCleanup wipe_http_response(*response);
+			boilstream::CheckResponseSize(response->body.size());
 
 			auto status_code = static_cast<int>(response->status);
 
@@ -1238,7 +1223,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 				BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
 			}
 
-			return response_body;
+			return string(response_body);
 
 		} catch (const std::exception &e) {
 			BoilstreamRethrowSafe("HTTP GET failed", e);
@@ -1253,11 +1238,14 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		try {
 			auto &db = DatabaseInstance::GetDatabase(context);
 			auto &http_util = HTTPUtil::Get(db);
+			boilstream::ValidateEndpoint(url);
 			auto params = http_util.InitializeParameters(db, url);
+			boilstream::ParamsCleanup wipe_params(params.get());
 			if (!params) {
 				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 			}
 			HTTPHeaders headers(db);
+			boilstream::HeaderCleanup wipe_headers_headers(headers);
 			headers.Insert("Content-Type", "application/json");
 			if (!cookie.empty()) {
 				headers.Insert("Cookie", cookie);
@@ -1265,15 +1253,22 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 			// PostRequestInfo stores response in buffer_out member (not via handlers)
 			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			boilstream::RequestCleanup wipe_request(request);
+			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
+			params->follow_location = false;
 			auto response = http_util.Request(request);
+			boilstream::ResponseCleanup wipe_http_response(*response);
+			boilstream::CheckResponseSize(response->body.size());
+			boilstream::CheckResponseSize(request.buffer_out.size());
 
 			// Capture response headers if requested
 			if (out_headers) {
-				*out_headers = response->headers;
+				boilstream::CopyHeaders(response->headers, *out_headers);
 			}
 
 			// Get response body from buffer_out
 			string response_body = request.buffer_out;
+			boilstream::WipeOnExit wipe_response_body(response_body);
 
 			auto status_code = static_cast<int>(response->status);
 
@@ -1288,7 +1283,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
 			}
 
-			return response_body;
+			return string(response_body);
 
 		} catch (const std::exception &e) {
 			BoilstreamRethrowSafe("HTTP POST failed", e);
@@ -1298,6 +1293,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Step 1: Get CSRF token
 	string csrf_url = base_url + "/auth/csrf";
 	string csrf_response;
+	boilstream::WipeOnExit wipe_csrf_response(csrf_response);
 	try {
 		csrf_response = http_get(csrf_url);
 	} catch (const std::exception &e) {
@@ -1305,7 +1301,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Parse CSRF token from JSON response
-	auto csrf_doc = duckdb_yyjson::yyjson_read(csrf_response.c_str(), csrf_response.size(), 0);
+	boilstream::JsonArena csrf_doc_arena;
+	auto csrf_doc = csrf_doc_arena.Read(csrf_response.c_str(), csrf_response.size(), 0);
 	if (!csrf_doc) {
 		throw IOException("Failed to parse CSRF response");
 	}
@@ -1316,6 +1313,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		throw IOException("CSRF response missing csrf_token field");
 	}
 	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
+	boilstream::WipeOnExit wipe_csrf_token(csrf_token);
 	duckdb_yyjson::yyjson_doc_free(csrf_doc);
 	if (csrf_token.empty()) {
 		throw IOException("CSRF token is empty");
@@ -1326,7 +1324,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Step 2: POST /auth/email/signup
 	string signup_url = base_url + "/auth/email/signup";
 
-	auto signup_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena signup_doc_arena;
+	auto signup_doc = signup_doc_arena.New();
 	auto signup_obj = duckdb_yyjson::yyjson_mut_obj(signup_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(signup_doc, signup_obj);
 
@@ -1335,9 +1334,11 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(signup_doc, signup_obj, "csrf_token", csrf_token.c_str());
 
 	string signup_body = SafeJsonSerialize(signup_doc);
+	boilstream::WipeOnExit wipe_signup_body(signup_body);
 	duckdb_yyjson::yyjson_mut_doc_free(signup_doc);
 
 	string signup_response;
+	boilstream::WipeOnExit wipe_signup_response(signup_response);
 	try {
 		signup_response = http_post(signup_url, signup_body);
 	} catch (const std::exception &e) {
@@ -1351,7 +1352,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Parse signup response
-	auto signup_resp_doc = duckdb_yyjson::yyjson_read(signup_response.c_str(), signup_response.size(), 0);
+	boilstream::JsonArena signup_resp_doc_arena;
+	auto signup_resp_doc = signup_resp_doc_arena.Read(signup_response.c_str(), signup_response.size(), 0);
 	if (!signup_resp_doc) {
 		// Show first 500 chars of response for debugging
 		throw IOException("Failed to parse signup response");
@@ -1372,7 +1374,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Note: CSRF tokens are valid for 5 minutes, so we can reuse the same token
 	string login_url = base_url + "/auth/email/login";
 
-	auto login_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena login_doc_arena;
+	auto login_doc = login_doc_arena.New();
 	auto login_obj = duckdb_yyjson::yyjson_mut_obj(login_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(login_doc, login_obj);
 
@@ -1381,12 +1384,15 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "csrf_token", csrf_token.c_str());
 
 	string login_body = SafeJsonSerialize(login_doc);
+	boilstream::WipeOnExit wipe_login_body(login_body);
 	duckdb_yyjson::yyjson_mut_doc_free(login_doc);
 
 	// Capture response headers to get Set-Cookie
 	auto &db = DatabaseInstance::GetDatabase(context);
 	HTTPHeaders login_response_headers(db);
+	boilstream::HeaderCleanup wipe_headers_login_response_headers(login_response_headers);
 	string login_response;
+	boilstream::WipeOnExit wipe_login_response(login_response);
 	try {
 		login_response = http_post(login_url, login_body, "", &login_response_headers);
 	} catch (const std::exception &e) {
@@ -1394,7 +1400,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Parse login response to get session_id
-	auto login_resp_doc = duckdb_yyjson::yyjson_read(login_response.c_str(), login_response.size(), 0);
+	boilstream::JsonArena login_resp_doc_arena;
+	auto login_resp_doc = login_resp_doc_arena.Read(login_response.c_str(), login_response.size(), 0);
 	if (!login_resp_doc) {
 		throw IOException("Failed to parse login response");
 	}
@@ -1411,6 +1418,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Extract session token from Set-Cookie header (not from JSON body)
 	auto set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
+	boilstream::WipeOnExit wipe_set_cookie_header(set_cookie_header);
 	if (set_cookie_header.empty()) {
 		throw IOException("Login response missing Set-Cookie header");
 	}
@@ -1418,6 +1426,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Parse session token from Set-Cookie header
 	// Format: "session={token}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age={seconds}; Secure"
 	string session_token;
+	boilstream::WipeOnExit wipe_session_token(session_token);
 	size_t session_pos = set_cookie_header.find("session=");
 	if (session_pos == string::npos) {
 		throw IOException("Set-Cookie header missing session cookie");
@@ -1441,17 +1450,21 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	// Step 4: POST /auth/api/mfa/enroll/totp to get TOTP secret
 	string totp_enroll_url = base_url + "/auth/api/mfa/enroll/totp";
 
-	auto totp_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena totp_doc_arena;
+	auto totp_doc = totp_doc_arena.New();
 	auto totp_obj = duckdb_yyjson::yyjson_mut_obj(totp_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(totp_doc, totp_obj);
 	// Empty body for enrollment
 	string totp_body = SafeJsonSerialize(totp_doc);
+	boilstream::WipeOnExit wipe_totp_body(totp_body);
 	duckdb_yyjson::yyjson_mut_doc_free(totp_doc);
 
 	// Make authenticated request with session cookie
 	// Cookie format: "session={token}" as per server spec
 	string session_cookie = "session=" + session_token;
+	boilstream::WipeOnExit wipe_session_cookie(session_cookie);
 	string totp_response;
+	boilstream::WipeOnExit wipe_totp_response(totp_response);
 	try {
 		totp_response = http_post(totp_enroll_url, totp_body, session_cookie);
 	} catch (const std::exception &e) {
@@ -1459,7 +1472,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Parse TOTP enrollment response
-	auto totp_resp_doc = duckdb_yyjson::yyjson_read(totp_response.c_str(), totp_response.size(), 0);
+	boilstream::JsonArena totp_resp_doc_arena;
+	auto totp_resp_doc = totp_resp_doc_arena.Read(totp_response.c_str(), totp_response.size(), 0);
 	if (!totp_resp_doc) {
 		throw IOException("Failed to parse TOTP enrollment response");
 	}
@@ -1470,6 +1484,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		throw IOException("TOTP enrollment response missing secret");
 	}
 	string totp_secret = SafeYyjsonGetStr(secret_val);
+	boilstream::WipeOnExit wipe_totp_secret(totp_secret);
 	duckdb_yyjson::yyjson_doc_free(totp_resp_doc);
 
 	if (totp_secret.empty()) {
@@ -1480,12 +1495,14 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Build TOTP URI using Rust FFI
 	char totp_uri_buffer[512];
-	long uri_len = registration_build_totp_uri(email.c_str(), totp_secret.c_str(), nullptr, totp_uri_buffer,
+	boilstream::WipeOnExit wipe_totp_uri_buffer(totp_uri_buffer);
+	auto uri_len = registration_build_totp_uri(email.c_str(), totp_secret.c_str(), nullptr, totp_uri_buffer,
 	                                           sizeof(totp_uri_buffer));
 	if (uri_len < 0) {
 		throw IOException("Failed to build TOTP URI");
 	}
 	string totp_uri(totp_uri_buffer, uri_len);
+	boilstream::WipeOnExit wipe_totp_uri(totp_uri);
 
 	BOILSTREAM_LOG("RegisterUser: TOTP URI built successfully");
 
@@ -1503,11 +1520,12 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 static string VerifyMfa(ClientContext &context, const FunctionParameters &params) {
 	BOILSTREAM_LOG("VerifyMfa: Function called");
 
-	if (params.values.size() < 1) {
+	if (params.values.empty()) {
 		throw InvalidInputException("boilstream_verify_mfa requires totp_code parameter");
 	}
 
 	string totp_code = params.values[0].ToString();
+	boilstream::WipeOnExit wipe_totp_code(totp_code);
 
 	// Validate TOTP code format (6 digits)
 	if (totp_code.length() != 6) {
@@ -1537,11 +1555,14 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		try {
 			auto &db = DatabaseInstance::GetDatabase(context);
 			auto &http_util = HTTPUtil::Get(db);
+			boilstream::ValidateEndpoint(url);
 			auto params = http_util.InitializeParameters(db, url);
+			boilstream::ParamsCleanup wipe_params(params.get());
 			if (!params) {
 				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 			}
 			HTTPHeaders headers(db);
+			boilstream::HeaderCleanup wipe_headers_headers(headers);
 			headers.Insert("Content-Type", "application/json");
 			if (!cookie.empty()) {
 				headers.Insert("Cookie", cookie);
@@ -1552,15 +1573,22 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 
 			// PostRequestInfo stores response in buffer_out member (not via handlers)
 			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			boilstream::RequestCleanup wipe_request(request);
+			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
+			params->follow_location = false;
 			auto response = http_util.Request(request);
+			boilstream::ResponseCleanup wipe_http_response(*response);
+			boilstream::CheckResponseSize(response->body.size());
+			boilstream::CheckResponseSize(request.buffer_out.size());
 
 			// Capture response headers if requested
 			if (out_headers) {
-				*out_headers = response->headers;
+				boilstream::CopyHeaders(response->headers, *out_headers);
 			}
 
 			// Get response body from buffer_out
 			string response_body = request.buffer_out;
+			boilstream::WipeOnExit wipe_response_body(response_body);
 
 			auto status_code = static_cast<int>(response->status);
 
@@ -1574,7 +1602,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
 			}
 
-			return response_body;
+			return string(response_body);
 
 		} catch (const std::exception &e) {
 			BoilstreamRethrowSafe("HTTP POST failed", e);
@@ -1584,7 +1612,8 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// POST /auth/api/mfa/verify-enrollment
 	string verify_url = base_url + "/auth/api/mfa/verify-enrollment";
 
-	auto verify_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena verify_doc_arena;
+	auto verify_doc = verify_doc_arena.New();
 	auto verify_obj = duckdb_yyjson::yyjson_mut_obj(verify_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(verify_doc, verify_obj);
 
@@ -1593,14 +1622,18 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// Note: secret is not needed for verify-enrollment, it's already stored server-side
 
 	string verify_body = SafeJsonSerialize(verify_doc);
+	boilstream::WipeOnExit wipe_verify_body(verify_body);
 	duckdb_yyjson::yyjson_mut_doc_free(verify_doc);
 
 	// Make authenticated request with session cookie
 	// Cookie format: "session={token}" as per server spec
 	string session_cookie = "session=" + session_token;
+	boilstream::WipeOnExit wipe_session_cookie(session_cookie);
 
 	HTTPHeaders response_headers(DatabaseInstance::GetDatabase(context));
+	boilstream::HeaderCleanup wipe_headers_response_headers(response_headers);
 	string verify_response;
+	boilstream::WipeOnExit wipe_verify_response(verify_response);
 	try {
 		verify_response = http_post(verify_url, verify_body, session_cookie, &response_headers);
 	} catch (const std::exception &e) {
@@ -1614,8 +1647,9 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	}
 
 	// Parse verification response
+	boilstream::JsonArena verify_resp_doc_arena;
 	auto verify_resp_doc = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>(
-	    duckdb_yyjson::yyjson_read(verify_response.c_str(), verify_response.size(), 0), duckdb_yyjson::yyjson_doc_free);
+	    verify_resp_doc_arena.Read(verify_response.c_str(), verify_response.size(), 0), duckdb_yyjson::yyjson_doc_free);
 	if (!verify_resp_doc) {
 		throw IOException("Failed to parse verification response");
 	}
@@ -1630,8 +1664,9 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	// Keep recovery codes in runtime data, never in generated SQL or plan literals.
 	auto output = make_uniq<BoilstreamRegistrationOutput>();
 	auto backup_codes_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "backup_codes");
-	if (backup_codes_val && !duckdb_yyjson::yyjson_is_arr(backup_codes_val))
+	if (backup_codes_val && !duckdb_yyjson::yyjson_is_arr(backup_codes_val)) {
 		throw IOException("Invalid recovery-code response");
+	}
 	if (backup_codes_val) {
 		const auto count = duckdb_yyjson::yyjson_arr_size(backup_codes_val);
 		if (count > 128) {
@@ -1668,7 +1703,9 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	string url_with_email = params.values[0].ToString();
 	string password = params.values[1].ToString();
+	boilstream::WipeOnExit wipe_password(password);
 	string mfa_code = params.values[2].ToString();
+	boilstream::WipeOnExit wipe_mfa_code(mfa_code);
 
 	// Parse URL to extract base_url and email
 	// Expected format: https://localhost/email@example.com
@@ -1685,28 +1722,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		throw InvalidInputException("boilstream_login: URL must start with http:// or https://");
 	}
 
-	// Require HTTPS for security (unless localhost for testing)
-	bool is_localhost = false;
-	auto proto_end = base_url.find("://");
-	if (proto_end != string::npos) {
-		auto host_start = proto_end + 3;
-		auto host_end = base_url.find('/', host_start);
-		auto port_pos = base_url.find(':', host_start);
-
-		// Port comes before path
-		if (port_pos != string::npos && (host_end == string::npos || port_pos < host_end)) {
-			host_end = port_pos;
-		}
-
-		string hostname = base_url.substr(host_start, host_end == string::npos ? string::npos : host_end - host_start);
-
-		// Check for localhost variants (including IPv6)
-		is_localhost = (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || hostname == "[::1]");
-	}
-
-	if (!is_localhost && base_url.find("https://") != 0) {
-		throw InvalidInputException("boilstream_login: URL must use HTTPS (or localhost for testing)");
-	}
+	boilstream::ValidateEndpoint(base_url);
 
 	if (email.empty()) {
 		throw InvalidInputException("boilstream_login: Email cannot be empty");
@@ -1737,29 +1753,37 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		try {
 			auto &db = DatabaseInstance::GetDatabase(context);
 			auto &http_util = HTTPUtil::Get(db);
+			boilstream::ValidateEndpoint(url);
 			auto params = http_util.InitializeParameters(db, url);
+			boilstream::ParamsCleanup wipe_params(params.get());
 			if (!params) {
 				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
 			}
 
 			HTTPHeaders headers(db);
+			boilstream::HeaderCleanup wipe_headers_headers(headers);
 			string response_body;
+			boilstream::WipeOnExit wipe_response_body(response_body);
 			auto response_handler = [&](const HTTPResponse &response) -> bool {
 				return true;
 			};
 			auto content_handler = [&](const_data_ptr_t data, idx_t size) -> bool {
-				response_body.append(const_char_ptr_cast(data), size);
+				boilstream::AppendResponse(response_body, const_char_ptr_cast(data), size);
 				return true;
 			};
 
 			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
+			boilstream::RequestCleanup wipe_request(request);
+			params->follow_location = false;
 			auto response = http_util.Request(request);
+			boilstream::ResponseCleanup wipe_http_response(*response);
+			boilstream::CheckResponseSize(response->body.size());
 
 			if (!response->Success()) {
 				BoilstreamThrowHttpStatus("HTTP GET failed", static_cast<int>(response->status));
 			}
 
-			return response_body;
+			return string(response_body);
 
 		} catch (const std::exception &e) {
 			BoilstreamRethrowSafe("HTTP GET failed", e);
@@ -1772,24 +1796,34 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		try {
 			auto &db = DatabaseInstance::GetDatabase(context);
 			auto &http_util = HTTPUtil::Get(db);
+			boilstream::ValidateEndpoint(url);
 			auto params = http_util.InitializeParameters(db, url);
+			boilstream::ParamsCleanup wipe_params(params.get());
 			if (!params) {
 				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
 			}
 			HTTPHeaders headers(db);
+			boilstream::HeaderCleanup wipe_headers_headers(headers);
 			headers.Insert("Content-Type", "application/json");
 			if (!cookie.empty()) {
 				headers.Insert("Cookie", cookie);
 			}
 
 			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+			boilstream::RequestCleanup wipe_request(request);
+			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
+			params->follow_location = false;
 			auto response = http_util.Request(request);
+			boilstream::ResponseCleanup wipe_http_response(*response);
+			boilstream::CheckResponseSize(response->body.size());
+			boilstream::CheckResponseSize(request.buffer_out.size());
 
 			if (out_headers) {
-				*out_headers = response->headers;
+				boilstream::CopyHeaders(response->headers, *out_headers);
 			}
 
 			string response_body = request.buffer_out;
+			boilstream::WipeOnExit wipe_response_body(response_body);
 
 			auto status_code = static_cast<int>(response->status);
 
@@ -1804,7 +1838,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
 			}
 
-			return response_body;
+			return string(response_body);
 
 		} catch (const std::exception &e) {
 			BoilstreamRethrowSafe("HTTP POST failed", e);
@@ -1814,13 +1848,15 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Step 1: Get CSRF token
 	string csrf_url = base_url + "/auth/csrf";
 	string csrf_response;
+	boilstream::WipeOnExit wipe_csrf_response(csrf_response);
 	try {
 		csrf_response = http_get(csrf_url);
 	} catch (const std::exception &e) {
 		BoilstreamRethrowSafe("Failed to fetch CSRF token", e);
 	}
 
-	auto csrf_doc = duckdb_yyjson::yyjson_read(csrf_response.c_str(), csrf_response.size(), 0);
+	boilstream::JsonArena csrf_doc_arena;
+	auto csrf_doc = csrf_doc_arena.Read(csrf_response.c_str(), csrf_response.size(), 0);
 	if (!csrf_doc) {
 		throw IOException("Failed to parse CSRF response");
 	}
@@ -1831,6 +1867,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		throw IOException("CSRF response missing csrf_token field");
 	}
 	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
+	boilstream::WipeOnExit wipe_csrf_token(csrf_token);
 	duckdb_yyjson::yyjson_doc_free(csrf_doc);
 	if (csrf_token.empty()) {
 		throw IOException("CSRF token is empty");
@@ -1841,7 +1878,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Step 2: POST /auth/email/login (without MFA code - two-step flow)
 	string login_url = base_url + "/auth/email/login";
 
-	auto login_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena login_doc_arena;
+	auto login_doc = login_doc_arena.New();
 	auto login_obj = duckdb_yyjson::yyjson_mut_obj(login_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(login_doc, login_obj);
 
@@ -1850,12 +1888,15 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(login_doc, login_obj, "csrf_token", csrf_token.c_str());
 
 	string login_body = SafeJsonSerialize(login_doc);
+	boilstream::WipeOnExit wipe_login_body(login_body);
 	duckdb_yyjson::yyjson_mut_doc_free(login_doc);
 
 	BOILSTREAM_LOG("Login: Posting credentials to /auth/email/login (step 1/2)");
 
 	HTTPHeaders login_response_headers(DatabaseInstance::GetDatabase(context));
+	boilstream::HeaderCleanup wipe_headers_login_response_headers(login_response_headers);
 	string login_response;
+	boilstream::WipeOnExit wipe_login_response(login_response);
 	try {
 		login_response = http_post(login_url, login_body, "", &login_response_headers);
 	} catch (const std::exception &e) {
@@ -1871,6 +1912,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	// Extract session token from Set-Cookie header
 	string set_cookie_header;
+	boilstream::WipeOnExit wipe_set_cookie_header(set_cookie_header);
 	try {
 		set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
 	} catch (...) {
@@ -1884,6 +1926,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Parse session token from Set-Cookie header
 	// Format: "session={token}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age={seconds}; Secure"
 	string session_token;
+	boilstream::WipeOnExit wipe_session_token(session_token);
 	size_t session_pos = set_cookie_header.find("session=");
 	if (session_pos == string::npos) {
 		throw IOException("Set-Cookie header missing session cookie");
@@ -1901,19 +1944,23 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	// Step 3: POST /auth/api/mfa/verify/totp with session cookie
 	string mfa_url = base_url + "/auth/api/mfa/verify/totp";
 
-	auto mfa_doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	boilstream::JsonArena mfa_doc_arena;
+	auto mfa_doc = mfa_doc_arena.New();
 	auto mfa_obj = duckdb_yyjson::yyjson_mut_obj(mfa_doc);
 	duckdb_yyjson::yyjson_mut_doc_set_root(mfa_doc, mfa_obj);
 
 	duckdb_yyjson::yyjson_mut_obj_add_strcpy(mfa_doc, mfa_obj, "code", mfa_code.c_str());
 
 	string mfa_body = SafeJsonSerialize(mfa_doc);
+	boilstream::WipeOnExit wipe_mfa_body(mfa_body);
 	duckdb_yyjson::yyjson_mut_doc_free(mfa_doc);
 
 	BOILSTREAM_LOG("Login: Posting MFA code to /auth/api/mfa/verify/totp (step 2/2)");
 
 	string session_cookie = "session=" + session_token;
+	boilstream::WipeOnExit wipe_session_cookie(session_cookie);
 	string mfa_response;
+	boilstream::WipeOnExit wipe_mfa_response(mfa_response);
 	try {
 		mfa_response = http_post(mfa_url, mfa_body, session_cookie);
 	} catch (const std::exception &e) {
@@ -1921,7 +1968,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Parse MFA response to verify success
-	auto mfa_resp_doc = duckdb_yyjson::yyjson_read(mfa_response.c_str(), mfa_response.size(), 0);
+	boilstream::JsonArena mfa_resp_doc_arena;
+	auto mfa_resp_doc = mfa_resp_doc_arena.Read(mfa_response.c_str(), mfa_response.size(), 0);
 	if (!mfa_resp_doc) {
 		throw IOException("Failed to parse MFA response");
 	}
@@ -1946,6 +1994,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	BOILSTREAM_LOG("Login: Requesting bootstrap token from /auth/api/bootstrap-token");
 
 	string bootstrap_response;
+	boilstream::WipeOnExit wipe_bootstrap_response(bootstrap_response);
 	try {
 		bootstrap_response = http_post(bootstrap_url_endpoint, bootstrap_body, session_cookie);
 	} catch (const std::exception &e) {
@@ -1953,7 +2002,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 	}
 
 	// Parse bootstrap token response
-	auto bootstrap_resp_doc = duckdb_yyjson::yyjson_read(bootstrap_response.c_str(), bootstrap_response.size(), 0);
+	boilstream::JsonArena bootstrap_resp_doc_arena;
+	auto bootstrap_resp_doc = bootstrap_resp_doc_arena.Read(bootstrap_response.c_str(), bootstrap_response.size(), 0);
 	if (!bootstrap_resp_doc) {
 		throw IOException("Failed to parse bootstrap token response");
 	}
@@ -1964,6 +2014,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		throw IOException("Bootstrap token response missing bootstrap_token field");
 	}
 	string bootstrap_token = SafeYyjsonGetStr(bootstrap_token_val);
+	boilstream::WipeOnExit wipe_bootstrap_token(bootstrap_token);
 	duckdb_yyjson::yyjson_doc_free(bootstrap_resp_doc);
 
 	if (bootstrap_token.empty()) {
@@ -1989,6 +2040,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 
 	// Convert to hex string (lowercase)
 	string incoming_token_hash;
+	boilstream::WipeOnExit wipe_incoming_token_hash(incoming_token_hash);
 	incoming_token_hash.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
 	for (size_t i = 0; i < 32; i++) {
@@ -2342,15 +2394,18 @@ extern "C" {
 DUCKDB_EXTENSION_API uint8_t boilstream_install_local_session_v2(void *raw_context,
                                                                  const BoilstreamLocalSecretHostV2 *host, char *error,
                                                                  size_t capacity) {
-	if (error && capacity)
+	if (error && capacity) {
 		error[0] = '\0';
+	}
 	try {
-		if (!raw_context || !host)
+		if (!raw_context || !host) {
 			throw duckdb::InvalidInputException("Missing local session capability");
+		}
 		auto &context = *static_cast<duckdb::ClientContext *>(raw_context);
 		auto storage = duckdb::GetStorageFromContext(context);
-		if (!storage)
+		if (!storage) {
 			throw duckdb::IOException("BoilStream extension is not loaded");
+		}
 		storage->InstallLocalSession(context, *host);
 		return 1;
 	} catch (...) {

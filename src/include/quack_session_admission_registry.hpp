@@ -9,9 +9,11 @@
 namespace duckdb {
 struct SessionCtx;
 // Registry ownership only. Authentication/callbacks/destruction run outside mutex.
-template <class Context> struct BasicSessionRegistry {
+template <class Context>
+struct BasicSessionRegistry {
 	struct Admission {
-		explicit Admission(std::string id) : id(std::move(id)) {}
+		explicit Admission(std::string id) : id(std::move(id)) {
+		}
 		const std::string id;
 		std::shared_ptr<const Context> published;
 	};
@@ -21,7 +23,7 @@ template <class Context> struct BasicSessionRegistry {
 	std::shared_ptr<QuackTenantSessionQuota> quotas = std::make_shared<QuackTenantSessionQuota>();
 
 	std::shared_ptr<QuackTenantSessionQuota::Lease> ReserveQuota(const std::string &id, QuackRequesterTenant tenant,
-																 uint32_t limit) {
+	                                                             uint32_t limit) {
 		std::lock_guard<std::mutex> guard(mutex);
 		auto found = sessions.find(id);
 		if (found != sessions.end() && found->second->session_quota) {
@@ -36,8 +38,9 @@ template <class Context> struct BasicSessionRegistry {
 		auto owner = std::make_unique<Admission>(id);
 		{
 			std::lock_guard<std::mutex> guard(mutex);
-			if (sessions.count(id) || pending.count(id))
+			if (sessions.count(id) || pending.count(id)) {
 				return nullptr;
+			}
 			pending.emplace(id, owner.get());
 		}
 		return owner;
@@ -48,8 +51,9 @@ template <class Context> struct BasicSessionRegistry {
 			std::lock_guard<std::mutex> guard(mutex);
 			auto existing = sessions.find(id);
 			if (existing != sessions.end() && existing->second->session_quota &&
-				existing->second->session_quota != context->session_quota)
+			    existing->second->session_quota != context->session_quota) {
 				throw std::invalid_argument("Session charging authority changed");
+			}
 			auto &slot = sessions[id];
 			retired = std::move(slot);
 			slot = std::move(context);
@@ -65,8 +69,9 @@ template <class Context> struct BasicSessionRegistry {
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			auto admission = pending.find(owner->id);
-			if (admission == pending.end() || admission->second != owner.get())
+			if (admission == pending.end() || admission->second != owner.get()) {
 				return;
+			}
 			if (!committed && owner->published) {
 				auto found = sessions.find(owner->id);
 				if (found != sessions.end() && found->second == owner->published) {

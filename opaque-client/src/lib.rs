@@ -1,12 +1,12 @@
+use hmac::{Hmac, Mac};
+use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
-use opaque_ke::ciphersuite::CipherSuite;
+use sha2::{Digest, Sha256};
 use std::ptr;
 use std::slice;
-use sha2::{Sha256, Digest};
-use hmac::{Hmac, Mac};
 use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
@@ -24,7 +24,10 @@ mod buffer_tests {
         let mut bytes = Vec::with_capacity(128);
         bytes.extend_from_slice(b"secret");
         let buffer = OpaqueBuffer::new(bytes);
-        assert_eq!(unsafe { slice::from_raw_parts(buffer.data, buffer.len) }, b"secret");
+        assert_eq!(
+            unsafe { slice::from_raw_parts(buffer.data, buffer.len) },
+            b"secret"
+        );
         opaque_free_buffer(buffer);
     }
 
@@ -159,9 +162,7 @@ pub extern "C" fn opaque_client_registration_start(
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
-    let password_bytes = unsafe {
-        slice::from_raw_parts(password as *const u8, password_len)
-    };
+    let password_bytes = unsafe { slice::from_raw_parts(password as *const u8, password_len) };
 
     let mut rng = get_rng!();
 
@@ -196,22 +197,26 @@ pub extern "C" fn opaque_client_registration_finish(
     upload_out: *mut OpaqueBuffer,
     export_key_out: *mut OpaqueBuffer,
 ) -> OpaqueError {
-    if state.is_null() || registration_response.is_null() || upload_out.is_null() || export_key_out.is_null() {
+    if state.is_null()
+        || registration_response.is_null()
+        || upload_out.is_null()
+        || export_key_out.is_null()
+    {
         return OpaqueError::InvalidInput;
     }
 
     let state_box = unsafe { Box::from_raw(state) };
-    let response_bytes = unsafe {
-        slice::from_raw_parts(registration_response, registration_response_len)
-    };
+    let response_bytes =
+        unsafe { slice::from_raw_parts(registration_response, registration_response_len) };
 
     let mut rng = get_rng!();
 
     // Deserialize registration response
-    let registration_response = match RegistrationResponse::<DefaultCipherSuite>::deserialize(response_bytes) {
-        Ok(resp) => resp,
-        Err(_) => return OpaqueError::SerializationError,
-    };
+    let registration_response =
+        match RegistrationResponse::<DefaultCipherSuite>::deserialize(response_bytes) {
+            Ok(resp) => resp,
+            Err(_) => return OpaqueError::SerializationError,
+        };
 
     // Finish registration
     let finish_result = state_box.client_registration.finish(
@@ -252,9 +257,7 @@ pub extern "C" fn opaque_client_login_start(
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
-    let password_bytes = unsafe {
-        slice::from_raw_parts(password as *const u8, password_len)
-    };
+    let password_bytes = unsafe { slice::from_raw_parts(password as *const u8, password_len) };
 
     let mut rng = get_rng!();
 
@@ -290,21 +293,25 @@ pub extern "C" fn opaque_client_login_finish(
     session_key_out: *mut OpaqueBuffer,
     export_key_out: *mut OpaqueBuffer,
 ) -> OpaqueError {
-    if state.is_null() || credential_response.is_null() || finalization_out.is_null()
-        || session_key_out.is_null() || export_key_out.is_null() {
+    if state.is_null()
+        || credential_response.is_null()
+        || finalization_out.is_null()
+        || session_key_out.is_null()
+        || export_key_out.is_null()
+    {
         return OpaqueError::InvalidInput;
     }
 
     let state_box = unsafe { Box::from_raw(state) };
-    let response_bytes = unsafe {
-        slice::from_raw_parts(credential_response, credential_response_len)
-    };
+    let response_bytes =
+        unsafe { slice::from_raw_parts(credential_response, credential_response_len) };
 
     // Deserialize credential response
-    let credential_response = match CredentialResponse::<DefaultCipherSuite>::deserialize(response_bytes) {
-        Ok(resp) => resp,
-        Err(_) => return OpaqueError::SerializationError,
-    };
+    let credential_response =
+        match CredentialResponse::<DefaultCipherSuite>::deserialize(response_bytes) {
+            Ok(resp) => resp,
+            Err(_) => return OpaqueError::SerializationError,
+        };
 
     // Finish login
     let finish_result = state_box.client_login.finish(
@@ -390,9 +397,13 @@ pub extern "C" fn aws_build_canonical_request(
     payload: *const u8,
     payload_len: usize,
 ) -> OpaqueResult {
-    if method.is_null() || canonical_uri.is_null() || canonical_query.is_null()
-        || canonical_headers.is_null() || signed_headers.is_null()
-        || (payload.is_null() && payload_len != 0) {
+    if method.is_null()
+        || canonical_uri.is_null()
+        || canonical_query.is_null()
+        || canonical_headers.is_null()
+        || signed_headers.is_null()
+        || (payload.is_null() && payload_len != 0)
+    {
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
@@ -479,9 +490,7 @@ pub extern "C" fn aws_derive_signing_key(
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
-    let key_bytes = unsafe {
-        slice::from_raw_parts(base_signing_key, base_signing_key_len)
-    };
+    let key_bytes = unsafe { slice::from_raw_parts(base_signing_key, base_signing_key_len) };
 
     let date_str = unsafe {
         let slice = slice::from_raw_parts(date as *const u8, date_len);
@@ -546,13 +555,10 @@ pub extern "C" fn aws_sign_canonical_request(
         return OpaqueResult::error(OpaqueError::InvalidInput);
     }
 
-    let key_bytes = unsafe {
-        slice::from_raw_parts(signing_key, signing_key_len)
-    };
+    let key_bytes = unsafe { slice::from_raw_parts(signing_key, signing_key_len) };
 
-    let request_bytes = unsafe {
-        slice::from_raw_parts(canonical_request as *const u8, canonical_request_len)
-    };
+    let request_bytes =
+        unsafe { slice::from_raw_parts(canonical_request as *const u8, canonical_request_len) };
 
     // Compute HMAC-SHA256 signature
     let mut mac = HmacSha256::new_from_slice(key_bytes).unwrap();
@@ -671,7 +677,9 @@ mod wasm {
     }
 
     #[wasm_bindgen]
-    pub fn wasm_opaque_client_registration_start(password: &str) -> Result<WasmRegistrationStartResult, JsValue> {
+    pub fn wasm_opaque_client_registration_start(
+        password: &str,
+    ) -> Result<WasmRegistrationStartResult, JsValue> {
         let password_bytes = password.as_bytes();
         let mut rng = get_rng!();
 
@@ -700,10 +708,19 @@ mod wasm {
         let response_bytes = from_base64(registration_response_base64)?;
         let mut rng = get_rng!();
 
-        let registration_response = RegistrationResponse::<DefaultCipherSuite>::deserialize(&response_bytes)
-            .map_err(|e| JsValue::from_str(&format!("Failed to deserialize registration response: {:?}", e)))?;
+        let registration_response = RegistrationResponse::<DefaultCipherSuite>::deserialize(
+            &response_bytes,
+        )
+        .map_err(|e| {
+            JsValue::from_str(&format!(
+                "Failed to deserialize registration response: {:?}",
+                e
+            ))
+        })?;
 
-        let finish_data = state.inner.client_registration
+        let finish_data = state
+            .inner
+            .client_registration
             .finish(
                 &mut rng,
                 &state.inner.password,
@@ -750,10 +767,19 @@ mod wasm {
     ) -> Result<WasmLoginFinishResult, JsValue> {
         let response_bytes = from_base64(credential_response_base64)?;
 
-        let credential_response = CredentialResponse::<DefaultCipherSuite>::deserialize(&response_bytes)
-            .map_err(|e| JsValue::from_str(&format!("Failed to deserialize credential response: {:?}", e)))?;
+        let credential_response = CredentialResponse::<DefaultCipherSuite>::deserialize(
+            &response_bytes,
+        )
+        .map_err(|e| {
+            JsValue::from_str(&format!(
+                "Failed to deserialize credential response: {:?}",
+                e
+            ))
+        })?;
 
-        let finish_data = state.inner.client_login
+        let finish_data = state
+            .inner
+            .client_login
             .finish(
                 &state.inner.password,
                 credential_response,
@@ -785,11 +811,7 @@ mod wasm {
 /// - `input` points to valid memory of at least `input_len` bytes
 /// - `output` points to valid writable memory of at least 32 bytes
 #[no_mangle]
-pub unsafe extern "C" fn opaque_client_sha256(
-    input: *const u8,
-    input_len: usize,
-    output: *mut u8,
-) {
+pub unsafe extern "C" fn opaque_client_sha256(input: *const u8, input_len: usize, output: *mut u8) {
     if input.is_null() || output.is_null() {
         return;
     }
@@ -834,8 +856,8 @@ pub unsafe extern "C" fn opaque_client_hmac_sha256(
     let key_slice = slice::from_raw_parts(key, key_len);
     let data_slice = slice::from_raw_parts(data, data_len);
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(key_slice)
-        .expect("HMAC can take key of any length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key_slice).expect("HMAC can take key of any length");
     mac.update(data_slice);
     let result = mac.finalize();
     let code_bytes = result.into_bytes();
@@ -1014,14 +1036,18 @@ pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
     plaintext_out: *mut u8,
     plaintext_out_len: usize,
 ) -> isize {
+    use aes_gcm::aead::generic_array::GenericArray;
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm,
     };
-    use aes_gcm::aead::generic_array::GenericArray;
 
     // Validate inputs
-    if ciphertext_with_tag.is_null() || nonce.is_null() || encryption_key.is_null() || plaintext_out.is_null() {
+    if ciphertext_with_tag.is_null()
+        || nonce.is_null()
+        || encryption_key.is_null()
+        || plaintext_out.is_null()
+    {
         return -1;
     }
 
@@ -1034,7 +1060,8 @@ pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
         return -1;
     }
 
-    let ciphertext_with_tag_slice = slice::from_raw_parts(ciphertext_with_tag, ciphertext_with_tag_len);
+    let ciphertext_with_tag_slice =
+        slice::from_raw_parts(ciphertext_with_tag, ciphertext_with_tag_len);
     let nonce_slice = slice::from_raw_parts(nonce, nonce_len);
     let key_slice = slice::from_raw_parts(encryption_key, encryption_key_len);
 
@@ -1050,6 +1077,7 @@ pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
     // Decrypt and verify (this includes tag verification)
     match cipher.decrypt(nonce_array, ciphertext_with_tag_slice) {
         Ok(plaintext) => {
+            let plaintext = Zeroizing::new(plaintext);
             if plaintext.len() != ciphertext_len {
                 return -1;
             }
@@ -1164,7 +1192,9 @@ pub unsafe extern "C" fn registration_build_totp_uri(
         }
     };
 
-    let uri = registration::build_totp_uri(email_str, secret_str, issuer_opt);
+    let uri = Zeroizing::new(registration::build_totp_uri(
+        email_str, secret_str, issuer_opt,
+    ));
 
     if uri.len() + 1 > uri_buffer_len {
         return -1; // Buffer too small

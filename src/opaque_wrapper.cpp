@@ -15,7 +15,7 @@
 namespace duckdb {
 
 //! Maximum OPAQUE protocol message size (64KB) - protects against malicious servers
-static constexpr size_t MAX_OPAQUE_MESSAGE_SIZE = 64 * 1024;
+static constexpr size_t MAX_OPAQUE_MESSAGE_SIZE = 64ULL * 1024;
 
 RegistrationStartResult OpaqueClientWrapper::RegistrationStart(const string &password) {
 	RegistrationState *state = nullptr;
@@ -44,13 +44,11 @@ RegistrationStartResult OpaqueClientWrapper::RegistrationStart(const string &pas
 		}
 	}
 
+	std::unique_ptr<RegistrationState, decltype(&opaque_free_registration_state)> owned_state(
+	    state, opaque_free_registration_state);
 	OpaqueBufferWrapper buffer_wrapper(result.buffer);
 
-	RegistrationStartResult output;
-	output.registration_request_base64 = buffer_wrapper.ToBase64();
-	output.state = state;
-
-	return output;
+	return {buffer_wrapper.ToBase64(), owned_state.release()};
 }
 
 RegistrationFinishResult OpaqueClientWrapper::RegistrationFinish(RegistrationState *state,
@@ -71,6 +69,7 @@ RegistrationFinishResult OpaqueClientWrapper::RegistrationFinish(RegistrationSta
 	// DuckDB decoding errors can contain the input. Keep both data and cleanup
 	// inside this boundary until the Rust call consumes the state.
 	string response_decoded;
+	boilstream::WipeOnExit wipe_decoded(response_decoded);
 	try {
 		response_decoded = Blob::FromBase64(string_t(registration_response_base64));
 	} catch (const std::exception &e) {
@@ -144,13 +143,10 @@ LoginStartResult OpaqueClientWrapper::LoginStart(const string &password) {
 		}
 	}
 
+	std::unique_ptr<LoginState, decltype(&opaque_free_login_state)> owned_state(state, opaque_free_login_state);
 	OpaqueBufferWrapper buffer_wrapper(result.buffer);
 
-	LoginStartResult output;
-	output.credential_request_base64 = buffer_wrapper.ToBase64();
-	output.state = state;
-
-	return output;
+	return {buffer_wrapper.ToBase64(), owned_state.release()};
 }
 
 LoginFinishResult OpaqueClientWrapper::LoginFinish(LoginState *state, const string &credential_response_base64) {
@@ -169,6 +165,7 @@ LoginFinishResult OpaqueClientWrapper::LoginFinish(LoginState *state, const stri
 	// DuckDB decoding errors can contain the input. Keep both data and cleanup
 	// inside this boundary until the Rust call consumes the state.
 	string response_decoded;
+	boilstream::WipeOnExit wipe_decoded(response_decoded);
 	try {
 		response_decoded = Blob::FromBase64(string_t(credential_response_base64));
 	} catch (const std::exception &e) {

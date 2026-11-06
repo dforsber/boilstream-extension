@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include "yyjson.hpp"
 #include "duckdb/common/exception.hpp"
 // This is server fixture metadata, never a lifetime inferred by the writer.

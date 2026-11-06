@@ -1,0 +1,23 @@
+{
+  "engineVersion": "v2.0.0",
+  "packageVersion": "1.33.1-dev114.0",
+  "packageGitRevision": "deb938860faf52dec5e8b5dbcc7371858c15e9e4",
+  "duckdbRevision": "d54cbbe3df17e8e5ce68312f483b4155836112aa",
+  "emscriptenVersion": "6.0.9",
+  "rustToolchain": "1.94.1",
+  "rustThreadsToolchain": "nightly-2026-08-06",
+  "variants": [
+    "wasm_eh",
+    "wasm_threads"
+  ],
+  "quackArtifacts": {
+    "wasm_eh": {
+      "url": "https://extensions.duckdb.org/v2.0.0/wasm_eh/quack.duckdb_extension.wasm",
+      "sha256": "1d839f9e21f46fea0d0a59da4ae6e97b4598defefa3b209a4c42f9129e62c2d0"
+    },
+    "wasm_threads": {
+      "url": "https://extensions.duckdb.org/v2.0.0/wasm_threads/quack.duckdb_extension.wasm",
+      "sha256": "2305a504a059863e8e89ad28eb11e69d9f3e89b1e38b28772996a92decd33a38"
+    }
+  }
+}

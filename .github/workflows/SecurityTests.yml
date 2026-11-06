@@ -1,0 +1,48 @@
+name: Native security regressions and dependency audit
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  rust-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --version 0.22.0 --locked
+      # Keep the original findings visible. No ignore flag or success override.
+      - run: cargo audit --file opaque-client/Cargo.lock --json > cargo-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cargo-audit
+          path: cargo-audit.json
+          if-no-files-found: error
+  native-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path opaque-client/Cargo.toml
+      - run: make release GEN=ninja OVERRIDE_GIT_DESCRIBE=v2.0.0
+      - run: build/release/duckdb -c 'INSTALL httpfs; INSTALL quack;'
+      - name: Build against the exact host, HTTPFS and Quack artifacts
+        run: |
+          platform=$(build/release/duckdb -csv -noheader -c 'PRAGMA platform;')
+          cmake -S test/cpp -B build/security-tests -G Ninja \
+            -DBOILSTREAM_INTEGRATION_TESTS=ON \
+            -DEXTENSION_BUILD_DIR="$PWD/build/release" \
+            -DDUCKDB_SOURCE_DIR="$PWD/duckdb" \
+            -DBOILSTREAM_HTTPFS_EXTENSION_PATH="$HOME/.duckdb/extensions/v2.0.0/$platform/httpfs.duckdb_extension" \
+            -DBOILSTREAM_QUACK_EXTENSION_PATH="$HOME/.duckdb/extensions/v2.0.0/$platform/quack.duckdb_extension"
+          cmake --build build/security-tests --parallel 2
+      - run: ctest --test-dir build/security-tests --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-security-results
+          path: build/security-tests/Testing/Temporary/LastTest.log

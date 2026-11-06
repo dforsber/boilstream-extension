@@ -1,158 +1,83 @@
-# DuckDB WASM Extension Test - Current Status
+# DuckDB 2.0 WASM qualification
 
-**Date:** 2025-10-26
-**Status:** ⚠️ Extension loading fails with symbol mismatch
+Last executed: **2026-11-06**, macOS ARM64, Node 24.18.0, Playwright 1.65.0 Chromium.
 
-## Test Infrastructure ✅
+The exact engine, npm package, source revisions, Emscripten and Rust toolchains
+are recorded in [baseline.json](baseline.json). Both workers queried **v2.0.0**.
+This supersedes the old DuckDB 1.4.1/CDN smoke-test status.
 
-Successfully created and configured:
+| Validation | Result |
+|---|---|
+| `./build-wasm-fixed.sh wasm_eh` | Passed, Emscripten 6.0.9 |
+| `./build-wasm-fixed.sh wasm_threads` | Passed, including Rust std rebuilt with atomics |
+| `npm test --prefix test/wasm`: harness | 12 passed |
+| Chromium `wasm_eh` | 68 checks passed |
+| Chromium `wasm_threads` | 70 checks passed, two query threads enabled after loading |
+| Core Quack EH | 68 checks passed, including load, secret type ownership and client secret creation |
+| Core Quack threads | **Unsupported**: pinned artifact imports non-shared memory; 67 recovery/regression checks pass |
+| `npm run test:compatibility` | **Fails** for threaded Quack; EH passes. This is a release gate, not an allowed failure |
+| Rust WASM C FFI, archive from each variant | 26 base / 27 threaded assertions; threaded suite executes on a pthread |
+| `cargo test --locked --manifest-path opaque-client/Cargo.toml` | 31 tests passed, including complete C-ABI OPAQUE exchanges |
+| `npm audit --prefix test/wasm` | 0 vulnerabilities |
+| `cargo audit --file opaque-client/Cargo.lock` | **Fails:** RUSTSEC-2026-0387; see security audit |
 
-1. ✅ **Browser-based test**: `test-wasm-browser.html`
-2. ✅ **HTTP server**: `server.js` (serves on port 8080)
-3. ✅ **DuckDB WASM loading**: Using latest version from CDN
-4. ✅ **Configuration**: `allowUnsignedExtensions: true` properly set
-5. ✅ **Format detection**: Automatically matches wasm_eh/wasm_mvp/wasm_threads
+The browser runs use a clean lockfile installation with no runtime patches.
+Both extension artifacts are compiled from the pinned DuckDB source. There is
+no metadata relabeling, stale artifact fallback, or missing-artifact skip.
+GitHub Actions now builds/tests/uploads both variants; the workflow itself has
+not yet been executed on GitHub during this local review.
 
-## What Works ✅
+## Required threaded startup order
 
-- DuckDB WASM loads successfully from CDN (latest version)
-- Worker creation with blob URL (avoids CORS)
-- Database instantiation with proper configuration
-- Connection and basic queries work (`SELECT 42`)
-- Extension file fetching from localhost server
-- `INSTALL` command succeeds
-- Version and format matching (v1.4.1, wasm_eh)
+Instantiate the threaded bundle, open with `maximumThreads: 1`, load BoilStream,
+then execute `SET threads = 2`. All threaded SQL regressions run after enabling
+two query threads, including one million per-row authorization denials from a materialized table
+(the range generator is single-threaded). The table offers multiple row groups
+to the worker pool; individual browser operator threads are not instrumented.
 
-## Current Issue ❌
+Opening with two threads **before** `LOAD` repeatedly stalled at dynamic-library
+loading and hit the 90-second deadline. A diagnostic build passed once, which
+was not accepted as qualification. The qualified startup order avoids that
+observed synchronization problem. Loading into an already active worker pool
+remains an open runtime compatibility issue; this suite does not claim it works.
 
-### Error
+## Coverage decisions
+
+| Area | Executed coverage / remaining boundary |
+|---|---|
+| Engine / ABI | Actual version and platform, extension load and registration, corrupted artifact rejection |
+| Harness guards | Wrong engine baseline, missing artifact, wrong query/error results, unsupported directives, cleanup |
+| Shared SQL | Every case in `boilstream_pragmas.test`, `boilstream_grammar.test`, `quack_bridge.test` |
+| Platform differences | Explicit `# wasm-error:` assertions for native-only managed attachment; no skipped statements |
+| Unauthenticated isolation | Two connections expose no BoilStream secrets or guessed authentication results; queries recover after rejection |
+| Quack bridge | No host verifier means no authentication, authorization or sessions; threaded scan also denies every row |
+| Optional dependency | Local repository fixture returns 404 for Quack; BoilStream remains usable |
+| Rust WASM FFI | Production C header, OPAQUE request sizes/randomness, invalid pointers/messages, no key output on failure, RFC 4231 HMAC and canonical SHA256 vector |
+| Test server | Loopback binding, exact asset routes, traversal rejection, range handling, isolation headers, no credential proxy |
+| Quack integration SQL | Both files pass natively with core Quack. Browser suite explicitly excludes native attachment SQL; EH tests Quack loading/secret creation separately, threads compatibility fails |
+| Full authentication | Successful server-backed OPAQUE login, encrypted response/signature verification, refresh/rotation, authenticated connection isolation and remote catalogs still require a protocol/integration fixture |
+| Native C++ suite | 19 executables and all five SQL files pass against stock DuckDB 2.0 on macOS ARM64 and Linux ARM64, with zero SQL skips. These do not substitute for browser authentication qualification |
+
+The inventory check fails when a new SQL test file appears without a browser
+coverage decision. These checks close the identified smoke-test gaps, but do
+not establish gap-free authentication coverage or absence of security flaws.
+
+See [README.md](README.md) for commands and
+[../../SECURITY_AUDIT.txt](../../SECURITY_AUDIT.txt) for open production findings.
+
+## Core Quack repository and artifact evidence
+
+`INSTALL quack` uses the core repository. An earlier community-repository 404
+was a repository-selection error, not absence of the native artifact.
+Native v2.0.0 artifacts report Quack revision `f96420ed46`. Browser URLs and
+SHA256 digests are pinned in `baseline.json`. Both official WASM files exist.
+The threaded artifact fails with:
+
 ```
-IO Error: Extension could not be loaded: Could not load dynamic lib: boilstream
-LinkError: WebAssembly.Instance(): Import #5 "env"
-"_ZN6duckdb17InternalExceptionC2IJyyEEERKNSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEDpT_":
-imported function does not match the expected type
-```
-
-### Analysis
-
-This is a **symbol/ABI mismatch error**:
-
-1. **Symbol Name**: `_ZN6duckdb17InternalExceptionC2IJyyEEE...`
-   - This is a mangled C++ symbol for `duckdb::InternalException` constructor
-   - The template parameters suggest it's being instantiated with `<unsigned long long, unsigned long long>`
-
-2. **Root Cause**: The extension expects a different function signature than what DuckDB WASM provides
-
-### Possible Causes
-
-1. **Compiler Mismatch**:
-   - Extension built with different compiler version/flags than DuckDB WASM
-   - Different C++ standard library (libc++ vs libstdc++)
-
-2. **DuckDB Version Mismatch**:
-   - Even though both claim v1.4.1, there might be API differences
-   - Browser WASM build might have different ABI than the extension was built against
-
-3. **Build Configuration**:
-   - Different Emscripten flags used
-   - Different optimization levels
-   - Different exception handling settings (wasm_eh vs wasm_mvp)
-
-## Build Details
-
-### Extension Build
-- Path: `build/wasm_eh/repository/v1.4.1/wasm_eh/boilstream.duckdb_extension.wasm`
-- Size: 318 KB (wasm_threads version)
-- Built for: DuckDB v1.4.1
-- Format: wasm_eh (exception handling)
-
-### DuckDB WASM
-- Version: Latest from CDN (@duckdb/duckdb-wasm@latest)
-- Based on: DuckDB v1.4.1
-- Format: wasm_eh (auto-detected)
-- Bundle: `duckdb-browser-eh.worker.js`
-
-## Test Flow
-
-```
-1. Load DuckDB WASM from CDN ✅
-2. Create worker with blob URL ✅
-3. Instantiate DuckDB ✅
-4. Open with allowUnsignedExtensions=true ✅
-5. Connect to database ✅
-6. Run basic query (SELECT 42) ✅
-7. Fetch extension from http://localhost:8080 ✅
-8. INSTALL extension ✅
-9. LOAD extension ❌ <- Fails here with LinkError
+LinkError: WebAssembly.Instance(): Import #0 "env" "memory": mismatch in shared state of memory, declared = 0, imported = 1
 ```
 
-## Next Steps to Debug
-
-### Option 1: Check Build Compatibility
-```bash
-# Verify extension was built with correct flags
-cd build/wasm_eh
-wasm-objdump -x extension/boilstream/boilstream.duckdb_extension.wasm | grep import
-
-# Check what symbols the extension expects
-nm build/wasm_eh/extension/boilstream/boilstream.duckdb_extension.wasm | grep InternalException
-```
-
-### Option 2: Build Extension with Exact DuckDB WASM Configuration
-
-The extension needs to be built using the **exact same configuration** as DuckDB WASM:
-- Same Emscripten version
-- Same compiler flags
-- Same DuckDB source version
-- Same exception handling mode
-
-Check DuckDB WASM build configuration:
-- https://github.com/duckdb/duckdb-wasm/blob/main/Makefile
-- https://github.com/duckdb/duckdb-wasm/blob/main/.github/workflows/
-
-### Option 3: Try Different WASM Format
-
-Currently using `wasm_eh`. Try:
-- `wasm_mvp` (simpler, no exception handling)
-- `wasm_threads` (with threading support)
-
-### Option 4: Verify DuckDB Version Match
-
-Check the actual DuckDB version used by duckdb-wasm:
-```javascript
-const version = await conn.query("SELECT version()");
-console.log(version);
-```
-
-Compare with extension build version.
-
-## Test Commands
-
-### Start Server
-```bash
-cd test/wasm
-npm run serve
-```
-
-### Open Test
-```
-http://localhost:8080/test-wasm-browser.html
-```
-
-### Check Extension File
-```bash
-ls -lh build/wasm_eh/repository/v1.4.1/wasm_eh/boilstream.duckdb_extension.wasm
-```
-
-## Files
-
-- `test-wasm-browser.html` - Browser test with detailed logging
-- `server.js` - HTTP server with CORS and WASM headers
-- `package.json` - Dependencies and scripts
-- `README.md` - Full documentation
-
-## Conclusion
-
-The test infrastructure is working perfectly. The issue is an **ABI compatibility problem** between the extension build and DuckDB WASM. The extension needs to be rebuilt using the exact same build configuration as DuckDB WASM to ensure symbol compatibility.
-
-The error is not in the test setup but in the extension build process itself.
+Regression acceptance requires the exact artifact hash, this worker diagnostic,
+the expected SQL loader error, unloaded Quack metadata, and successful subsequent
+BoilStream/SQL checks. The strict command never accepts this exception. We have
+not patched the artifact, changed its metadata, or changed DuckDB libraries.

@@ -12,6 +12,7 @@
 #define TEST_TENANT_CONTEXT 1
 #endif
 #include <atomic>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -70,7 +71,20 @@ struct Fixture {
 	TripwireFS *fs;
 	Fixture() {
 		SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
+#ifdef TEST_TENANT_CONTEXT
 		Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
+#else
+		const char *artifact = std::getenv("BOILSTREAM_HTTPFS_EXTENSION_PATH");
+		Require(artifact && *artifact);
+		string quoted;
+		for (auto c : string(artifact)) {
+			quoted += c;
+			if (c == '\'')
+				quoted += c;
+		}
+		auto loaded = connection.Query("LOAD '" + quoted + "'");
+		Require(loaded && !loaded->HasError());
+#endif
 		auto transport = connection.Query("SET httpfs_client_implementation='curl'");
 		Require(transport && !transport->HasError());
 		// The loopback fixture is plain HTTP; with verification on, httpfs 2.0 would probe the

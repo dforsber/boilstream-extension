@@ -1,0 +1,203 @@
+{
+  "as_of": "2026-11-06",
+  "duckdb_revision": "d54cbbe3df17e8e5ce68312f483b4155836112aa",
+  "scope": "All host third_party source directories, including build/test-only code. This is not a loadable-artifact SBOM or a clean vulnerability certification. Each source tree is exactly identified even where upstream package version is unavailable.",
+  "components": [
+    {
+      "name": "brotli",
+      "source_path": "duckdb/third_party/brotli",
+      "git_tree": "b98679bf023fcfa69a86943482b560842cfcd06d",
+      "upstream_version": "1.1.0",
+      "assessment": "affected: CVE-2026-111497; host Parquet"
+    },
+    {
+      "name": "catch",
+      "source_path": "duckdb/third_party/catch",
+      "git_tree": "c1eb03b231af38ff05f4d20396c2a982cee68474",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "concurrentqueue",
+      "source_path": "duckdb/third_party/concurrentqueue",
+      "git_tree": "fac1a4c99857c4b4521b1bd843ba6200bdb1c26c",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "fast_float",
+      "source_path": "duckdb/third_party/fast_float",
+      "git_tree": "8a6193adc187cd2e303c795e9161702c389f616e",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "fastpforlib",
+      "source_path": "duckdb/third_party/fastpforlib",
+      "git_tree": "4ee8f331371e82115f628ca2400cf50340264ea2",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "fmt",
+      "source_path": "duckdb/third_party/fmt",
+      "git_tree": "555344505c7dde26da137fc3bd95d79e6f887259",
+      "upstream_version": "6.1.2",
+      "assessment": "fmt::say affected range excludes this version"
+    },
+    {
+      "name": "fsst",
+      "source_path": "duckdb/third_party/fsst",
+      "git_tree": "da3ee6a3da036674321aebbc0e9447ad21da82f2",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "httplib",
+      "source_path": "duckdb/third_party/httplib",
+      "git_tree": "fc2e46cbb8c8a076628fb8c2ed1b173bb01c4349",
+      "upstream_version": "0.53.1",
+      "assessment": "upstream published advisories inspected; no applicable match found"
+    },
+    {
+      "name": "hyperloglog",
+      "source_path": "duckdb/third_party/hyperloglog",
+      "git_tree": "f1b36a424f8a3800aa177a1e2ec0f12b4fea09a7",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "imdb",
+      "source_path": "duckdb/third_party/imdb",
+      "git_tree": "f1dc25a0cab063acb79b0298224389d9e24f92c1",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "jaro_winkler",
+      "source_path": "duckdb/third_party/jaro_winkler",
+      "git_tree": "25bc4edfe8729115ef335e5f3ffaa1c1e0fc5688",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "jemalloc",
+      "source_path": "duckdb/third_party/jemalloc",
+      "git_tree": "850863632f9b578c5713152b01e1308aa5cdd65e",
+      "upstream_version": "5.3.0-196-ga25b9b8b",
+      "assessment": "version identified; advisory coverage incomplete"
+    },
+    {
+      "name": "lz4",
+      "source_path": "duckdb/third_party/lz4",
+      "git_tree": "47659754ef0c884322805a3fcf29336073f1dafb",
+      "upstream_version": "1.9.4",
+      "assessment": "version identified; advisory coverage incomplete"
+    },
+    {
+      "name": "mbedtls",
+      "source_path": "duckdb/third_party/mbedtls",
+      "git_tree": "03e5d5e5b8d9abc528040d5f961a0d18fdf29a4e",
+      "upstream_version": "3.6.7",
+      "assessment": "security release and compiled crypto subset inspected"
+    },
+    {
+      "name": "miniz",
+      "source_path": "duckdb/third_party/miniz",
+      "git_tree": "cc87ec7a98a51222b446ece8b8fc5b529fccc4bc",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "parquet",
+      "source_path": "duckdb/third_party/parquet",
+      "git_tree": "5098a69cf964cd95a9f92e980c8a80889c0862df",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "pcg",
+      "source_path": "duckdb/third_party/pcg",
+      "git_tree": "68347cc8307f636caabd1d658f72cdf84e6562a1",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "pdqsort",
+      "source_path": "duckdb/third_party/pdqsort",
+      "git_tree": "9f2be9c73ff9deea2590703ce3d1ec57d244423e",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "re2",
+      "source_path": "duckdb/third_party/re2",
+      "git_tree": "baad3cd9b61cc560a4e0b9e2493bffeff66e9073",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "ska_sort",
+      "source_path": "duckdb/third_party/ska_sort",
+      "git_tree": "74e5d2bbb29922f43565f20bea5b2f92cb43fd95",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "skiplist",
+      "source_path": "duckdb/third_party/skiplist",
+      "git_tree": "d74344be1b44e2a3f3c61a83816e8128a829907a",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "snappy",
+      "source_path": "duckdb/third_party/snappy",
+      "git_tree": "2b52eb9f4a65bbc69ba81a8a4e39f69bfd521e77",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "tdigest",
+      "source_path": "duckdb/third_party/tdigest",
+      "git_tree": "8d1e3523b6e5d466080576b5a0ca7798e050a444",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "thrift",
+      "source_path": "duckdb/third_party/thrift",
+      "git_tree": "cbfd9f7d7eb15efa8e3a93e3eeeace7ebb8e608d",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "utf8proc",
+      "source_path": "duckdb/third_party/utf8proc",
+      "git_tree": "6ec555c43f18070885fe8377cbb2000fe02fdb55",
+      "upstream_version": "2.9.0",
+      "assessment": "version identified; advisory coverage incomplete"
+    },
+    {
+      "name": "vergesort",
+      "source_path": "duckdb/third_party/vergesort",
+      "git_tree": "f74a3182458aafa211bdffae8d1ead6fac767fb2",
+      "upstream_version": null,
+      "assessment": "pinned source identified; upstream version/advisory coverage incomplete"
+    },
+    {
+      "name": "yyjson",
+      "source_path": "duckdb/third_party/yyjson",
+      "git_tree": "4dfdfe2f733af226d396daa29878e9d55c20f5cf",
+      "upstream_version": "0.9.0",
+      "assessment": "affected: GHSA-f4vc-345x-4mvm; candidate parser size excludes prerequisite"
+    },
+    {
+      "name": "zstd",
+      "source_path": "duckdb/third_party/zstd",
+      "git_tree": "2b48948ee3ed2fbf6041da532c4ba953fbb11ef1",
+      "upstream_version": "1.5.6",
+      "assessment": "version identified; advisory coverage incomplete"
+    }
+  ]
+}

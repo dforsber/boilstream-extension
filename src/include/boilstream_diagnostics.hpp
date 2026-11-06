@@ -39,8 +39,9 @@ template <size_t N>
 		if (it != error.ExtraInfo().end() && it->second.size() == 3) {
 			const auto &value = it->second;
 			if (value[0] >= '1' && value[0] <= '5' && value[1] >= '0' && value[1] <= '9' && value[2] >= '0' &&
-			    value[2] <= '9')
+			    value[2] <= '9') {
 				status = (value[0] - '0') * 100 + (value[1] - '0') * 10 + value[2] - '0';
+			}
 		}
 	} catch (...) { /* Never fall back to the original exception text. */
 	}
@@ -50,8 +51,9 @@ template <size_t N>
 // This allowlist intentionally defaults unknown future messages to redaction.
 inline string BoilstreamPrivateErrorMessageUnwrapped(const ErrorData &error) {
 	if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::INVALID_INPUT &&
-	    error.Type() != ExceptionType::HTTP)
+	    error.Type() != ExceptionType::HTTP) {
 		return "";
+	}
 	static const char *const public_messages[] = {
 	    "Authentication result ID is required",
 	    "Authentication result is unavailable",
@@ -111,22 +113,26 @@ inline string BoilstreamPrivateErrorMessageUnwrapped(const ErrorData &error) {
 	    "rest_set_endpoint: URL must use HTTPS (or localhost for testing)",
 	};
 	for (const auto message : public_messages) {
-		if (error.RawMessage() == message)
+		if (error.RawMessage() == message) {
 			return message;
+		}
 	}
 	string status;
 	auto entry = error.ExtraInfo().find("status_code");
-	if (entry != error.ExtraInfo().end() && entry->second.size() == 3)
+	if (entry != error.ExtraInfo().end() && entry->second.size() == 3) {
 		status = entry->second;
+	}
 	// ProcessError may run again after a safe exception crosses an API boundary.
 	// Recognize only our exact canonical form, never arbitrary HTTP error text.
 	const string prefix = "Authentication request failed: HTTP ";
 	if (status.empty() && error.RawMessage().size() == prefix.size() + 3 &&
-	    error.RawMessage().compare(0, prefix.size(), prefix) == 0)
+	    error.RawMessage().compare(0, prefix.size(), prefix) == 0) {
 		status = error.RawMessage().substr(prefix.size());
+	}
 	if (status.size() == 3 && status[0] >= '1' && status[0] <= '5' && status[1] >= '0' && status[1] <= '9' &&
-	    status[2] >= '0' && status[2] <= '9')
+	    status[2] >= '0' && status[2] <= '9') {
 		return prefix + status;
+	}
 	return "";
 }
 
@@ -136,12 +142,14 @@ inline string BoilstreamPrivateErrorMessage(const ErrorData &error) {
 	// the same public allowlist; never forward the envelope or its extra info.
 	const auto &raw = error.RawMessage();
 	if (!raw.empty() && raw[0] == '{') {
-		if (raw.size() > 1024)
+		if (raw.size() > 1024) {
 			return "";
+		}
 		try {
 			ErrorData decoded(raw);
-			if (decoded.Type() != error.Type())
+			if (decoded.Type() != error.Type()) {
 				return "";
+			}
 			return BoilstreamPrivateErrorMessageUnwrapped(decoded);
 		} catch (...) {
 			return "";

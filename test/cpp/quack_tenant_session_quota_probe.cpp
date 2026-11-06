@@ -65,8 +65,8 @@ int main() {
 			registry.Finish(std::move(admission), false);
 			Require(bool(registry.ReserveQuota("after-failure", Tenant(11), 1)), "rollback leaked charge");
 		}
-		std::atomic<bool> start{false};
-		std::atomic<unsigned> ready{0}, admitted{0};
+		std::atomic<bool> start {false};
+		std::atomic<unsigned> ready {0}, admitted {0};
 		std::vector<std::thread> threads;
 		std::vector<std::shared_ptr<duckdb::QuackTenantSessionQuota::Lease>> retained(16);
 		for (size_t i = 0; i < retained.size(); ++i)

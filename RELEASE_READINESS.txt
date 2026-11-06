@@ -1,0 +1,106 @@
+BoilStream 0.8.1 candidate — 2026-11-06
+
+Decision: NOT READY TO PUBLISH. No release, tag, push or community PR was made.
+Changes are on codex/release-0.8.1-hardening. DuckDB source/libraries are unchanged,
+as requested. Host dependency/provider findings are explicitly deferred, not fixed.
+
+Plain-English repair completed
+
+- Erase extension-owned temporary credentials when work finishes or throws, including
+  JSON reader/writer allocations, binary serialization, HTTP copies, OPAQUE state,
+  managed tokens and Rust plaintext/TOTP buffers. Erase old buffers during growth.
+- Correct Rust/C++ return widths for Windows, test C-char signedness for Linux ARM,
+  and a missing standard header that the Linux compiler exposed.
+- Test the real DuckDB 2.0 browser bundles and exact extension builds. Fetch Quack
+  from the core repository, verify browser artifact hashes, and exercise successful
+  native/EH integration as well as absence/failure recovery.
+- Repair the quality gate: the shared tidy regex selected zero flat source files.
+  The replacement verifies all five production translation units are present in
+  the compilation database before running clang-tidy, including extension headers.
+
+Local release checks
+
+The local distribution build/test commands use the pinned extension-ci-tools
+revision ae971e03c1840a1c6c2d81b91d1ec851f297f720 and DuckDB v2.0.0 at
+ d54cbbe3df17e8e5ce68312f483b4155836112aa.
+
+- macOS ARM64: release build; CI driver's test phase; all five SQL files pass,
+  zero skipped; all 19 native CTest executables pass.
+- Linux ARM64: Ubuntu 24.04 Docker, GCC 13, Rust 1.97.1; CI driver's build phase;
+  same five SQL files and 19 native executables pass. Upstream driver skips ARM64
+  tests, so make test_release and CTest were explicitly run locally.
+- Rust: 31 tests pass on macOS and Linux ARM64, including successful production
+  C-ABI OPAQUE exchange, wrong-password and modified-proof rejection.
+- WASM: both variants rebuild with Emscripten 6.0.9 and baseline-pinned Rust;
+  12 harness tests, 68 EH and 70 threaded base browser checks pass.
+- Core Quack: native integration and 68 EH browser checks pass. The official
+  threaded artifact imports non-shared memory and cannot load in the threaded
+  runtime. Its exact pinned failure plus 67 recovery checks pass; compatibility
+  itself is UNSUPPORTED. npm run test:compatibility fails on this artifact.
+- Rust WASM FFI: 26 EH / 27 threaded assertions pass, including real pthread work.
+- Format and npm audit pass (zero npm findings). Raw cargo audit still fails on
+  RUSTSEC-2026-0387; no ignore or success override was added.
+- clang-tidy passes all five production translation units (10 static/loadable
+  compile commands) with extension headers. Captured logs, artifact hashes and
+  machine-readable results: build/release-checks/results.json.
+
+This is local execution of the available release gates, not a claim that the full
+remote distribution matrix passed. Windows and x86_64 distribution builds and
+central community signing/deployment have not been executed in this review.
+
+Remaining release decisions/evidence
+
+1. Rust advisory: obtain a compatible patched dependency chain or an explicit,
+   reviewed applicability disposition. The Ristretto source-path assessment is
+   scripts/security/RUSTSEC-2026-0387.txt; cargo audit remains visibly failing.
+2. Threaded Quack: require a corrected upstream artifact and requalify its hash,
+   or explicitly change the advertised/platform support policy. We did neither
+   silently. The strict release compatibility step fails until resolved.
+3. Threaded startup order: currently load before SET threads=2. Loading into an
+   already active worker pool stalled in the pinned runtime; this remains a
+   documented compatibility restriction, not a repaired DuckDB runtime.
+4. Successful browser server-backed OPAQUE, encrypted response verification,
+   rotation, authenticated tenant isolation and remote catalog flows still need
+   an integration environment/fixture. Native crypto and browser negative tests
+   do not establish this coverage. Do not describe the suite as gap-free.
+5. Run the exact reviewed commit through remaining Windows/x86_64 distribution
+   jobs and central community CI before publishing.
+
+Deferred host boundary
+
+Brotli/yyjson advisories and provider allocation before POST/DELETE/GET-error
+callbacks remain in DuckDB/HTTPFS. The user explicitly deferred host-library work.
+The 10 MiB cap concerns authentication/secret-service responses, NOT general SQL
+query result size. It does not promise to bound allocations inside the provider.
+See SECURITY_AUDIT.txt for severity, applicability and source evidence.
+
+Publishing mechanism
+
+Current community descriptor: version 0.8.0, source ref
+136d08cd83e9f77ccf7f4ca7ccc7477723cb490c.
+https://github.com/duckdb/community-extensions/blob/main/extensions/boilstream/description.yml
+
+After qualification, commit the reviewed candidate and submit a community PR:
+  extension.version: 0.8.1
+  extension.excluded_platforms: wasm_mvp
+  repo.ref: the exact reviewed and tested 40-character commit SHA
+
+The central community build/sign/deploy pipeline publishes the extension. A local
+version bump or Git tag does not. This checkout's exclude_archs setting does not
+update the central descriptor. Also update its outdated DuckLake/refresh-token
+and blanket TLS-compromise descriptions to match the reviewed behavior.
+https://duckdb.org/community_extensions/development#publishing
+
+Three independent inline reviews
+
+Security: JSON writer/state exception gaps and Rust plaintext/TOTP copies were
+identified, fixed and re-reviewed. No further blocking finding in the scoped
+extension-owned cleanup; host/provider internals and advisories remain excluded.
+
+Test quality: corrected exception-test false passes, checked every stream byte,
+and observed actual writer reallocations being erased. Pinned threaded Quack
+failure is distinguished from compatibility success; strict release gate rejects it.
+
+Release/portability: verified core Quack integration CI, Rust isize/intptr_t ABI,
+complete production-source tidy coverage, pinned CI tools and unchanged DuckDB.
+Source review does not replace executing Windows or central deployment checks.

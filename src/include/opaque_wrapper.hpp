@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
+#include "boilstream_security.hpp"
 
 #include "opaque_client.h"
 #include "duckdb/common/types/blob.hpp"
@@ -66,6 +67,7 @@ public:
 			return "";
 		}
 		string buffer_str(reinterpret_cast<const char *>(buffer.data), buffer.len);
+		boilstream::WipeOnExit wipe(buffer_str);
 		return Blob::ToBase64(string_t(buffer_str));
 	}
 
@@ -92,6 +94,11 @@ struct RegistrationStartResult {
 
 // Result of registration finish
 struct RegistrationFinishResult {
+	RegistrationFinishResult &operator=(const RegistrationFinishResult &) = delete;
+	~RegistrationFinishResult() {
+		boilstream::Wipe(registration_upload_base64);
+		boilstream::Wipe(export_key_base64);
+	}
 	string registration_upload_base64; // RegistrationUpload serialized and base64-encoded
 	string export_key_base64;          // Export key base64-encoded
 };
@@ -104,6 +111,12 @@ struct LoginStartResult {
 
 // Result of login finish
 struct LoginFinishResult {
+	LoginFinishResult &operator=(const LoginFinishResult &) = delete;
+	~LoginFinishResult() {
+		boilstream::Wipe(credential_finalization_base64);
+		boilstream::Wipe(session_key_base64);
+		boilstream::Wipe(export_key_base64);
+	}
 	string credential_finalization_base64; // CredentialFinalization serialized and base64-encoded
 	string session_key_base64;             // Session key base64-encoded
 	string export_key_base64;              // Export key base64-encoded

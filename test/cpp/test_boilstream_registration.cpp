@@ -90,7 +90,7 @@ TEST_CASE("registration_build_totp_uri - default issuer", "[registration][ffi]")
 	const char *secret = "JBSWY3DPEHPK3PXP";
 	char uri_buffer[512];
 
-	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
+	auto result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
 	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
@@ -110,7 +110,7 @@ TEST_CASE("registration_build_totp_uri - custom issuer", "[registration][ffi]") 
 	const char *issuer = "MyCompany";
 	char uri_buffer[512];
 
-	long result = registration_build_totp_uri(email, secret, issuer, uri_buffer, sizeof(uri_buffer));
+	auto result = registration_build_totp_uri(email, secret, issuer, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
 	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
@@ -126,7 +126,7 @@ TEST_CASE("registration_build_totp_uri - buffer too small", "[registration][ffi]
 	const char *secret = "SECRET";
 	char small_buffer[10]; // Too small
 
-	long result = registration_build_totp_uri(email, secret, nullptr, small_buffer, sizeof(small_buffer));
+	auto result = registration_build_totp_uri(email, secret, nullptr, small_buffer, sizeof(small_buffer));
 
 	REQUIRE(result == -1); // Should fail with buffer too small
 }
@@ -154,7 +154,7 @@ TEST_CASE("registration_build_totp_uri - special characters in email", "[registr
 	const char *secret = "SECRET";
 	char uri_buffer[512];
 
-	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
+	auto result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
 	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
@@ -169,7 +169,7 @@ TEST_CASE("registration_build_totp_uri - verify null termination", "[registratio
 	char uri_buffer[512];
 	memset(uri_buffer, 'X', sizeof(uri_buffer)); // Fill with junk
 
-	long result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
+	auto result = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(result > 0);
 	REQUIRE(static_cast<size_t>(result) < sizeof(uri_buffer));
@@ -195,7 +195,7 @@ TEST_CASE("registration flow validation", "[registration][integration]") {
 	// Step 3: Build TOTP URI
 	const char *secret = "JBSWY3DPEHPK3PXP";
 	char uri_buffer[512];
-	long uri_len = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
+	auto uri_len = registration_build_totp_uri(email, secret, nullptr, uri_buffer, sizeof(uri_buffer));
 
 	REQUIRE(uri_len > 0);
 	REQUIRE(static_cast<size_t>(uri_len) < sizeof(uri_buffer));
