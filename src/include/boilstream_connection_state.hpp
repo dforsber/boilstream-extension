@@ -19,6 +19,9 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <thread>
 
 namespace duckdb {
 
@@ -123,35 +126,64 @@ public:
 	//! Last time catalog versions were checked
 	std::chrono::system_clock::time_point last_version_check;
 
-	//! Recursion guard flag - prevents re-entrant secret lookups that cause stack overflow
-	//! Uses atomic for thread safety (especially important in WASM async context)
+	//! Local callbacks can re-enter on another worker: never wait for them.
 	std::atomic<bool> in_secret_lookup {false};
 
-	//! RAII guard for secret lookup recursion prevention
+private:
+	std::mutex remote_lookup_mutex;
+	std::condition_variable remote_lookup_changed;
+	std::thread::id remote_lookup_owner;
+	bool remote_lookup_active = false;
+
+public:
+	//! Remote requests sharing one OPAQUE session must retain lock-step order.
+	//! Refuse true same-thread recursion, but queue independent file workers.
 	class SecretLookupGuard {
 	public:
-		SecretLookupGuard(BoilstreamConnectionState &state) : state_(state), acquired_(false) {
-			// Try to acquire the guard - if already held, we're in recursion
-			bool expected = false;
-			acquired_ = state_.in_secret_lookup.compare_exchange_strong(expected, true);
+		explicit SecretLookupGuard(BoilstreamConnectionState &state, const std::function<bool()> &cancelled = {})
+		    : state_(state), acquired_(false), remote_(!state.IsLocalSession()) {
+			if (!remote_) {
+				bool expected = false;
+				acquired_ = state_.in_secret_lookup.compare_exchange_strong(expected, true);
+				return;
+			}
+			std::unique_lock<std::mutex> lock(state_.remote_lookup_mutex);
+			const auto thread = std::this_thread::get_id();
+			while (state_.remote_lookup_active) {
+				if (state_.remote_lookup_owner == thread || (cancelled && cancelled()))
+					return;
+				state_.remote_lookup_changed.wait_for(lock, std::chrono::milliseconds(10));
+			}
+			if (cancelled && cancelled())
+				return;
+			state_.remote_lookup_active = true;
+			state_.remote_lookup_owner = thread;
+			acquired_ = true;
 		}
 		~SecretLookupGuard() {
-			if (acquired_) {
+			if (!acquired_)
+				return;
+			if (!remote_) {
 				state_.in_secret_lookup.store(false);
+				return;
 			}
+			{
+				std::lock_guard<std::mutex> lock(state_.remote_lookup_mutex);
+				state_.remote_lookup_active = false;
+				state_.remote_lookup_owner = std::thread::id();
+			}
+			state_.remote_lookup_changed.notify_all();
 		}
-		//! Returns true if we successfully acquired the guard (not in recursion)
 		bool Acquired() const {
 			return acquired_;
 		}
-
-		// Prevent copying
 		SecretLookupGuard(const SecretLookupGuard &) = delete;
 		SecretLookupGuard &operator=(const SecretLookupGuard &) = delete;
 
 	private:
 		BoilstreamConnectionState &state_;
 		bool acquired_;
+		bool remote_;
 	};
 
 	//========================================================================

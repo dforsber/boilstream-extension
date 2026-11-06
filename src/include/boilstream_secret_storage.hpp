@@ -264,6 +264,9 @@ private:
 		shared_ptr<BoilstreamSecretCache> cache;
 	};
 	SecretOwner GetSecretOwner(optional_ptr<CatalogTransaction> transaction, bool create = false);
+	bool SecretOwnerStillCurrent(optional_ptr<CatalogTransaction> transaction, const SecretOwner &owner,
+	                             uint64_t generation);
+
 	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
 	SecretMatch LookupCachedSecret(const string &path, const string &type,
 	                               const shared_ptr<BoilstreamSecretCache> &cache);

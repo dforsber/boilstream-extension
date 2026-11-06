@@ -38,3 +38,11 @@ failed-code retry, successful MFA consumption and retry after failed signup.
 It checks request counts and cookie ownership without printing credentials.
 It examines the returned QR SQL without executing optional textplot installation.
 Live authentication, browser runtime and full product qualification remain separate.
+
+## Concurrent remote secret lookups
+
+`SecretLookupConcurrency` holds a real signed loopback response while a second
+uncached lookup waits on the same session. It verifies ordered requests, both
+results, unknown-expiry cache behavior, queued expiry/replacement/cancellation,
+and unchanged nonblocking local recursion handling. Run the registered CTest
+case; it starts and drains its own synthetic authority without real credentials.

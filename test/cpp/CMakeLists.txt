@@ -616,6 +616,29 @@ link_rust_dependencies(secret_cache_ownership_test)
 add_test(NAME SecretCacheOwnership COMMAND secret_cache_ownership_test)
 set_tests_properties(SecretCacheOwnership PROPERTIES TIMEOUT 60)
 
+# Same authenticated session, actual HTTP and unknown-expiry secret fetches.
+add_executable(
+  secret_lookup_concurrency_test
+  test_secret_lookup_concurrency.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+target_include_directories(
+  secret_lookup_concurrency_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(
+  secret_lookup_concurrency_test
+  PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+          "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+add_test(
+  NAME SecretLookupConcurrency
+  COMMAND
+    ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_lookup_concurrency.py
+    $<TARGET_FILE:secret_lookup_concurrency_test>)
+set_tests_properties(SecretLookupConcurrency PROPERTIES TIMEOUT 60)
+
 # This integration gate targets the BoilStream fork's required static providers.
 if(EXISTS
    "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")

@@ -299,9 +299,9 @@ string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &cred
 	}
 	return "ATTACH 'quack:" + EscapeManagedAttachLiteral(credential.endpoint) + "' AS " +
 	       QuoteManagedAttachIdentifier(alias) + " (TYPE quack, SECRET '" +
-	       EscapeManagedAttachLiteral("__quack__" + ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id)) +
-	       "', CATALOG_ID '" +
-	       EscapeManagedAttachLiteral(credential.catalog_id) + "', TENANT_ID '" +
+	       EscapeManagedAttachLiteral("__quack__" +
+	                                  ManagedCatalogSecretScope(credential.endpoint, credential.catalog_id)) +
+	       "', CATALOG_ID '" + EscapeManagedAttachLiteral(credential.catalog_id) + "', TENANT_ID '" +
 	       std::to_string(credential.storage_owner_tenant_id) + "', CATALOG_GROUP '" +
 	       EscapeManagedAttachLiteral(credential.catalog_group) +
 	       "', DISABLE_SSL false, HTTP_VERSION '1.1', CATALOG_MODE 'product', READ_ONLY)";
@@ -2236,6 +2236,18 @@ RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(optional_
 	return {nullptr, local ? local->cache : nullptr};
 }
 
+// Waiting for a remote session turn grants no authority. Revalidate both
+// after acquisition and before exposing a result from the completed request.
+bool RestApiSecretStorage::SecretOwnerStillCurrent(optional_ptr<CatalogTransaction> transaction,
+                                                   const SecretOwner &owner, uint64_t generation) {
+	if (!transaction || !transaction->HasContext() || !owner.session || !owner.cache ||
+	    transaction->GetContext().IsInterrupted() || owner.session->authentication_generation.load() != generation)
+		return false;
+	auto current = GetSecretOwner(transaction); // Also verifies tenant and session expiry.
+	return current.session == owner.session && current.cache == owner.cache &&
+	       owner.session->authentication_generation.load() == generation && !transaction->GetContext().IsInterrupted();
+}
+
 shared_ptr<BoilstreamSecretCache> RestApiSecretStorage::GetSecretCache(optional_ptr<CatalogTransaction> transaction,
                                                                        bool create) {
 	return GetSecretOwner(transaction, create).cache;
@@ -2844,12 +2856,16 @@ SecretMatch RestApiSecretStorage::LookupSecret(const string &path, const string 
 	if (StringUtil::Lower(type) == "quack" && path.find("/catalog/") != string::npos) {
 		return LookupQuackSecret(path, transaction); // Managed scopes always fail closed.
 	}
-	auto cache = GetSecretCache(transaction);
+	auto owner = GetSecretOwner(transaction);
+	auto cache = owner.cache;
+	const auto generation = owner.session ? owner.session->authentication_generation.load() : 0;
 	auto cached = LookupCachedSecret(path, type, cache);
 	if (cached.HasMatch() || IsWasmMode())
 		return cached;
 	auto fresh = FetchSecret(path, type, true, transaction, cache);
-	if (GetSecretCache(transaction) != cache)
+	if ((transaction && transaction->HasContext() && transaction->GetContext().IsInterrupted()) ||
+	    (owner.session ? !SecretOwnerStillCurrent(transaction, owner, generation)
+	                   : GetSecretCache(transaction) != cache))
 		return SecretMatch();
 	auto entry = fresh.CopyIfUsable();
 	if (entry) {
@@ -2873,13 +2889,17 @@ unique_ptr<SecretEntry> RestApiSecretStorage::GetSecretByName(const string &name
 		auto match = LookupQuackSecret(path, transaction);
 		return match.HasMatch() ? std::move(match.secret_entry) : nullptr;
 	}
-	auto cache = GetSecretCache(transaction);
+	auto owner = GetSecretOwner(transaction);
+	auto cache = owner.cache;
+	const auto generation = owner.session ? owner.session->authentication_generation.load() : 0;
 	auto owned_entry = cache ? cache->Get(name) : nullptr;
 	auto cached = owned_entry ? make_uniq<SecretEntry>(*owned_entry) : nullptr;
 	if (cached || IsWasmMode())
 		return cached;
 	auto fresh = FetchSecret(name, "", false, transaction, cache);
-	if (GetSecretCache(transaction) != cache)
+	if ((transaction && transaction->HasContext() && transaction->GetContext().IsInterrupted()) ||
+	    (owner.session ? !SecretOwnerStillCurrent(transaction, owner, generation)
+	                   : GetSecretCache(transaction) != cache))
 		return nullptr;
 	auto usable = fresh.CopyIfUsable();
 	if (usable)
@@ -2909,8 +2929,10 @@ RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bo
 	if (!state || !cache || cache != expected_cache || (!state->IsLocalSession() && state->GetEndpointUrl().empty()) ||
 	    in_http_operation)
 		return {};
-	BoilstreamConnectionState::SecretLookupGuard guard(*state);
-	if (!guard.Acquired())
+	const auto generation = state->authentication_generation.load();
+	BoilstreamConnectionState::SecretLookupGuard guard(*state,
+	                                                   [&] { return transaction->GetContext().IsInterrupted(); });
+	if (!guard.Acquired() || !SecretOwnerStillCurrent(transaction, owner, generation))
 		return {};
 	const auto revision = cache->Revision();
 	auto doc = yyjson_mut_doc_new(nullptr);
@@ -2976,7 +2998,7 @@ RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bo
 			return {};
 		}
 		// The captured owner must still be current after network/deserialization.
-		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted())
+		if (!SecretOwnerStillCurrent(transaction, owner, generation))
 			return {};
 		auto entry = BoilstreamSecretCache::PrepareSecret(std::move(secret), response.size());
 		if (expires) {
@@ -2986,6 +3008,8 @@ RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bo
 			// to this request and is never admitted to the reusable cache.
 			cache->Remove(entry->secret->GetName().GetIdentifierName(), revision);
 		}
+		if (!SecretOwnerStillCurrent(transaction, owner, generation))
+			return {};
 		return {std::move(entry), expires};
 	} catch (...) {
 		if (state->IsLocalSession())
@@ -3057,9 +3081,14 @@ RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction>
 	if (!state || !cache || (!state->IsLocalSession() && state->GetEndpointUrl().empty()) || in_http_operation ||
 	    (!explicit_conn_state && cache->RecentlyFetched()))
 		return CloneSecretSnapshot(cache);
-	BoilstreamConnectionState::SecretLookupGuard guard(*state);
+	const auto generation = state->authentication_generation.load();
+	BoilstreamConnectionState::SecretLookupGuard guard(*state,
+	                                                   [&] { return transaction->GetContext().IsInterrupted(); });
 	if (!guard.Acquired())
-		return CloneSecretSnapshot(cache);
+		return SecretOwnerStillCurrent(transaction, owner, generation) ? CloneSecretSnapshot(cache)
+		                                                               : vector<SecretEntry>();
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		throw IOException("Secret fetch was superseded");
 	CheckCatalogVersions(*state, &transaction->GetContext());
 	const auto revision = cache->Revision();
 	try {
@@ -3067,11 +3096,10 @@ RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction>
 		    state->IsLocalSession()
 		        ? RequestLocal(transaction->GetContext(), *state, "{\"operation\":\"list\",\"multitenant\":true}")
 		        : HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl(), transaction), *state);
-		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted())
+		if (!SecretOwnerStillCurrent(transaction, owner, generation))
 			throw IOException("Secret fetch was superseded");
 		auto fresh = PublishSecretList(response, *state, revision);
-		auto current = GetSecretOwner(transaction);
-		if (current.session != state || current.cache != cache || transaction->GetContext().IsInterrupted())
+		if (!SecretOwnerStillCurrent(transaction, owner, generation))
 			throw IOException("Secret fetch was superseded");
 		vector<SecretEntry> result;
 		for (const auto &entry : fresh) {
@@ -3085,7 +3113,7 @@ RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction>
 			throw;
 		// Keep only this owner's previously validated, unexpired snapshot.
 	}
-	return CloneSecretSnapshot(cache);
+	return SecretOwnerStillCurrent(transaction, owner, generation) ? CloneSecretSnapshot(cache) : vector<SecretEntry>();
 }
 
 vector<SecretEntry> RestApiSecretStorage::GetCachedSecrets(optional_ptr<CatalogTransaction> transaction) {
@@ -3322,24 +3350,34 @@ RestApiSecretStorage::VendManagedCatalogCredential(const string &catalog_id,
 	if (!UUID::FromString(catalog_id, parsed_catalog_id, true) || UUID::ToString(parsed_catalog_id) != catalog_id) {
 		throw InvalidInputException("Managed DuckDB catalog_id must be a canonical UUID");
 	}
-	auto conn_state = GetSession(transaction);
+	auto owner = GetSecretOwner(transaction);
+	auto conn_state = owner.session;
 	if (!conn_state) {
 		throw IOException("Managed DuckDB credential vending requires an active Boilstream session");
 	}
-	BoilstreamConnectionState::SecretLookupGuard guard(*conn_state);
+	const auto generation = conn_state->authentication_generation.load();
+	BoilstreamConnectionState::SecretLookupGuard guard(*conn_state,
+	                                                   [&] { return transaction->GetContext().IsInterrupted(); });
 	if (!guard.Acquired()) {
 		throw IOException("Managed DuckDB credential vending was blocked by a recursive secret lookup");
 	}
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		throw IOException("Managed credential owner was superseded");
 	auto credential = FetchManagedCatalogCredential(catalog_id, *conn_state, transaction);
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		throw IOException("Managed credential owner was superseded");
 	const string scope_path = ManagedCatalogSecretScope(credential.endpoint, catalog_id);
 	CacheManagedCatalogCredential(scope_path, credential, *conn_state);
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		throw IOException("Managed credential owner was superseded");
 	return credential;
 }
 
 SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional_ptr<CatalogTransaction> transaction) {
 	// Need an active session for authenticated GET — quack credentials are gated
 	// behind the same OPAQUE-authenticated REST API as everything else.
-	auto conn_state = GetSession(transaction);
+	auto owner = GetSecretOwner(transaction);
+	auto conn_state = owner.session;
 	if (!conn_state) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: no connection state");
 		return SecretMatch();
@@ -3347,12 +3385,16 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 
 	// Use the same recursion guard as the main LookupSecret path. Without this,
 	// the inner HttpGetWithState below could re-enter LookupSecret via httpfs.
+	const auto generation = conn_state->authentication_generation.load();
 	std::optional<BoilstreamConnectionState::SecretLookupGuard> guard;
-	guard.emplace(*conn_state);
+	guard.emplace(*conn_state, [&] { return transaction->GetContext().IsInterrupted(); });
 	if (!guard->Acquired()) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: recursion guard blocked");
 		return SecretMatch();
 	}
+
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		return SecretMatch();
 
 	// Only the catalog-qualified path is eligible for managed auto-vend. A
 	// plain endpoint remains available to an explicitly user-supplied Quack
@@ -3360,7 +3402,8 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 	string catalog_id;
 	if (!ParseManagedCatalogSecretScope(path, catalog_id)) {
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: missing canonical catalog scope");
-		return LookupCachedSecret(path, "quack", GetSecretCache(transaction));
+		auto cached = LookupCachedSecret(path, "quack", GetSecretCache(transaction));
+		return SecretOwnerStillCurrent(transaction, owner, generation) ? std::move(cached) : SecretMatch();
 	}
 
 	// Managed credentials are cached in the authenticated connection state,
@@ -3389,7 +3432,8 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 			auto now = std::chrono::system_clock::now();
 			if (expires_at > now + std::chrono::seconds(30)) {
 				BOILSTREAM_LOG("LookupQuackSecret EXIT: cached, fresh (>30s remaining)");
-				return BuildManagedCatalogSecretMatch(path, credential);
+				auto cached = BuildManagedCatalogSecretMatch(path, credential);
+				return SecretOwnerStillCurrent(transaction, owner, generation) ? std::move(cached) : SecretMatch();
 			}
 			BOILSTREAM_LOG("LookupQuackSecret: cached but near-expiry, re-vending");
 		}
@@ -3407,9 +3451,14 @@ SecretMatch RestApiSecretStorage::LookupQuackSecret(const string &path, optional
 		BOILSTREAM_LOG("LookupQuackSecret EXIT: HTTP failure (unknown)");
 		return SecretMatch();
 	}
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		return SecretMatch();
 	CacheManagedCatalogCredential(path, credential, *conn_state);
+	if (!SecretOwnerStillCurrent(transaction, owner, generation))
+		return SecretMatch();
 
-	return BuildManagedCatalogSecretMatch(path, credential);
+	auto result = BuildManagedCatalogSecretMatch(path, credential);
+	return SecretOwnerStillCurrent(transaction, owner, generation) ? std::move(result) : SecretMatch();
 }
 
 void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
