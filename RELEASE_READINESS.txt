@@ -1,3 +1,17 @@
+UPDATE — 2026-11-07
+The two failing CI causes have been repaired in source: production cargo audit
+is clean after the pinned upstream OPAQUE upgrade, and the rebuilt shared-memory
+Quack module passes strict browser compatibility. Existing v3 password records
+are covered by four cross-version interoperability tests. There are 35 native
+Rust tests and 14 browser-harness tests. Consult the GitHub runs for the exact source commit before deployment.
+
+Fresh OpenSSL and Quack build trees prevent reuse of stale objects. The public
+Quack artifact is still unchanged; deployments need the paired CI artifact or an
+upstream replacement. See test/wasm/QUACK_COMPATIBILITY.md. Host/provider and full
+server-authentication boundaries remain. Existing release tags stay immutable.
+
+The original pre-release 0.8.1 assessment follows for historical context:
+
 BoilStream 0.8.1 candidate — 2026-11-06
 
 Decision: NOT READY TO PUBLISH. No release, tag, push or community PR was made.

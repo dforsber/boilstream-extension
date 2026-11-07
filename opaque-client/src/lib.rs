@@ -45,36 +45,21 @@ use std::os::raw::c_char;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-// Use appropriate RNG for platform
-#[cfg(target_arch = "wasm32")]
-use rand::rngs::StdRng;
-#[cfg(target_arch = "wasm32")]
-use rand::SeedableRng;
-
-#[cfg(not(target_arch = "wasm32"))]
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
 // Use Ristretto255 with SHA-512 for the ciphersuite
 pub struct DefaultCipherSuite;
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2_opaque::Sha512>;
     type Ksf = opaque_ke::ksf::Identity;
 }
 
-// Platform-specific RNG initialization
-#[cfg(not(target_arch = "wasm32"))]
+// Native and Emscripten use their OS entropy source; wasm32-unknown-unknown uses
+// getrandom's explicit wasm_js feature. Entropy failure never falls back to a seed.
 macro_rules! get_rng {
     () => {
-        OsRng
-    };
-}
-
-#[cfg(target_arch = "wasm32")]
-macro_rules! get_rng {
-    () => {
-        StdRng::from_entropy()
+        UnwrapErr(SysRng)
     };
 }
 
@@ -315,6 +300,7 @@ pub extern "C" fn opaque_client_login_finish(
 
     // Finish login
     let finish_result = state_box.client_login.finish(
+        &mut get_rng!(),
         state_box.password.as_slice(),
         credential_response,
         ClientLoginFinishParameters::default(),
@@ -781,6 +767,7 @@ mod wasm {
             .inner
             .client_login
             .finish(
+                &mut get_rng!(),
                 &state.inner.password,
                 credential_response,
                 ClientLoginFinishParameters::default(),

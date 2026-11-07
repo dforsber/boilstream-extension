@@ -16,8 +16,18 @@
       "sha256": "1d839f9e21f46fea0d0a59da4ae6e97b4598defefa3b209a4c42f9129e62c2d0"
     },
     "wasm_threads": {
-      "url": "https://extensions.duckdb.org/v2.0.0/wasm_threads/quack.duckdb_extension.wasm",
-      "sha256": "2305a504a059863e8e89ad28eb11e69d9f3e89b1e38b28772996a92decd33a38"
+      "sourceBuild": {
+        "repository": "https://github.com/duckdb/duckdb-quack",
+        "revision": "f96420ed46aee9c42064bdb99ddfd1230d6c0086",
+        "opensslVersion": "3.5.9",
+        "opensslURL": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+        "opensslSHA256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+      },
+      "upstreamArtifact": {
+        "url": "https://extensions.duckdb.org/v2.0.0/wasm_threads/quack.duckdb_extension.wasm",
+        "sha256": "2305a504a059863e8e89ad28eb11e69d9f3e89b1e38b28772996a92decd33a38",
+        "status": "non-shared memory import; not used as a passing compatibility fixture"
+      }
     }
   }
 }

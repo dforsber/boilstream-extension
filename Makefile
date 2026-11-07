@@ -24,3 +24,8 @@ tidy-check:
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_DEBUG_FLAGS) -DDISABLE_UNITY=1 -DCLANG_TIDY=1 -S $(DUCKDB_SRCDIR) -B build/tidy
 	cp duckdb/.clang-tidy build/tidy/.clang-tidy
 	python3 scripts/check-tidy.py build/tidy ${TIDY_THREAD_PARAMETER} ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS}
+
+# The final DuckDB side-module link reads this option, not CMAKE_CXX_FLAGS.
+# Without it a C++-only dependency can be mislabeled wasm_threads but import
+# non-shared memory. Keep the compile and final-link thread modes consistent.
+wasm_threads: BUILD_FLAGS += -DUSE_WASM_THREADS=ON

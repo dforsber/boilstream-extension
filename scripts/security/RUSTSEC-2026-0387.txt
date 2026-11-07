@@ -1,3 +1,6 @@
+Historical assessment for v0.8.1. Superseded on 2026-11-07 by the dependency
+upgrade documented in OPAQUE_UPGRADE.txt; production audit now passes.
+
 RUSTSEC-2026-0387 applicability evidence — 2026-11-06
 
 Status: dependency match confirmed; proposed non-reachability assessment needs

@@ -26,7 +26,7 @@ export async function runSuite(variant, report = () => {}, options = {}) {
   const connections = [];
   const connect = async () => { const c = await db.connect(); connections.push(c); return c; };
   let passed = 0;
-  let quackCompatibility = options.quack ? 'supported' : 'not-requested';
+  const quackCompatibility = options.quack ? 'supported' : 'not-requested';
   try {
     report(`Instantiating ${variant}`);
     await db.instantiate(`/runtime/duckdb-${bundle}.wasm`,
@@ -57,23 +57,9 @@ export async function runSuite(variant, report = () => {}, options = {}) {
       if (!(quack.length === 1 && quack[0].loaded)) {
         // Surface the loader's actual incompatibility instead of the optional
         // dependency loader's swallowed exception. Still require autoload success.
-        let loadError;
-        try { await c.query(`LOAD '${location.origin}/fixtures/core-extensions/${baseline.engineVersion}/${variant}/quack.duckdb_extension.wasm'`); }
-        catch (error) { loadError = error; }
-        if (!options.allowKnownQuackFailure || !threaded || !loadError ||
-            !/did not contain the expected entrypoint function 'quack_duckdb_cpp_init'/.test(loadError.message)) {
-          throw loadError || new Error('Required core Quack artifact did not autoload');
-        }
-        // The Node runner additionally requires the pinned artifact hash AND
-        // the precise shared-memory LinkError emitted by the WASM worker.
-        quackCompatibility = 'unsupported-shared-memory';
-        assert((await c.query("SELECT loaded FROM duckdb_extensions() WHERE extension_name='quack'")).toArray()[0].loaded === false,
-          'Quack unexpectedly registered after failed loading');
-        assert((await c.query('SELECT 42 AS answer')).toArray()[0].answer === 42,
-          'Connection unusable after the Quack loader failure');
-        report('UNSUPPORTED core Quack: pinned threaded artifact imports non-shared memory; checking BoilStream recovery');
+        await c.query(`LOAD '${location.origin}/fixtures/core-extensions/${baseline.engineVersion}/${variant}/quack.duckdb_extension.wasm'`);
+        throw new Error('Required Quack artifact did not autoload');
       }
-      if (quackCompatibility === 'supported') {
       const type = (await c.query("SELECT default_provider, extension FROM duckdb_secret_types() WHERE type='quack'")).toArray();
       assert(type.length === 1 && type[0].default_provider === 'config' && type[0].extension === 'quack',
         'Quack secret type was missing or shadowed');
@@ -83,7 +69,6 @@ export async function runSuite(variant, report = () => {}, options = {}) {
       await c.query('DROP SECRET compatibility_secret');
       passed += 3;
       report('PASS core Quack loads, owns its secret type, and accepts a client secret');
-      }
     }
     if (threaded) {
       await c.query('SET threads = 2');

@@ -1,0 +1,38 @@
+OPAQUE dependency repair — 2026-11-07
+
+Production dependency: upstream facebook/opaque-ke, exact revision
+027abbc91115baa38b70ad3af7f5a22f072f978b (RustCrypto migration follow-up).
+https://github.com/facebook/opaque-ke/commit/027abbc91115baa38b70ad3af7f5a22f072f978b
+
+This replaces crypto-bigint 0.5.5 with patched 0.7.10 through elliptic-curve
+0.14.3 and voprf 0.6.0-pre.2. The production Cargo.lock is audited without
+ignore flags: zero vulnerabilities and zero warnings. This uses upstream's
+implementation rather than a locally modified cryptographic algorithm or the
+alternative sid-opaque-ke fork. The upstream change has not yet been included
+in a stable opaque-ke release; retain the immutable Git pin until one is qualified.
+
+Protocol remains Ristretto255 / SHA-512 / TripleDH / Identity KSF. The updated
+client API requires entropy during login finish. rand 0.10 SysRng supplies OS
+entropy on native/Emscripten and getrandom 0.4's wasm_js backend for the standalone
+wasm-bindgen target. AES-GCM's unused RNG default feature is disabled; its AES
+implementation and allocation-based decrypt API remain enabled. Our request
+signing and encryption SHA256/HMAC/HKDF primitives stay on their prior versions.
+
+Regression evidence includes an unmodified crates.io opaque-ke 3.0.0 server in a
+separate process: new registration/login, an existing v3 serialized password
+record (no reset), wrong-password rejection, tampered-proof rejection, matching
+session/export keys, and no published keys on failure. The peer uses a separate
+manifest, lockfile and build directory under opaque-client/tests/legacy-peer.
+Its old vulnerable dependencies are test-only; they are never linked into the
+production library or included in the production Cargo.lock. They exist solely
+to exercise the actual older protocol implementation, not to suppress an audit.
+Use synthetic test credentials only. This is interoperability evidence, not a
+timing proof or qualification of every downstream embedding.
+
+Run:
+  cargo test --locked --manifest-path opaque-client/Cargo.toml
+  cargo audit --file opaque-client/Cargo.lock --json
+  cargo check --locked --manifest-path opaque-client/Cargo.toml --target wasm32-unknown-unknown
+  ./build-wasm-fixed.sh wasm_eh
+  ./build-wasm-fixed.sh wasm_threads
+  # Run opaque-client/test-wasm/test-ffi.sh against each production archive.

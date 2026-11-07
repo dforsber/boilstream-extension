@@ -3,9 +3,9 @@
 use opaque_client::*;
 use opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
-    ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
+    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use std::{ptr, slice};
 
 fn empty() -> OpaqueBuffer {
@@ -20,7 +20,7 @@ fn bytes(buffer: &OpaqueBuffer) -> &[u8] {
 }
 
 fn exchange(password: &[u8], tamper: bool) {
-    let setup = ServerSetup::<DefaultCipherSuite>::new(&mut OsRng);
+    let setup = ServerSetup::<DefaultCipherSuite>::new(&mut UnwrapErr(SysRng));
     let registered_password = b"synthetic-test-password";
     let identity = b"synthetic-account";
     let mut reg_state = ptr::null_mut();
@@ -59,12 +59,12 @@ fn exchange(password: &[u8], tamper: bool) {
         opaque_client_login_start(password.as_ptr().cast(), password.len(), &mut login_state);
     assert!(matches!(request.error, OpaqueError::Success));
     let response = ServerLogin::start(
-        &mut OsRng,
+        &mut UnwrapErr(SysRng),
         &setup,
         Some(record),
         CredentialRequest::deserialize(bytes(&request.buffer)).unwrap(),
         identity,
-        ServerLoginStartParameters::default(),
+        ServerLoginParameters::default(),
     )
     .unwrap();
     opaque_free_buffer(request.buffer);
@@ -92,7 +92,10 @@ fn exchange(password: &[u8], tamper: bool) {
         assert!(matches!(result, OpaqueError::Success));
         let server = response
             .state
-            .finish(CredentialFinalization::deserialize(bytes(&finalization)).unwrap())
+            .finish(
+                CredentialFinalization::deserialize(bytes(&finalization)).unwrap(),
+                ServerLoginParameters::default(),
+            )
             .unwrap();
         assert_eq!(bytes(&session), server.session_key.as_slice());
         assert_eq!(bytes(&exported), bytes(&registered_export));

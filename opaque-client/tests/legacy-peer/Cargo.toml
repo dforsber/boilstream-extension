@@ -1,0 +1,14 @@
+# Test-only protocol peer. Never linked into opaque-client or release artifacts.
+[package]
+name = "opaque-v3-interop-peer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+opaque-ke = "=3.0.0"
+rand = "0.8"
+serde_json = "1"
+hex = "0.4"

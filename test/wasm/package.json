@@ -7,7 +7,7 @@
     "test": "npm run test:harness && npm run test:browser",
     "test:harness": "node --test harness.test.js",
     "test:browser": "node run-tests.js",
-    "test:compatibility": "node run-tests.js --strict-compatibility",
+    "test:compatibility": "node run-tests.js",
     "serve": "node server.js"
   },
   "devDependencies": {

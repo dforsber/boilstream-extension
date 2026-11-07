@@ -1,3 +1,15 @@
+# Follow-up qualification — 2026-11-07
+
+The pinned upstream OPAQUE upgrade removes the production audit failure. The
+source-built shared-memory Quack module passes all 70 strict threaded checks.
+The harness now has 14 tests and rejects stale receipts or replaced artifacts.
+All 35 native Rust tests pass, including four cross-version OPAQUE 3 peer tests.
+The standalone wasm-bindgen target also compiles. See
+[QUACK_COMPATIBILITY.md](QUACK_COMPATIBILITY.md) for the fresh-build procedure and
+the unchanged public-artifact deployment boundary. GitHub runs remain authoritative for remote platform qualification.
+
+The following records the original 0.8.1 qualification, before these fixes.
+
 # DuckDB 2.0 WASM qualification
 
 Last executed: **2026-11-06**, macOS ARM64, Node 24.18.0, Playwright 1.65.0 Chromium.

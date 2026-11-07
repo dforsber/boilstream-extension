@@ -22,6 +22,7 @@ npm ci --prefix test/wasm
 rustup toolchain install 1.94.1 --profile minimal --target wasm32-unknown-emscripten
 rustup toolchain install nightly-2026-08-06 --profile minimal --component rust-src
 ./build-wasm-fixed.sh wasm_eh
+scripts/build-quack-wasm.sh
 ./build-wasm-fixed.sh wasm_threads
 npm test --prefix test/wasm
 npm run test:compatibility --prefix test/wasm
@@ -61,7 +62,7 @@ proxy authentication traffic.
 - Unowned authentication result IDs, empty unauthenticated secret stores on two
   connections, recovery after rejected operations, and malformed extension rejection.
 - Real-worker negative tests prove wrong engine baselines and missing artifacts fail.
-- Optional Quack absence is tested with a local 404 fixture. A separate run uses SHA256-pinned core Quack artifacts: EH loads and registers client secrets; the published threaded artifact has a shared-memory mismatch. Regression tests require that precise failure and prove recovery. The strict compatibility command fails until threaded Quack works.
+- Optional Quack absence is tested with a local 404 fixture. A separate mandatory run requires successful loading and client secret registration: EH uses the pinned public artifact; threads uses a fresh source build with verified shared-memory imports. No incompatibility is accepted as success. See [QUACK_COMPATIBILITY.md](QUACK_COMPATIBILITY.md) for artifact provenance and deployment requirements.
 - Test-harness regressions ensure failures cannot become warnings or false passes.
 - Both single-threaded and threaded workers, with deadlines and worker cleanup.
 - Server path traversal rejection, byte ranges, and cross-origin isolation headers.
@@ -70,7 +71,7 @@ CI also executes 26 base / 27 threaded Rust WASM FFI assertions using the same a
 each extension, including RFC 4231 HMAC and malformed OPAQUE response checks.
 See [`../../opaque-client/test-wasm/README.md`](../../opaque-client/test-wasm/README.md).
 
-Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the core Quack artifacts once from extensions.duckdb.org and verifies the SHA256 values in baseline.json before serving them locally. The unavailable-dependency case is separate. Successful OPAQUE
+Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the EH Quack artifact and verifies its pinned SHA256; the threaded artifact must be freshly built with scripts/build-quack-wasm.sh and match its input/output receipt before being served locally. The unavailable-dependency case is separate. Successful OPAQUE
 login, encrypted response verification, credential rotation, authenticated
 cross-connection isolation, and remote catalog access require protocol fixtures
 or a separately provisioned integration environment. Native C++ crypto/concurrency

@@ -63,20 +63,13 @@ try {
     console.log(`[${variant}] PASS wrong engine baseline and missing artifact fail the suite`);
     result.passed += 3; // optional dependency and two guard tests above
     console.log(JSON.stringify(result));
-    const loaderErrors = [];
-    page.on('console', message => loaderErrors.push(message.text()));
     let compatibilityTimer;
     const compatibility = await Promise.race([
-      page.evaluate(({ v, strict }) => window.runSuite(v, message => window.reportTest(message),
-        { quack: true, allowKnownQuackFailure: !strict }), { v: variant, strict: process.argv.includes('--strict-compatibility') }),
+      page.evaluate(v => window.runSuite(v, message => window.reportTest(message), { quack: true }), variant),
       new Promise((_, reject) => { compatibilityTimer = setTimeout(() => reject(new Error(`${variant} Quack compatibility exceeded 90s`)), 90_000); compatibilityTimer.unref(); }),
     ]).finally(() => clearTimeout(compatibilityTimer));
     assert.deepEqual(unexpected, [], 'Quack compatibility caused unexpected network access or browser errors');
-    if (compatibility.quackCompatibility === 'unsupported-shared-memory') {
-      assert(loaderErrors.some(message => /Import #0 .*env.*memory.*mismatch in shared state of memory, declared = 0, imported = 1/.test(message)),
-        'Expected the exact pinned Quack shared-memory LinkError; generic load failures are not accepted');
-      console.log(`[${variant}] UNSUPPORTED Quack compatibility; BoilStream recovery regressions passed. Strict release gate remains failing.`);
-    }
+    assert.equal(compatibility.quackCompatibility, 'supported', 'Quack compatibility is mandatory');
     console.log(JSON.stringify({ ...compatibility, mode: 'core-quack' }));
     await context.close();
   }

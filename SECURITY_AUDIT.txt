@@ -1,3 +1,13 @@
+UPDATE — 2026-11-07
+The production Rust dependency finding below is fixed by a pinned upstream
+OPAQUE upgrade (crypto-bigint 0.7.10); raw audit has zero findings/warnings.
+See scripts/security/OPAQUE_UPGRADE.txt and cargo-audit-2026-11-07.json.
+Threaded Quack now passes strict compatibility with the fresh source-built
+paired artifact; the public Quack URL remains incompatible. See
+test/wasm/QUACK_COMPATIBILITY.md. Host findings below remain unchanged.
+
+Historical 0.8.1 audit follows:
+
 BoilStream extension security review — 2026-11-06
 
 Base revision: 9a877918f3ec533c6cce72e1f316fc353b203897
