@@ -16,7 +16,7 @@ archive linked into each extension.
 |------|----------------|
 | `boilstream_grammar.test` | `BOILSTREAM ...`, `CREATE DUCKLAKE`, `ATTACH DUCKLAKE` statements: registration in `duckdb_grammar_extensions()`, automatic activation on new connections, equivalence with the PRAGMA output, routing of arguments into the PRAGMA validation, parse-time arity errors, built-in `ATTACH`/`CREATE` still parsing, deactivation via `SET active_grammar_extensions`. |
 | `boilstream_pragmas.test` | Every PRAGMA and table function is registered; URL/email/token/TOTP validation errors; no-session failure paths (`No endpoint configured`, `requires an active Boilstream session`); `duckdb_secrets()` without a session; dotted setting names must be quoted in 2.0. |
-| `quack_bridge.test` | Quack bridge scalar functions fail closed without a Rust host. |
+| `client_boundary.test` | Client API registration and absence of server authentication functions. |
 | `quack_secret_autovend.test` | `quack` secret type stays owned by the quack extension (`require quack`). |
 | `quack_attach_with_manual_secret.test` | A user-created `TYPE quack` secret is honoured by `ATTACH` (`require quack`). |
 
@@ -27,7 +27,9 @@ an absolute path glob:
 <duckdb-build>/test/unittest "<extension-checkout>/test/sql/*"
 ```
 
-Tests with `require quack` are skipped when the quack extension is not linked into the build.
+For complete local SQL coverage, copy the matching signed HTTPFS and Quack artifacts
+into `<duckdb-build>/repository/v2.0.0/<platform>/` before running. A skipped
+`require` case is not a qualified pass.
 
 ## C++ tests (`test/cpp/`)
 
@@ -38,7 +40,7 @@ statically linked extensions themselves).
 
 ```bash
 export DUCKDB_BUILD_DIR=<duckdb-build>        # dir containing src/libduckdb_static.a, extension/boilstream/...
-export DUCKDB_SOURCE_DIR=<duckdb-source>      # fork checkout, for headers and extension/loader/*.cpp
+export DUCKDB_SOURCE_DIR=<duckdb-source>      # matching DuckDB 2.0 checkout
 # Install matching core artifacts: INSTALL httpfs; INSTALL quack;
 cmake -G Ninja -DBOILSTREAM_INTEGRATION_TESTS=ON \
   -DBOILSTREAM_HTTPFS_EXTENSION_PATH=<version/platform/httpfs.duckdb_extension> \
@@ -49,8 +51,9 @@ ctest --test-dir build/cpp-tests --output-on-failure
 ```
 
 Without the environment variables the project falls back to `../../build/release` and the `duckdb`
-submodule. The Rust library is found under `<build>/cargo/build/*/release/` as either
-`libopaque_client.a` (standalone build) or `librust_bridge.a` (shared staticlib in the BoilStream fork).
+submodule. Exactly one `libopaque_client.a` must exist under the selected
+`<build>/cargo/build/*/release/`; ambiguous or missing archives fail configuration.
+The harness never substitutes another build tree or a separate server library.
 
 | Executable | Tags | Covers |
 |------------|------|--------|
@@ -63,9 +66,8 @@ submodule. The Rust library is found under `<build>/cargo/build/*/release/` as e
 | `session_routing_test` | `[session-routing]` | Connection-id to session routing, re-bootstrap, concurrency. |
 | `input_validation_test` | `[input_validation]` | Malformed JSON, size limits, SQL injection in values, error-message hygiene. |
 | `quack_attach_red_test` | `[quack]` | Managed catalog credential vending, user secret precedence, RFC 3339 expiry. |
-| `quack_bridge_test` | `[quack_bridge]` | Planner/authorizer bridge ABI, fail-closed behaviour, session registry lifetime. |
 | `aws_signing_test`, `registration_ffi_test` | `[aws]`, `[registration]` | Rust FFI: SigV4 signing, registration validation, TOTP URI. |
-| `wasm_lock_ordering_test` | `[wasm]` | Lock ordering patterns, no DuckDB dependency. |
+| `wasm_lock_ordering_test` | `[wasm]` | Actual connection-state locking and reentrancy, executed natively. |
 
 ### Integration lane (enabled above and in CI)
 
@@ -81,10 +83,17 @@ rejection. Run `cargo test --locked --manifest-path opaque-client/Cargo.toml`.
 The dependency-free `transport_security_test` exercises the production URL policy,
 bounded append and exceptional secret erasure. Native tests have subprocess deadlines. `CredentialCleanup` observes actual JSON allocation/reallocation erasure before free, checks binary serializer contents and erasure, and verifies HTTP cleanup preserves borrowed provider headers.
 
+The stock baseline also runs `AuthDiagnostics_debug`, `AuthDiagnostics_release`,
+`RegistrationOwnership`, `RegistrationOutput`, `RegistrationHttp` and
+`RequiredResponseSignature`. Their loopback fixtures exercise production handlers
+and reject secret leaks, wrong owners, stale results and forged HTTP replies.
+
 ## Not covered without a server
 
-Token exchange and rotation, server response parsing, network error handling and concurrent rotation
-need a boilstream server; they belong to the product and staging gates.
+Loopback fixtures cover registration/MFA, HTTP errors, signed responses and failed
+resume. Full server-backed token exchange, credential rotation and remote catalog
+queries still belong to product/staging gates. Browser authentication has its own
+remaining boundaries documented in `wasm/WASM_TEST_STATUS.md`.
 
 ## Adding tests
 

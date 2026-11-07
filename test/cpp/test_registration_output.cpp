@@ -4,8 +4,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/main/client_context_state.hpp"
-#include "duckdb/main/tenant/active_tenant_registry.hpp"
-#include "duckdb/main/tenant/tenant_context.hpp"
+#include "client_test_context.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -228,20 +227,18 @@ int main() {
 	});
 	test("tenant_change_retires_pending_result_permanently", [] {
 		Fixture f;
-		TenantContext a, b;
-		a.SetTenantId("42");
-		b.SetTenantId("43");
+		const string a = "42", b = "43";
 		uint64_t id;
 		{
-			ActiveTenantRegistry::Guard g(*f.db.instance, &a);
+			ScopedClientTenant g(*f.a.context, a);
 			id = f.Publish(f.a);
 		}
 		{
-			ActiveTenantRegistry::Guard g(*f.db.instance, &b);
+			ScopedClientTenant g(*f.a.context, b);
 			Reject([&] { f.storage->TakeRegistrationOutput(*f.a.context, id); });
 		}
 		{
-			ActiveTenantRegistry::Guard g(*f.db.instance, &a);
+			ScopedClientTenant g(*f.a.context, a);
 			Reject([&] { f.storage->TakeRegistrationOutput(*f.a.context, id); });
 		}
 	});

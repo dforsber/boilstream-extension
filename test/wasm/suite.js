@@ -76,18 +76,10 @@ export async function runSuite(variant, report = () => {}, options = {}) {
         'Threaded worker did not enable two query threads');
       report('PASS threaded execution enabled'); passed++;
     }
-    for (const file of ['boilstream_pragmas.test', 'boilstream_grammar.test', 'quack_bridge.test']) {
+    for (const file of ['boilstream_pragmas.test', 'boilstream_grammar.test', 'client_boundary.test']) {
       passed += await runSqlTests(await text(`/sql/${file}`), c, () => db.connect(), report);
     }
-    if (threaded) {
-      // range itself forces single-threaded execution. A materialized table has
-      // multiple row groups available to the query worker pool.
-      await c.query('CREATE TABLE authz_scan AS SELECT i FROM range(1000000) t(i)');
-      const denied = await c.query("SELECT count(*) AS n FROM authz_scan WHERE boilstream_quack_authz(CAST(i AS VARCHAR), 'SELECT 1')");
-      await c.query('DROP TABLE authz_scan');
-      assert(Number(denied.toArray()[0].n) === 0, 'Threaded scan authorized an unowned session');
-      report('PASS threaded authorization scan rejects every unowned session'); passed++;
-    }
+
     // Negative result-table ownership/guessing: never expose an unowned auth result.
     const other = await connect();
     for (const connection of [c, other]) {

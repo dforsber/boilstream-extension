@@ -13,7 +13,7 @@ export const quackArtifactPath = variant => resolve(here, '../../build/compatibi
   variant, 'quack.duckdb_extension.wasm');
 const dist = resolve(here, 'node_modules/@duckdb/duckdb-wasm/dist');
 const publicFiles = new Set(['test-wasm-browser.html', 'suite.js', 'sql-runner.js', 'baseline.json']);
-const sqlFiles = new Set(['boilstream_pragmas.test', 'boilstream_grammar.test', 'quack_bridge.test']);
+const sqlFiles = new Set(['boilstream_pragmas.test', 'boilstream_grammar.test', 'client_boundary.test']);
 const runtimeFiles = new Set(['duckdb-browser.mjs', 'duckdb-base.wasm', 'duckdb-threads.wasm',
   'duckdb-browser-base.worker.js', 'duckdb-browser-threads.worker.js', 'duckdb-browser-threads.pthread.worker.js']);
 let bundlePromise;

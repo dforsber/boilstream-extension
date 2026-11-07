@@ -6,9 +6,8 @@ build. Build, run and per-executable coverage are documented in [`../README_TEST
 ## Authentication diagnostic regression tests
 
 `AuthDiagnostics_debug` and `AuthDiagnostics_release` compile the actual storage
-and SQL authentication entrypoints against the selected BoilStream fork shared
-library and its statically built HTTPFS provider. Both use optimized C++; the
-mode selects whether `BOILSTREAM_DEBUG` diagnostics are enabled. This does not
+and SQL authentication entrypoints against the selected stock DuckDB 2.0 shared
+library and matching HTTPFS artifact. The mode selects whether `BOILSTREAM_DEBUG` diagnostics are enabled. This does not
 qualify an entire product Release build.
 
 Run the registered CTest cases with `ctest -R '^AuthDiagnostics_' --output-on-failure`.
@@ -26,7 +25,7 @@ and mandatory response-signature enforcement remain separate qualification work.
 
 ## Registration ownership
 
-`RegistrationOwnership` uses real ClientContexts, the tenant registry and concurrent
+`RegistrationOwnership` uses real ClientContexts, client routing settings and concurrent
 workers to verify connection ownership, identity changes, cancellation, stale or
 foreign operation IDs, field limits and destruction. The legacy adapter used for
 causal evidence invokes the old contextless API; it is never production code.

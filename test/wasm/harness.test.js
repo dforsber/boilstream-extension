@@ -45,19 +45,19 @@ test('platform-specific errors remain explicit assertions and cannot skip tests'
     'statement error\nREJECT\n----\n']) assert.throws(() => parseTests(source));
 });
 test('the real shared regression corpus is parsed without omissions', async () => {
-  for (const name of ['boilstream_pragmas.test', 'boilstream_grammar.test', 'quack_bridge.test']) {
+  for (const name of ['boilstream_pragmas.test', 'boilstream_grammar.test', 'client_boundary.test']) {
     const source = await readFile(new URL('../sql/' + name, import.meta.url), 'utf8');
     const tests = parseTests(source);
     assert.equal(tests.length, source.split('\n').filter(line => /^(query|statement) /.test(line)).length);
-    assert(tests.length >= (name === 'quack_bridge.test' ? 5 : 20), `Unexpectedly small regression corpus: ${name}`);
+    assert(tests.length >= (name === 'client_boundary.test' ? 5 : 20), `Unexpectedly small regression corpus: ${name}`);
     assert(tests.some(t => t.kind === 'query'));
-    if (name !== 'quack_bridge.test') assert(tests.some(t => t.mode === 'error'));
+    if (name !== 'client_boundary.test') assert(tests.some(t => t.mode === 'error'));
   }
 });
 test('new SQL files require an explicit browser coverage decision', async () => {
   const files = (await readdir(new URL('../sql/', import.meta.url))).filter(name => name.endsWith('.test')).sort();
-  assert.deepEqual(files, ['boilstream_grammar.test', 'boilstream_pragmas.test',
-    'quack_attach_with_manual_secret.test', 'quack_bridge.test', 'quack_secret_autovend.test']);
+  assert.deepEqual(files, ['boilstream_grammar.test', 'boilstream_pragmas.test', 'client_boundary.test',
+    'quack_attach_with_manual_secret.test', 'quack_secret_autovend.test']);
   // These two require a real Quack artifact and are tracked in the integration
   // coverage table; they must not silently become no-dependency tests we omit.
   for (const name of ['quack_attach_with_manual_secret.test', 'quack_secret_autovend.test']) {

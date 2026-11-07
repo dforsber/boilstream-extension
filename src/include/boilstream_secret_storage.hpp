@@ -97,11 +97,6 @@ public:
 	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
 
 	//! Private embedding API. No SQL binding or constructor from claimed IDs.
-	void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
-	string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-	BoilstreamLocalSecretProvider::Response
-	RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-	void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
 
 	//! Perform OPAQUE login with password
 	//! Authenticate private state, then publish it for this connection

@@ -57,8 +57,8 @@ proxy authentication traffic.
 - Shared `test/sql/boilstream_pragmas.test` and `boilstream_grammar.test`, including
   exact query results, expected error messages, grammar/PRAGMA equivalence,
   new-connection grammar activation, argument validation, and no-session behavior.
-- Shared `quack_bridge.test`: authentication and authorization fail closed without
-  the Rust host verifier, and failed attempts create no sessions.
+- Shared `client_boundary.test`: client APIs remain registered and server-only
+  authentication functions are absent.
 - Unowned authentication result IDs, empty unauthenticated secret stores on two
   connections, recovery after rejected operations, and malformed extension rejection.
 - Real-worker negative tests prove wrong engine baselines and missing artifacts fail.

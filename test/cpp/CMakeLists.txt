@@ -90,37 +90,19 @@ if(BOILSTREAM_INTEGRATION_TESTS)
                          "${_stock_version_dir}" DIRECTORY)
 endif()
 
-# Priority 1: Look in Corrosion's cargo build directory (release builds)
-file(GLOB_RECURSE RUST_LIB_CANDIDATES
-     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a"
-     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/librust_bridge.a")
-
-if(RUST_LIB_CANDIDATES)
-  list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
-  set(RUST_LIB_FOUND TRUE)
-  message(STATUS "Found Corrosion Rust library: ${RUST_LIB_PATH}")
-else()
-  # Priority 2: Check if copied to extension directory
-  if(EXISTS "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
-    set(RUST_LIB_PATH
-        "${EXTENSION_BUILD_DIR}/extension/boilstream/libopaque_client.a")
-    set(RUST_LIB_FOUND TRUE)
-    message(STATUS "Found Rust library in extension dir: ${RUST_LIB_PATH}")
-  else()
-    # Priority 3: Fall back to manual cargo build locations (debug builds)
-    file(
-      GLOB_RECURSE
-      RUST_LIB_CANDIDATES
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/*/debug/libopaque_client.a"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../opaque-client/target/debug/libopaque_client.a"
-    )
-    if(RUST_LIB_CANDIDATES)
-      list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
-      set(RUST_LIB_FOUND TRUE)
-      message(STATUS "Found Rust library (manual build): ${RUST_LIB_PATH}")
-    endif()
-  endif()
+# Never substitute a separate server archive or a stale manual build.
+file(GLOB RUST_LIB_CANDIDATES
+     "${EXTENSION_BUILD_DIR}/cargo/build/*/release/libopaque_client.a")
+list(LENGTH RUST_LIB_CANDIDATES RUST_LIB_COUNT)
+if(NOT RUST_LIB_COUNT EQUAL 1)
+  message(
+    FATAL_ERROR
+      "Expected exactly one client Rust archive in the selected native build; build that tree first. Refusing another tree or ambiguous targets."
+  )
 endif()
+list(GET RUST_LIB_CANDIDATES 0 RUST_LIB_PATH)
+set(RUST_LIB_FOUND TRUE)
+message(STATUS "Selected native client Rust library: ${RUST_LIB_PATH}")
 
 set(DUCKDB_LIBS
     # DuckDB 2.0: extension archives go before libduckdb_static.a and are
@@ -474,33 +456,6 @@ target_link_libraries(quack_attach_red_test PRIVATE Catch2::Catch2)
 link_duckdb_static(quack_attach_red_test)
 link_rust_dependencies(quack_attach_red_test)
 
-# Quack planner bridge ABI tests compile the bridge source under review rather
-# than silently reusing a possibly stale extension archive from
-# DUCKDB_BUILD_DIR. The archive remains linked for the same full DuckDB
-# dependency surface.
-add_executable(quack_bridge_test test_quack_bridge.cpp
-                                 ../../src/quack_bridge.cpp)
-
-target_include_directories(
-  quack_bridge_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-                            ${DUCKDB_SOURCE_DIR}/src/include)
-
-# Mirror the extension build: the fork-only privacy registration compiles only
-# where the API exists.
-set(BOILSTREAM_ECM_HEADER
-    "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/extension_callback_manager.hpp"
-)
-if(EXISTS "${BOILSTREAM_ECM_HEADER}")
-  file(READ "${BOILSTREAM_ECM_HEADER}" BOILSTREAM_ECM_SOURCE)
-  if(BOILSTREAM_ECM_SOURCE MATCHES "RegisterQueryErrorPrivacyCallback")
-    target_compile_definitions(quack_bridge_test
-                               PRIVATE BOILSTREAM_HAS_QUERY_ERROR_PRIVACY=1)
-  endif()
-endif()
-target_link_libraries(quack_bridge_test PRIVATE Catch2::Catch2)
-link_duckdb_static(quack_bridge_test)
-link_rust_dependencies(quack_bridge_test)
-
 # Enable testing
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
@@ -532,7 +487,6 @@ add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
 add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)
-add_test(NAME QuackBridgeTests COMMAND quack_bridge_test)
 
 # Session publication ownership, rejection and real ClientContext teardown.
 add_executable(
@@ -611,32 +565,6 @@ link_rust_dependencies(secret_cache_ownership_test)
 add_test(NAME SecretCacheOwnership COMMAND secret_cache_ownership_test)
 set_tests_properties(SecretCacheOwnership PROPERTIES TIMEOUT 60)
 
-# This integration gate targets the BoilStream fork's required static providers.
-if(EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  add_executable(
-    secret_cache_providers_test
-    test_secret_cache_providers.cpp ../../src/boilstream_secret_storage.cpp
-    ../../src/opaque_wrapper.cpp)
-  target_include_directories(
-    secret_cache_providers_test
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-            ${DUCKDB_SOURCE_DIR}/src/include
-            ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-            ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-  target_link_libraries(
-    secret_cache_providers_test
-    PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-            "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-  add_test(
-    NAME SecretCacheProviders
-    COMMAND
-      ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/run_secret_cache_providers.py
-      $<TARGET_FILE:secret_cache_providers_test>)
-  set_tests_properties(SecretCacheProviders PROPERTIES TIMEOUT 70)
-endif()
-
 # Unit/security tests must not perform unrelated Airport startup telemetry.
 set_property(
   TEST SessionPublication SessionMemoryOnly SecretCacheOwnership
@@ -646,146 +574,114 @@ set_property(
 
 # Compile the actual authentication SQL entrypoints and storage implementation.
 # Runtime uses synthetic loopback HTTP; never needs real credentials.
-if(EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  foreach(mode IN ITEMS debug release)
-    add_executable(
-      auth_diagnostics_${mode}_test
-      test_auth_diagnostics.cpp ../../src/boilstream_secret_storage.cpp
-      ../../src/boilstream_extension.cpp ../../src/opaque_wrapper.cpp)
-    target_include_directories(
-      auth_diagnostics_${mode}_test
-      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-              ${DUCKDB_SOURCE_DIR}/src/include
-              ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-              ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-    target_link_libraries(
-      auth_diagnostics_${mode}_test
-      PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-              "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-      target_compile_definitions(auth_diagnostics_${mode}_test
-                                 PRIVATE BOILSTREAM_TRACK_STATE_FREE)
-      target_link_options(
-        auth_diagnostics_${mode}_test PRIVATE
-        "-Wl,--wrap=opaque_free_login_state"
-        "-Wl,--wrap=opaque_free_registration_state")
-    endif()
-    if(mode STREQUAL "debug")
-      target_compile_definitions(auth_diagnostics_${mode}_test
-                                 PRIVATE BOILSTREAM_DEBUG)
-    endif()
-    add_test(
-      NAME AuthDiagnostics_${mode}
-      COMMAND
-        ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py
-        $<TARGET_FILE:auth_diagnostics_${mode}_test>)
-    set_tests_properties(
-      AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40 ENVIRONMENT
-                                         "QUERY_FARM_TELEMETRY_OPT_OUT=1")
-  endforeach()
-endif()
-
-# Actual connection ownership plus loopback registration/MFA handlers.
-if(EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  foreach(kind IN ITEMS ownership http output)
-    add_executable(
-      registration_${kind}_test
-      test_registration_${kind}.cpp ../../src/boilstream_secret_storage.cpp
-      ../../src/opaque_wrapper.cpp)
-    target_include_directories(
-      registration_${kind}_test
-      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-              ${DUCKDB_SOURCE_DIR}/src/include
-              ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-              ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-    target_link_libraries(
-      registration_${kind}_test
-      PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
-              "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-  endforeach()
-  add_test(NAME RegistrationOwnership COMMAND registration_ownership_test)
-  add_test(NAME RegistrationOutput COMMAND registration_output_test)
-  add_test(
-    NAME RegistrationHttp
-    COMMAND
-      ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py
-      $<TARGET_FILE:registration_http_test>)
-  set_tests_properties(
-    RegistrationOwnership RegistrationHttp RegistrationOutput
-    PROPERTIES TIMEOUT 40 ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
-endif()
-
-# Independently signed replies exercise actual HTTP verification and session
-# retirement.
-if(EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
+foreach(mode IN ITEMS debug release)
   add_executable(
-    required_response_signature_test
-    test_required_response_signature.cpp
-    ../../src/boilstream_secret_storage.cpp ../../src/opaque_wrapper.cpp)
+    auth_diagnostics_${mode}_test
+    test_auth_diagnostics.cpp ../../src/boilstream_secret_storage.cpp
+    ../../src/boilstream_extension.cpp ../../src/opaque_wrapper.cpp)
   target_include_directories(
-    required_response_signature_test
+    auth_diagnostics_${mode}_test
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
             ${DUCKDB_SOURCE_DIR}/src/include
             ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
             ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
   target_link_libraries(
-    required_response_signature_test
+    auth_diagnostics_${mode}_test
     PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
             "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(auth_diagnostics_${mode}_test
+                               PRIVATE BOILSTREAM_TRACK_STATE_FREE)
+    target_link_options(
+      auth_diagnostics_${mode}_test PRIVATE
+      "-Wl,--wrap=opaque_free_login_state"
+      "-Wl,--wrap=opaque_free_registration_state")
+  endif()
+  if(mode STREQUAL "debug")
+    target_compile_definitions(auth_diagnostics_${mode}_test
+                               PRIVATE BOILSTREAM_DEBUG)
+  endif()
   add_test(
-    NAME RequiredResponseSignature
+    NAME AuthDiagnostics_${mode}
     COMMAND
-      ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py
-      $<TARGET_FILE:required_response_signature_test>)
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py
+      $<TARGET_FILE:auth_diagnostics_${mode}_test>)
   set_tests_properties(
-    RequiredResponseSignature PROPERTIES TIMEOUT 40 ENVIRONMENT
-                                         "QUERY_FARM_TELEMETRY_OPT_OUT=1")
-endif()
+    AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                       "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+endforeach()
 
-# Scanner-based authentication diagnostic policy; linked to the matching core.
-if(EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  add_executable(query_privacy_test test_query_privacy.cpp)
+# Actual connection ownership plus loopback registration/MFA handlers.
+foreach(kind IN ITEMS ownership http output)
+  add_executable(
+    registration_${kind}_test
+    test_registration_${kind}.cpp ../../src/boilstream_secret_storage.cpp
+    ../../src/opaque_wrapper.cpp)
   target_include_directories(
-    query_privacy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-                               ${DUCKDB_SOURCE_DIR}/src/include)
+    registration_${kind}_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+            ${DUCKDB_SOURCE_DIR}/src/include
+            ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+            ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
   target_link_libraries(
-    query_privacy_test PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads)
-  add_test(NAME AuthQueryPrivacy COMMAND query_privacy_test)
-  set_tests_properties(
-    AuthQueryPrivacy PROPERTIES TIMEOUT 40 ENVIRONMENT
-                                "QUERY_FARM_TELEMETRY_OPT_OUT=1")
-endif()
+    registration_${kind}_test
+    PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+            "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+endforeach()
+add_test(NAME RegistrationOwnership COMMAND registration_ownership_test)
+add_test(NAME RegistrationOutput COMMAND registration_output_test)
+add_test(
+  NAME RegistrationHttp
+  COMMAND
+    ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py
+    $<TARGET_FILE:registration_http_test>)
+set_tests_properties(
+  RegistrationOwnership RegistrationHttp RegistrationOutput
+  PROPERTIES TIMEOUT 40 ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+
+# Independently signed replies exercise actual HTTP verification and session
+# retirement.
+add_executable(
+  required_response_signature_test
+  test_required_response_signature.cpp ../../src/boilstream_secret_storage.cpp
+  ../../src/opaque_wrapper.cpp)
+target_include_directories(
+  required_response_signature_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+          ${DUCKDB_SOURCE_DIR}/src/include
+          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
+          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+target_link_libraries(
+  required_response_signature_test
+  PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
+          "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
+add_test(
+  NAME RequiredResponseSignature
+  COMMAND
+    ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py
+    $<TARGET_FILE:required_response_signature_test>)
+set_tests_properties(
+  RequiredResponseSignature PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                       "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
 # Dependency-free production URL, bounded append and erasure regressions.
 add_executable(transport_security_test test_transport_security.cpp)
 target_include_directories(transport_security_test PRIVATE ../../src/include)
 add_test(NAME TransportSecurity COMMAND transport_security_test)
 
-# Stock core has no statically linked POST provider. The filesystem-tripwire
-# test must load the exact compatible HTTPFS artifact before installing the
-# tripwire.
-if(NOT EXISTS
-   "${DUCKDB_SOURCE_DIR}/src/include/duckdb/main/tenant/tenant_context.hpp")
-  if(NOT EXISTS "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
-    message(
-      FATAL_ERROR
-        "SessionMemoryOnly requires BOILSTREAM_HTTPFS_EXTENSION_PATH for stock DuckDB"
-    )
-  endif()
-  set_property(
-    TEST SessionMemoryOnly
-    APPEND
-    PROPERTY
-      ENVIRONMENT
-      "BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+# Load the explicit stock HTTPFS artifact for transport integration tests.
+if(NOT EXISTS "${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+  message(
+    FATAL_ERROR
+      "Client transport tests require BOILSTREAM_HTTPFS_EXTENSION_PATH")
 endif()
+set_property(
+  TEST SessionMemoryOnly
+  APPEND
+  PROPERTY
+    ENVIRONMENT
+    "BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
 get_property(
   BOILSTREAM_TESTS
   DIRECTORY
@@ -803,3 +699,25 @@ target_link_libraries(
           "${EXTENSION_BUILD_DIR}/third_party/yyjson/libduckdb_yyjson.a")
 add_test(NAME CredentialCleanup COMMAND credential_cleanup_test)
 set_tests_properties(CredentialCleanup PROPERTIES TIMEOUT 30)
+
+foreach(
+  target IN
+  ITEMS auth_diagnostics_debug_test auth_diagnostics_release_test
+        registration_ownership_test registration_http_test
+        registration_output_test required_response_signature_test)
+  link_rust_dependencies(${target})
+endforeach()
+set_property(
+  TEST AuthDiagnostics_debug AuthDiagnostics_release RegistrationHttp
+       RequiredResponseSignature
+  APPEND
+  PROPERTY
+    ENVIRONMENT
+    "BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
+foreach(target IN
+        ITEMS auth_diagnostics_debug_test auth_diagnostics_release_test
+              registration_http_test registration_output_test)
+  target_sources(${target} PRIVATE ../../src/boilstream_grammar.cpp)
+  target_include_directories(
+    ${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/utf8proc/include)
+endforeach()

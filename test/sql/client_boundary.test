@@ -1,0 +1,30 @@
+# name: test/sql/client_boundary.test
+# description: Public client API exists without hosted-server callbacks
+# group: [sql]
+
+require boilstream
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('boilstream_quack_authn', 'boilstream_quack_authz', 'boilstream_quack_debug_session_count');
+----
+0
+
+query I
+SELECT count(DISTINCT function_name) FROM duckdb_functions() WHERE function_name IN ('boilstream_login', 'boilstream_register_user', 'boilstream_verify_mfa', 'boilstream_bootstrap_session', 'boilstream_secrets', 'boilstream_ducklakes');
+----
+6
+
+statement error
+SELECT boilstream_quack_authn('s1', 'token', 'token');
+----
+does not exist
+
+statement error
+SELECT boilstream_quack_authz('s1', 'SELECT 1');
+----
+does not exist
+
+statement error
+SELECT boilstream_quack_debug_session_count();
+----
+does not exist

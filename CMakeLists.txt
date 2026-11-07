@@ -44,20 +44,8 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
   message(STATUS "WASM: Configured with DuckDB extension flags")
 endif()
 
-# Build the Rust OPAQUE client library When embedded in a multi-extension build
-# (e.g. boilstream DuckDB fork), set BOILSTREAM_EXTERNAL_RUST_LIB to an imported
-# target that already provides opaque-client symbols (via a shared rust-bridge
-# staticlib that avoids duplicating the Rust std). For standalone builds this is
-# skipped.
-if(BOILSTREAM_EXTERNAL_RUST_LIB)
-  message(
-    STATUS
-      "boilstream: Using external Rust library target '${BOILSTREAM_EXTERNAL_RUST_LIB}'"
-  )
-  if(NOT TARGET opaque_client_rust)
-    add_library(opaque_client_rust ALIAS ${BOILSTREAM_EXTERNAL_RUST_LIB})
-  endif()
-elseif(IS_WASM_BUILD)
+# Build the client Rust library for the selected platform.
+if(IS_WASM_BUILD)
   # WASM build: Manual cargo (Corrosion doesn't support Emscripten)
   include(ExternalProject)
 
@@ -146,7 +134,7 @@ endif()
 
 set(EXTENSION_SOURCES
     src/boilstream_extension.cpp src/boilstream_secret_storage.cpp
-    src/boilstream_grammar.cpp src/opaque_wrapper.cpp src/quack_bridge.cpp)
+    src/boilstream_grammar.cpp src/opaque_wrapper.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 # DuckDB's WASM helper links an archive in a POST_BUILD emcc invocation;
@@ -168,25 +156,6 @@ if(IS_WASM_BUILD)
     PROPERTY LINK_DEPENDS "$<TARGET_FILE:opaque_client_rust>")
 endif()
 
-# Fork-only API: the BoilStream DuckDB fork lets extensions install a query
-# error privacy policy. Stock DuckDB lacks it, so the public community build
-# compiles without that registration.
-set(BOILSTREAM_ECM_HEADER
-    "${CMAKE_SOURCE_DIR}/src/include/duckdb/main/extension_callback_manager.hpp"
-)
-if(EXISTS "${BOILSTREAM_ECM_HEADER}")
-  file(READ "${BOILSTREAM_ECM_HEADER}" BOILSTREAM_ECM_SOURCE)
-  if(BOILSTREAM_ECM_SOURCE MATCHES "RegisterQueryErrorPrivacyCallback")
-    target_compile_definitions(${EXTENSION_NAME}
-                               PRIVATE BOILSTREAM_HAS_QUERY_ERROR_PRIVACY=1)
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME}
-                               PRIVATE BOILSTREAM_HAS_QUERY_ERROR_PRIVACY=1)
-    message(
-      STATUS
-        "boilstream: query error privacy callback available (BoilStream fork)")
-  endif()
-endif()
-
 # Enable debug logging conditionally (set -DBOILSTREAM_DEBUG=ON to enable) For
 # WASM, always enable for easier browser debugging
 if(BOILSTREAM_DEBUG)
@@ -201,9 +170,8 @@ if(BOILSTREAM_DEBUG)
 endif()
 
 # Link Rust OPAQUE client library (includes all crypto operations)
-# opaque_client_rust is either: - WASM: imported target from manual cargo build
-# - Native: alias to Corrosion's opaque_client-static target All cryptographic
-# operations (SHA256, HMAC, HKDF, AES-GCM) are now handled by Rust
+# opaque_client_rust is the client Cargo library. All cryptographic operations
+# (SHA256, HMAC, HKDF, AES-GCM) are now handled by Rust
 target_link_libraries(${EXTENSION_NAME} opaque_client_rust)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} opaque_client_rust)
 

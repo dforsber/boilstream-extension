@@ -4,11 +4,7 @@
 #include "duckdb.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "duckdb/main/config.hpp"
-#if __has_include("duckdb/main/tenant/active_tenant_registry.hpp")
-#include "duckdb/main/tenant/active_tenant_registry.hpp"
-#include "duckdb/main/tenant/tenant_context.hpp"
-#define TEST_TENANT_CONTEXT 1
-#endif
+#include "client_test_context.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -142,63 +138,54 @@ int main() {
 		f.Login(f.b, "synthetic-b");
 		f.Cache(f.a);
 		f.Cache(f.b, "owned", "synthetic-b");
-#ifdef TEST_TENANT_CONTEXT
-		Require(f.Read(f.a, "owned", "memory") == "synthetic-a" && f.Read(f.b, "owned", "memory") == "synthetic-b");
-#else
 		// Stock DuckDB does not redirect the memory backend to BoilStream.
 		Require(f.Read(f.a, "owned", "memory") == "absent" && f.Read(f.b, "owned", "memory") == "absent");
-#endif
+
 		Require(f.Read(f.a) == "synthetic-a" && f.Read(f.b) == "synthetic-b");
 		Require(f.Match(f.a) == "synthetic-a" && f.Match(f.b) == "synthetic-b");
 	});
-#ifdef TEST_TENANT_CONTEXT
-	test("tls_worker_tenant_switch_requires_new_authentication", [] {
+	test("client_setting_switch_requires_new_authentication", [] {
 		Fixture f;
-		TenantContext first, second;
-		first.SetTenantId("42");
-		second.SetTenantId("43");
+		const string first = "42", second = "43";
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &first);
+			ScopedClientTenant guard(*f.a.context, first);
 			f.Login(f.a);
 			f.Cache(f.a);
 			Require(f.Read(f.a) == "synthetic-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &second);
+			ScopedClientTenant guard(*f.a.context, second);
 			Reject([&] { f.Read(f.a); });
 		}
 		Reject([&] { f.Read(f.a); });
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &first);
+			ScopedClientTenant guard(*f.a.context, first);
 			Require(f.Read(f.a) == "synthetic-a");
 		}
 	});
-	test("same_worker_sequential_tenants_keep_distinct_owned_secrets", [] {
+	test("sequential_client_settings_keep_distinct_owned_secrets", [] {
 		Fixture f;
-		TenantContext first, second;
-		first.SetTenantId("42");
-		second.SetTenantId("43");
+		const string first = "42", second = "43";
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &first);
+			ScopedClientTenant guard(*f.a.context, first);
 			f.Login(f.a);
 			f.Cache(f.a);
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &second);
+			ScopedClientTenant guard(*f.b.context, second);
 			f.Login(f.b, "synthetic-b");
 			f.Cache(f.b, "owned", "synthetic-b");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &first);
+			ScopedClientTenant guard(*f.a.context, first);
 			Require(f.Read(f.a) == "synthetic-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &second);
+			ScopedClientTenant guard(*f.b.context, second);
 			Require(f.Read(f.b) == "synthetic-b");
 		}
 	});
-#endif
-	test("contextless_lookup_never_borrows_thread_tenant_credentials", [] {
+	test("contextless_lookup_never_borrows_connection_credentials", [] {
 		Fixture f;
 		f.Login(f.a);
 		f.Cache(f.a);
@@ -304,11 +291,8 @@ int main() {
 		Reject([&] { f.storage->StoreSecret(Secret("manual", "wrong"), OnCreateConflict::ERROR_ON_CONFLICT, &tx); });
 		Require(!f.storage->StoreSecret(Secret("manual", "wrong"), OnCreateConflict::IGNORE_ON_CONFLICT, &tx));
 		f.storage->StoreSecret(Secret("manual", "second"), OnCreateConflict::REPLACE_ON_CONFLICT, &tx);
-#ifdef TEST_TENANT_CONTEXT
-		Require(f.Read(f.a, "manual", "memory") == "second");
-#else
 		Require(f.Read(f.a, "manual", "memory") == "absent");
-#endif
+
 		Require(f.Read(f.a, "manual") == "second" && f.Read(f.b, "manual") == "absent");
 		f.storage->DropSecretByName("manual", OnEntryNotFound::THROW_EXCEPTION, &tx);
 		Require(f.Read(f.a, "manual") == "absent");
