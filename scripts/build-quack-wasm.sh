@@ -70,5 +70,6 @@ emcmake cmake -S duckdb -B "$quack_build" -G Ninja \
   -DOPENSSL_SSL_LIBRARY="$openssl_install/lib/libssl.a" \
   -DOPENSSL_CRYPTO_LIBRARY="$openssl_install/lib/libcrypto.a"
 cmake --build "$quack_build" --target quack_loadable_extension --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+[[ "$(git -C duckdb rev-parse HEAD)" == "$(field duckdbRevision)" ]] || { echo 'DuckDB revision changed during Quack build' >&2; exit 1; }
 [[ -z "$(git -C duckdb status --porcelain)" ]] || { echo 'DuckDB changed during Quack build' >&2; exit 1; }
 node scripts/record-quack-build.mjs "$quack_build/extension/quack/quack.duckdb_extension.wasm" "$staging/inputs.json"
