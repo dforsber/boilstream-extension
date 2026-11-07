@@ -77,7 +77,7 @@ impl SessionKeys {
     }
 
     /// `authority` is the exact configured service identity, never a received
-    /// Host/forwarding header. `secret` must come from a successful OPAQUE exchange.
+    /// Host/forwarding header. `secret` must be an authenticated channel master.
     pub fn derive(secret: &[u8; 64], session: [u8; 32], authority: &str) -> Result<Self, Error> {
         if session == [0; 32]
             || authority.is_empty()

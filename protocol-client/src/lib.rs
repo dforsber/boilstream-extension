@@ -1,4 +1,4 @@
-//! Client-only established-session protocol candidate. Not integrated yet.
+//! Client-only pinned handshake and envelope candidate. Not integrated yet.
 //! Bootstrap trust, entropy, time and transport are supplied by the application.
 //! Server protocol processing is deliberately not included, even behind features.
 //!
@@ -14,6 +14,11 @@
 //! ```compile_fail
 //! use boilstream_protocol_client::admit_sequence;
 //! ```
+//! ```compile_fail
+//! use boilstream_protocol_client::handshake::{accept, InstallationKey};
+//! ```
+pub mod handshake;
+pub mod handshake_wire;
 pub mod wire;
 use aes_gcm::{
     aead::{Aead, Payload},

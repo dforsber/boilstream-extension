@@ -1,0 +1,14 @@
+{
+  "warning": "Synthetic test vector. Never deploy these keys or entropy.",
+  "authority": "https://api.example.test",
+  "server_public": "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f",
+  "rotated_public": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
+  "client_entropy": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "now": 1700000000,
+  "expires": 1700003600,
+  "client_wire": "BH2.c.eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRqXxSXbKeWAEA_QUWpOvSJm",
+  "server_wire": "BH2.s.Z13VdO13iTELPS52gfN5C0ZsdzsVIf7PNld5WDcepS8Yoxyi1jYhZtuJ8Y5Qno-cEmDLE6lWN4ADpKJPpLq_ZBnt_uNjDozKJmUts7rWuItR0fJ4J0tirSSrESYjoAIbYdg20MZfsINxuZ-DhQzfGy0bEO-q_9Mw",
+  "session": "f9c73530e0232349f6bdba63ad457ad4d1d9560172477440e46a456e0ee08a34",
+  "request_key": "4180d68900e9257ab325b0c904ed576c19d08456506f4b93b0a14afc7b42ce44",
+  "response_key": "2a9a97e123e92ad8c797899e3ead0b467c4c5e74d67d35dd16e17a522245858b"
+}
