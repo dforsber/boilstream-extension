@@ -5,17 +5,36 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - Unreleased
+## [0.8.3] - Unreleased
 
 ### Changed
 
 - The public extension is client-only: remote login, registration, MFA, bootstrap,
   secret storage and Quack client attachment remain available on DuckDB 2.0.
-- Removed native hosting callbacks and embedded local-session APIs. This is a
-  breaking change for applications that embedded those APIs, so the candidate is
-  a minor release rather than a patch. Existing SQL client commands are retained.
+- Removed native hosting callbacks and embedded local-session APIs from the client
+  distribution. Existing client SQL commands and remote protocols are retained.
+  Applications embedding the removed hosting APIs must migrate to a private
+  server adapter before adopting this version.
 - Native and WASM tests assert that server authentication functions are absent
   while the client API remains registered. Community build entrypoints are unchanged.
+
+## [0.8.2] - 2026-11-07
+
+### Fixed
+
+- Upgraded the pinned OPAQUE implementation to resolve the production Rust audit
+  findings, with interoperability tests against existing OPAQUE 3 peers.
+- Qualified threaded Quack using a compatible source build and added guards
+  against stale WASM source inputs and artifacts. Community build entrypoints
+  remain unchanged. The public threaded Quack artifact still requires replacement
+  upstream; see `test/wasm/QUACK_COMPATIBILITY.md` for the paired-build requirement.
+
+## [0.8.1] - 2026-11-06
+
+### Security
+
+- Hardened credential cleanup, transport validation and authentication diagnostics.
+- Qualified native and browser tests against the pinned DuckDB 2.0 baseline.
 
 ## [0.8.0] - 2026-10-23
 

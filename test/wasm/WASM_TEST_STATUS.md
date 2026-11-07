@@ -1,6 +1,6 @@
 # Client-only candidate qualification — 2026-11-07
 
-The 0.9.0 candidate uses the DuckDB **2.0.0** baseline in
+The 0.8.3 candidate uses the DuckDB **2.0.0** baseline in
 [baseline.json](baseline.json). It removes server hosting APIs while retaining
 remote authentication, secret access and Quack client attachment.
 
