@@ -6,8 +6,7 @@
 #include <thread>
 #include <atomic>
 #include "duckdb/main/client_context_state.hpp"
-#include "duckdb/main/tenant/active_tenant_registry.hpp"
-#include "duckdb/main/tenant/tenant_context.hpp"
+#include "client_test_context.hpp"
 using namespace duckdb;
 static void Require(bool value) {
 	if (!value)
@@ -195,41 +194,37 @@ int main() {
 	});
 	test("tenant_change_retires_old_registration_permanently", [] {
 		Fixture f;
-		TenantContext a, b;
-		a.SetTenantId("42");
-		b.SetTenantId("43");
+		const string a = "42", b = "43";
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Store(f.storage, *f.a.context, "tenant-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &b);
+			ScopedClientTenant guard(*f.a.context, b);
 			Reject([&] { Read(f.storage, *f.a.context); });
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Reject([&] { Read(f.storage, *f.a.context); });
 		}
 	});
 	test("worker_reuse_preserves_distinct_connection_owners", [] {
 		Fixture f;
-		TenantContext a, b;
-		a.SetTenantId("42");
-		b.SetTenantId("43");
+		const string a = "42", b = "43";
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Store(f.storage, *f.a.context, "tenant-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &b);
+			ScopedClientTenant guard(*f.b.context, b);
 			Store(f.storage, *f.b.context, "tenant-b");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Require(Read(f.storage, *f.a.context) == "tenant-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &b);
+			ScopedClientTenant guard(*f.b.context, b);
 			Require(Read(f.storage, *f.b.context) == "tenant-b");
 		}
 	});
@@ -343,31 +338,27 @@ int main() {
 
 	test("query_begin_retires_previous_tenant_enrollment", [] {
 		Fixture f;
-		TenantContext a, b;
-		a.SetTenantId("42");
-		b.SetTenantId("43");
+		const string a = "42", b = "43";
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Store(f.storage, *f.a.context, "tenant-a");
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &b);
+			ScopedClientTenant guard(*f.a.context, b);
 			auto r = f.a.Query("SELECT 1");
 			Require(r && !r->HasError());
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &a);
+			ScopedClientTenant guard(*f.a.context, a);
 			Reject([&] { Read(f.storage, *f.a.context); });
 		}
 	});
 	test("oversized_tenant_rejected_and_old_state_retired", [] {
 		Fixture f;
 		Store(f.storage, *f.a.context, "standalone");
-		TenantContext large;
-		// Fault-inject the public worker context field; the SQL setter already rejects this size.
-		large.tenant_id = string(4097, '9');
+		const string large(4097, '9');
 		{
-			ActiveTenantRegistry::Guard guard(*f.db.instance, &large);
+			ScopedClientTenant guard(*f.a.context, large);
 			Reject([&] { f.storage.BeginRegistration(*f.a.context, "https://same.invalid", "same@example.com"); });
 		}
 		Reject([&] { Read(f.storage, *f.a.context); });

@@ -1,57 +1,17 @@
 /**
- * Simple C test program for opaque-client WASM FFI
- *
- * This program can be compiled with emcc to create a standalone WASM test
- * that verifies the Rust FFI functions work correctly.
- *
- * Compile:
- *   emcc test-ffi.c ../target/wasm32-unknown-emscripten/release/libopaque_client.a \
- *        -o test-ffi.html -s EXPORTED_FUNCTIONS='["_main"]' -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]'
- *
- * Run:
- *   emrun test-ffi.html
+ * Executable WASM FFI regression tests using the production C ABI.
+ * Run test-ffi.sh with the SDK pinned in test/wasm/baseline.json.
+ * BOILSTREAM_RUST_WASM_LIB selects the exact archive from an extension build.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Include the opaque-client C header
-// In a real build, this would be in your include path
-typedef enum {
-    OPAQUE_SUCCESS = 0,
-    OPAQUE_INVALID_INPUT = 1,
-    OPAQUE_PROTOCOL_ERROR = 2,
-    OPAQUE_SERIALIZATION_ERROR = 3,
-    OPAQUE_MEMORY_ERROR = 4,
-} OpaqueError;
-
-typedef struct {
-    uint8_t *data;
-    size_t len;
-} OpaqueBuffer;
-
-typedef struct {
-    OpaqueError error;
-    OpaqueBuffer buffer;
-} OpaqueResult;
-
-// Forward declarations for opaque types
-typedef struct RegistrationState RegistrationState;
-typedef struct LoginState LoginState;
-
-// Function declarations (these are provided by the Rust library)
-extern OpaqueResult opaque_client_registration_start(const char *password, size_t password_len, RegistrationState **state_out);
-extern OpaqueError opaque_client_registration_finish(RegistrationState *state, const uint8_t *registration_response,
-                                                      size_t registration_response_len, OpaqueBuffer *upload_out,
-                                                      OpaqueBuffer *export_key_out);
-extern OpaqueResult opaque_client_login_start(const char *password, size_t password_len, LoginState **state_out);
-extern OpaqueError opaque_client_login_finish(LoginState *state, const uint8_t *credential_response,
-                                               size_t credential_response_len, OpaqueBuffer *finalization_out,
-                                               OpaqueBuffer *session_key_out, OpaqueBuffer *export_key_out);
-extern void opaque_free_buffer(OpaqueBuffer buffer);
-extern void opaque_free_registration_state(RegistrationState *state);
-extern void opaque_free_login_state(LoginState *state);
+#include "opaque_client.h"
+#ifdef __EMSCRIPTEN_PTHREADS__
+#include <emscripten/threading.h>
+#endif
 
 // Test result tracking
 static int tests_passed = 0;
@@ -84,7 +44,7 @@ void test_registration_start() {
     ASSERT(result.error == OPAQUE_SUCCESS, "Registration start returns success");
     ASSERT(state != NULL, "Registration state is created");
     ASSERT(result.buffer.data != NULL, "Registration request is generated");
-    ASSERT(result.buffer.len > 0, "Registration request has non-zero length");
+    ASSERT(result.buffer.len == 32, "Ristretto255 registration request is 32 bytes");
 
     printf("  ℹ️  Registration request size: %zu bytes\n", result.buffer.len);
 
@@ -112,7 +72,7 @@ void test_login_start() {
     ASSERT(result.error == OPAQUE_SUCCESS, "Login start returns success");
     ASSERT(state != NULL, "Login state is created");
     ASSERT(result.buffer.data != NULL, "Credential request is generated");
-    ASSERT(result.buffer.len > 0, "Credential request has non-zero length");
+    ASSERT(result.buffer.len == 96, "Ristretto255 credential request is 96 bytes");
 
     printf("  ℹ️  Credential request size: %zu bytes\n", result.buffer.len);
 
@@ -154,8 +114,8 @@ void test_empty_password() {
     OpaqueResult result = opaque_client_registration_start(empty_password, 0, &state);
 
     // Empty passwords should be accepted (application can enforce minimum length)
-    ASSERT(result.error == OPAQUE_SUCCESS || result.error == OPAQUE_INVALID_INPUT,
-           "Empty password handling is consistent");
+    ASSERT(result.error == OPAQUE_SUCCESS,
+           "Protocol permits empty password; application enforces strength");
 
     // Cleanup if successful
     if (result.error == OPAQUE_SUCCESS) {
@@ -216,10 +176,8 @@ void test_determinism() {
 
     // Requests should be different (randomized nonces/keys)
     int are_different = 0;
-    if (result1.buffer.len == result2.buffer.len) {
+    if (result1.buffer.data && result2.buffer.data && result1.buffer.len == result2.buffer.len) {
         are_different = memcmp(result1.buffer.data, result2.buffer.data, result1.buffer.len) != 0;
-    } else {
-        are_different = 1;
     }
 
     ASSERT(are_different, "Registration requests are randomized (different for same password)");
@@ -239,11 +197,58 @@ void test_determinism() {
     }
 }
 
+// RFC 4231 test case 1: independent, published HMAC-SHA256 known-answer vector.
+void test_signing_vector(void) {
+    TEST("RFC 4231 HMAC-SHA256 and canonical payload digest");
+    const uint8_t key[20] = { [0 ... 19] = 0x0b };
+    const char expected[] = "sDRMYdjbOFNcqK/OrwvxK4gdwgDJgz2nJuk3bC4yz/c=";
+    OpaqueResult result = aws_sign_canonical_request(key, sizeof(key), "Hi There", 8);
+    ASSERT(result.error == OPAQUE_SUCCESS && result.buffer.len == strlen(expected) &&
+           memcmp(result.buffer.data, expected, strlen(expected)) == 0, "HMAC matches RFC 4231 case 1");
+    opaque_free_buffer(result.buffer);
+    result = aws_sign_canonical_request(NULL, 0, "Hi There", 8);
+    ASSERT(result.error == OPAQUE_INVALID_INPUT, "Null signing key is rejected");
+    const char canonical[] = "GET\n/\n\nhost:example.com\n\nhost\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    result = aws_build_canonical_request("GET", 3, "/", 1, "", 0, "host:example.com\n", 17, "host", 4, NULL, 0);
+    ASSERT(result.error == OPAQUE_SUCCESS && result.buffer.len == strlen(canonical) &&
+           memcmp(result.buffer.data, canonical, strlen(canonical)) == 0, "Canonical request includes known SHA256 empty digest");
+    opaque_free_buffer(result.buffer);
+    result = aws_build_canonical_request("GET", 3, "/", 1, "", 0, "host:example.com\n", 17, "host", 4, NULL, 1);
+    ASSERT(result.error == OPAQUE_INVALID_INPUT, "Null payload with nonzero length is rejected");
+}
+
+void test_malformed_responses(void) {
+    TEST("Malformed OPAQUE server messages fail without publishing keys");
+    RegistrationState *registration = NULL;
+    LoginState *login = NULL;
+    OpaqueBuffer upload = {0}, export_key = {0}, session_key = {0};
+    const uint8_t invalid[] = {0xff};
+    OpaqueResult r = opaque_client_registration_start("password", 8, &registration);
+    ASSERT(r.error == OPAQUE_SUCCESS, "Registration state allocated");
+    opaque_free_buffer(r.buffer);
+    if (registration) {
+        ASSERT(opaque_client_registration_finish(registration, invalid, 1, &upload, &export_key) ==
+               OPAQUE_SERIALIZATION_ERROR, "Malformed registration response rejected");
+        ASSERT(!upload.data && !export_key.data, "Registration failure publishes no outputs");
+    }
+    r = opaque_client_login_start("password", 8, &login);
+    ASSERT(r.error == OPAQUE_SUCCESS, "Login state allocated");
+    opaque_free_buffer(r.buffer);
+    if (login) {
+        ASSERT(opaque_client_login_finish(login, invalid, 1, &upload, &session_key, &export_key) ==
+               OPAQUE_SERIALIZATION_ERROR, "Malformed login response rejected");
+        ASSERT(!upload.data && !session_key.data && !export_key.data, "Login failure publishes no outputs");
+    }
+}
+
 int main() {
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  OPAQUE Client WASM FFI Test Suite                        ║\n");
     printf("╚════════════════════════════════════════════════════════════╝\n");
 
+#ifdef __EMSCRIPTEN_PTHREADS__
+    ASSERT(!emscripten_is_main_runtime_thread(), "Rust FFI suite executes on a real pthread");
+#endif
     // Run tests
     test_registration_start();
     test_login_start();
@@ -251,6 +256,8 @@ int main() {
     test_empty_password();
     test_multiple_registrations();
     test_determinism();
+    test_signing_vector();
+    test_malformed_responses();
 
     // Print summary
     printf("\n╔════════════════════════════════════════════════════════════╗\n");

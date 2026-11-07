@@ -1,0 +1,69 @@
+name: DuckDB 2.0 WASM regression tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wasm-bindgen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+      - run: cargo check --locked --manifest-path opaque-client/Cargo.toml --target wasm32-unknown-unknown
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [wasm_eh, wasm_threads]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: test/wasm/package-lock.json
+      - uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984
+        with:
+          version: 6.0.9
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-emscripten
+      - if: matrix.variant == 'wasm_threads'
+        run: rustup toolchain install nightly-2026-08-06 --profile minimal --component rust-src
+      - run: npm ci
+        working-directory: test/wasm
+      - run: npx playwright install --with-deps chromium
+        working-directory: test/wasm
+      - name: Build compatible shared-memory Quack from pinned source
+        if: matrix.variant == 'wasm_threads'
+        run: bash scripts/build-quack-wasm.sh
+      - run: ./build-wasm-fixed.sh '${{ matrix.variant }}'
+      - run: bash opaque-client/test-wasm/test-ffi.sh
+        env:
+          WASM_BUILD_TYPE: ${{ matrix.variant }}
+          BOILSTREAM_RUST_WASM_LIB: ${{ github.workspace }}/build/${{ matrix.variant }}/extension/boilstream/rust/wasm32-unknown-emscripten/release/libopaque_client.a
+      - name: Run regressions and mandatory Quack compatibility
+        run: npm test
+        working-directory: test/wasm
+        env:
+          WASM_VARIANTS: ${{ matrix.variant }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boilstream-v2.0.0-extension-${{ matrix.variant }}
+          path: |
+            build/${{ matrix.variant }}/extension/boilstream/boilstream.duckdb_extension.wasm
+            build/${{ matrix.variant }}/extension/boilstream/boilstream.build.json
+            build/compatibility/v2.0.0/${{ matrix.variant }}/quack.duckdb_extension.wasm
+            build/compatibility/v2.0.0/${{ matrix.variant }}/quack.build.json
+          if-no-files-found: error

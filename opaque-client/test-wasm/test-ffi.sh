@@ -1,101 +1,29 @@
-#!/bin/bash
-
-# Compile and run WASM FFI test for opaque-client
-#
-# This script compiles a simple C test program that links against the
-# Rust opaque-client library compiled to WASM, and tests the FFI interface.
-
-set -e
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  OPAQUE Client WASM FFI Build & Test                      ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
-
-# Check if emcc is available
-if ! command -v emcc &> /dev/null; then
-    echo -e "${RED}✗ emcc not found!${NC}"
-    echo -e "${YELLOW}  Please install Emscripten: https://emscripten.org/docs/getting_started/downloads.html${NC}"
-    echo -e "${YELLOW}  Or activate it: source \$EMSDK/emsdk_env.sh${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ emcc found: $(emcc --version | head -1)${NC}\n"
-
-# Check if Rust library exists
-RUST_LIB="../target/wasm32-unknown-emscripten/release/libopaque_client.a"
-
-if [ ! -f "$RUST_LIB" ]; then
-    echo -e "${YELLOW}⚠ Rust WASM library not found at: $RUST_LIB${NC}"
-    echo -e "${YELLOW}  Building it now...${NC}\n"
-
-    cd ..
-    cargo build --target wasm32-unknown-emscripten --release
-    cd test-wasm
-
-    if [ ! -f "$RUST_LIB" ]; then
-        echo -e "${RED}✗ Failed to build Rust WASM library${NC}"
-        exit 1
-    fi
-fi
-
-echo -e "${GREEN}✓ Rust WASM library found${NC}"
-RUST_LIB_SIZE=$(du -h "$RUST_LIB" | cut -f1)
-echo -e "${BLUE}  Size: $RUST_LIB_SIZE${NC}\n"
-
-# Compile the C test program
-echo -e "${BLUE}Compiling C test program with emcc...${NC}"
-
-# Basic compilation (produces test-ffi.js and test-ffi.wasm)
-emcc test-ffi.c "$RUST_LIB" \
-    -o test-ffi.js \
-    -s EXPORTED_FUNCTIONS='["_main","_malloc","_free"]' \
-    -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
-    -s ALLOW_MEMORY_GROWTH=1 \
-    -s TOTAL_MEMORY=33554432 \
-    -s EXIT_RUNTIME=1 \
-    --no-entry
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ Compilation successful!${NC}\n"
+#!/usr/bin/env bash
+# Execute the production Rust FFI as WebAssembly, with the qualified DuckDB SDK.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+expected="$(node -e 'console.log(require(process.argv[1]).emscriptenVersion)' "$repo/test/wasm/baseline.json")"
+actual="$(emcc --version | sed -n '1s/.*) \([0-9][0-9.]*\).*/\1/p')"
+[[ "$actual" == "$expected" ]] || { echo "Expected Emscripten $expected, got $actual" >&2; exit 1; }
+output="$(mktemp -d "${TMPDIR:-/tmp}/boilstream-ffi.XXXXXX")"
+trap 'rm -rf "$output"' EXIT
+if [[ -n "${BOILSTREAM_RUST_WASM_LIB:-}" ]]; then
+  rust_library="$BOILSTREAM_RUST_WASM_LIB"
 else
-    echo -e "${RED}✗ Compilation failed${NC}"
+  if [[ "${WASM_BUILD_TYPE:-wasm_eh}" != "wasm_eh" ]]; then
+    echo 'Threaded FFI requires BOILSTREAM_RUST_WASM_LIB from ./build-wasm-fixed.sh wasm_threads' >&2
     exit 1
+  fi
+  rust_toolchain="$(node -e 'console.log(require(process.argv[1]).rustToolchain)' "$repo/test/wasm/baseline.json")"
+  (cd "$repo/opaque-client" && CARGO_BUILD_BUILD_DIR="$output/rust-build" cargo "+$rust_toolchain" build --locked --release --target wasm32-unknown-emscripten --target-dir "$output/rust")
+  rust_library="$output/rust/wasm32-unknown-emscripten/release/libopaque_client.a"
 fi
-
-# Check output files
-if [ -f "test-ffi.js" ] && [ -f "test-ffi.wasm" ]; then
-    WASM_SIZE=$(du -h test-ffi.wasm | cut -f1)
-    echo -e "${GREEN}✓ Output files created:${NC}"
-    echo -e "${BLUE}  test-ffi.js${NC}"
-    echo -e "${BLUE}  test-ffi.wasm (${WASM_SIZE})${NC}\n"
-else
-    echo -e "${RED}✗ Output files not found${NC}"
-    exit 1
+test -s "$rust_library"
+thread_flags=()
+if [[ "${WASM_BUILD_TYPE:-wasm_eh}" == "wasm_threads" ]]; then
+  thread_flags=(-pthread -sPROXY_TO_PTHREAD=1 -sPTHREAD_POOL_SIZE=1)
 fi
-
-# Run the test
-echo -e "${BLUE}Running WASM FFI tests...${NC}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}\n"
-
-node test-ffi.js
-
-TEST_RESULT=$?
-
-echo -e "\n${BLUE}═══════════════════════════════════════════════════════════${NC}\n"
-
-if [ $TEST_RESULT -eq 0 ]; then
-    echo -e "${GREEN}✓ All FFI tests passed!${NC}"
-    echo -e "${GREEN}✓ WASM build is working correctly${NC}\n"
-    exit 0
-else
-    echo -e "${RED}✗ Some FFI tests failed${NC}"
-    echo -e "${YELLOW}  Please check the output above for details${NC}\n"
-    exit 1
-fi
+emcc "$here/test-ffi.c" "$rust_library" -I"$repo/src/include" -o "$output/test-ffi.cjs" \
+  -fwasm-exceptions -sWASM_BIGINT=1 -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sENVIRONMENT=node "${thread_flags[@]}"
+node "$output/test-ffi.cjs"

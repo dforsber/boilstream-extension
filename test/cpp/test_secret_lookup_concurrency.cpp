@@ -2,7 +2,7 @@
 // The companion Python authority independently signs responses and gates request 1.
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/main/extension_helper.hpp"
+#include "client_test_context.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "secret_response_fixture.hpp"
 #include <future>
@@ -48,44 +48,6 @@ struct JoinThread {
 			thread.join();
 	}
 };
-static bool LocalGuardRemainsNonblocking() {
-	int owner = 0;
-	BoilstreamLocalSecretHostV2 host {};
-	host.version = 2;
-	host.size = sizeof(host);
-	host.owner = &owner;
-	host.expires_at_us = std::chrono::duration_cast<std::chrono::microseconds>(
-	                         (std::chrono::system_clock::now() + std::chrono::hours(1)).time_since_epoch())
-	                         .count();
-	host.retain = [](const void *) {
-	};
-	host.release = [](const void *) {
-	};
-	host.release_reply = [](void *) {
-	};
-	host.request = [](const void *, void *, const uint8_t *, size_t, BoilstreamLocalSecretReplyV1 *) -> uint8_t {
-		return 0;
-	};
-	auto provider = make_shared_ptr<BoilstreamLocalSecretProvider>(host);
-	BoilstreamConnectionState state(provider);
-	bool entered = false, refused = false;
-	std::future<bool> result;
-	std::thread worker;
-	{
-		BoilstreamConnectionState::SecretLookupGuard held(state);
-		entered = held.Acquired();
-		std::packaged_task<bool()> attempt([&] {
-			BoilstreamConnectionState::SecretLookupGuard nested(state);
-			return nested.Acquired();
-		});
-		result = attempt.get_future();
-		worker = std::thread(std::move(attempt));
-		if (result.wait_for(std::chrono::seconds(1)) == std::future_status::ready)
-			refused = !result.get();
-	} // Release even if a mistaken blocking implementation stalled the worker.
-	worker.join();
-	return entered && refused;
-}
 int main(int argc, char **argv) {
 	if (argc != 3)
 		return 2;
@@ -99,8 +61,7 @@ int main(int argc, char **argv) {
 		DuckDB db(nullptr, &config);
 		Connection connection(db);
 		SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
-		if (ExtensionHelper::LoadExtension(db, "httpfs") != ExtensionLoadResult::LOADED_EXTENSION)
-			throw std::runtime_error("httpfs unavailable");
+		LoadTestHttpfs(connection);
 		if (connection.Query("SET httpfs_client_implementation='curl'; SET http_timeout=5; SET http_retries=0;")
 		        ->HasError())
 			throw std::runtime_error("HTTP setup failed");
@@ -150,6 +111,10 @@ int main(int argc, char **argv) {
 			throw std::runtime_error("second worker did not start");
 		const bool returned_early = second_result.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
 		bool cancelled_promptly = true;
+		bool live_cached_match = true, live_cached_named = true;
+		bool cancelled_cached_match = true, cancelled_cached_named = true;
+		bool live_cached_list = true, live_cached_snapshot = true;
+		bool cancelled_cached_list = true, cancelled_cached_snapshot = true;
 		if (mode == "expired") {
 			lock_guard<mutex> lock(state->session_lock);
 			state->token_expires_at = std::chrono::system_clock::time_point::min();
@@ -158,8 +123,23 @@ int main(int argc, char **argv) {
 		} else if (mode == "generation") {
 			state->authentication_generation.fetch_add(1);
 		} else if (mode == "cancelled" || mode == "cancelled_cached") {
-			if (mode == "cancelled_cached")
+			if (mode == "cancelled_cached") {
 				BoilstreamSessionPublicationTestAccess::CacheKnownExpiry(storage, *state);
+				// The same cache bytes must work before interruption. These fast
+				// reads do not wait behind the held HTTP operation or send a GET.
+				auto list_has_value = [](const vector<SecretEntry> &entries) {
+					return entries.size() == 1 &&
+					       static_cast<const KeyValueSecret &>(*entries[0].secret).TryGetValue("key").ToString() ==
+					           "synthetic-value";
+				};
+				live_cached_list = list_has_value(storage.AllSecrets(&transaction));
+				live_cached_snapshot = list_has_value(storage.GetCachedSecrets(&transaction));
+				live_cached_match = lookup() == "synthetic-value";
+				auto entry = storage.GetSecretByName("owned", &transaction);
+				live_cached_named =
+				    entry && static_cast<const KeyValueSecret &>(*entry->secret).TryGetValue("key").ToString() ==
+				                 "synthetic-value";
+			}
 			connection.Interrupt();
 			cancelled_promptly = second_result.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
 		}
@@ -173,22 +153,38 @@ int main(int argc, char **argv) {
 		const bool second_found = second_value == "synthetic-value";
 		const auto cache_count = state->secret_cache->Snapshot().size();
 		const bool cache_expected = mode == "cancelled_cached" ? cache_count == 1 : cache_count == 0;
-		bool recursive_absent = true, local_nonblocking = true;
+		if (mode == "cancelled_cached") {
+			// The fresh cache is deliberately retained. An already interrupted
+			// caller must refuse both direct cache-hit paths, not only queued I/O.
+			cancelled_cached_match = lookup() == "absent";
+			cancelled_cached_named = !storage.GetSecretByName("owned", &transaction);
+			cancelled_cached_list = storage.AllSecrets(&transaction).empty();
+			cancelled_cached_snapshot = storage.GetCachedSecrets(&transaction).empty();
+			std::cout << "CASE live_cached_list " << (live_cached_list ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE live_cached_snapshot " << (live_cached_snapshot ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE cancelled_cached_list " << (cancelled_cached_list ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE cancelled_cached_snapshot " << (cancelled_cached_snapshot ? "PASS" : "FAIL")
+			          << std::endl;
+			std::cout << "CASE live_cached_match " << (live_cached_match ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE live_cached_named " << (live_cached_named ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE cancelled_cached_match " << (cancelled_cached_match ? "PASS" : "FAIL") << std::endl;
+			std::cout << "CASE cancelled_cached_named " << (cancelled_cached_named ? "PASS" : "FAIL") << std::endl;
+		}
+		bool recursive_absent = true;
 		if (normal) {
 			{
 				BoilstreamConnectionState::SecretLookupGuard guard(*state);
 				recursive_absent = guard.Acquired() && lookup() == "absent";
 			}
-			local_nonblocking = LocalGuardRemainsNonblocking();
 			std::cout << "CASE first_lookup_succeeded " << (first_found ? "PASS" : "FAIL") << std::endl;
 			std::cout << "CASE second_lookup_succeeded " << (second_found ? "PASS" : "FAIL") << std::endl;
 			std::cout << "CASE same_thread_recursion_refused " << (recursive_absent ? "PASS" : "FAIL") << std::endl;
-			std::cout << "CASE local_cross_thread_recursion_nonblocking " << (local_nonblocking ? "PASS" : "FAIL")
-			          << std::endl;
 		}
 		const bool results = normal ? first_found && second_found : first_value == "absent" && second_value == "absent";
-		const bool passed =
-		    results && !returned_early && cache_expected && recursive_absent && local_nonblocking && cancelled_promptly;
+		const bool passed = results && !returned_early && cache_expected && recursive_absent && cancelled_promptly &&
+		                    live_cached_match && live_cached_named && cancelled_cached_match &&
+		                    cancelled_cached_named && live_cached_list && live_cached_snapshot &&
+		                    cancelled_cached_list && cancelled_cached_snapshot;
 		std::cout << "CASE queued_" << mode << " " << (passed ? "PASS" : "FAIL") << std::endl;
 		std::cout << "CASE "
 		          << (mode == "cancelled_cached" ? "cancelled_fresh_cache_not_exposed " : "unknown_expiry_not_cached ")

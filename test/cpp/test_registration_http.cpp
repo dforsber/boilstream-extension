@@ -1,3 +1,4 @@
+#include "client_test_context.hpp"
 // Execute actual handler result SQL with a local QR encoder, excluding only
 // optional textplot installation. HTTPFS and registration FFI are real.
 #include "../../src/boilstream_extension.cpp"
@@ -69,7 +70,7 @@ int main(int argc, char **argv) {
 	DuckDB db(nullptr, &cfg);
 	Connection a(db), b(db);
 	SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
-	Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
+	LoadTestHttpfs(a);
 	Require(ExtensionHelper::LoadExtension(db, "core_functions") == ExtensionLoadResult::LOADED_EXTENSION);
 	db.LoadStaticExtension<BoilstreamExtension>();
 	CreateScalarFunctionInfo tp_qr(

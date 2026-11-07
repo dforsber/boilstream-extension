@@ -1,21 +1,18 @@
 {
   "name": "boilstream-wasm-test",
-  "version": "1.0.0",
-  "description": "Tests for boilstream DuckDB WASM extension",
+  "version": "2.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test-native.js",
+    "test": "npm run test:harness && npm run test:browser",
+    "test:harness": "node --test harness.test.js",
+    "test:browser": "node run-tests.js",
+    "test:compatibility": "node run-tests.js",
     "serve": "node server.js"
   },
-  "dependencies": {
-    "@duckdb/duckdb-wasm": "^1.33.1-dev45.0",
-    "duckdb": "^1.4.4"
-  },
-  "overrides": {
-    "tar": "^7.5.13",
-    "cacache": "^20.0.4",
-    "minimatch": "^10.2.5",
-    "brace-expansion": "^5.0.5",
-    "@tootallnate/once": "^3.0.1"
+  "devDependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev114.0",
+    "esbuild": "0.28.2",
+    "playwright": "1.65.0"
   }
 }

@@ -5,6 +5,37 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - Unreleased
+
+### Changed
+
+- The public extension is client-only: remote login, registration, MFA, bootstrap,
+  secret storage and Quack client attachment remain available on DuckDB 2.0.
+- Removed native hosting callbacks and embedded local-session APIs from the client
+  distribution. Existing client SQL commands and remote protocols are retained.
+  Applications embedding the removed hosting APIs must migrate to a private
+  server adapter before adopting this version.
+- Native and WASM tests assert that server authentication functions are absent
+  while the client API remains registered. Community build entrypoints are unchanged.
+
+## [0.8.2] - 2026-11-07
+
+### Fixed
+
+- Upgraded the pinned OPAQUE implementation to resolve the production Rust audit
+  findings, with interoperability tests against existing OPAQUE 3 peers.
+- Qualified threaded Quack using a compatible source build and added guards
+  against stale WASM source inputs and artifacts. Community build entrypoints
+  remain unchanged. The public threaded Quack artifact still requires replacement
+  upstream; see `test/wasm/QUACK_COMPATIBILITY.md` for the paired-build requirement.
+
+## [0.8.1] - 2026-11-06
+
+### Security
+
+- Hardened credential cleanup, transport validation and authentication diagnostics.
+- Qualified native and browser tests against the pinned DuckDB 2.0 baseline.
+
 ## [0.8.0] - 2026-10-23
 
 ### Changed
@@ -33,11 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` opt a process out of activating the boilstream syntax on new
   connections; the PRAGMA forms keep working either way.
 - CI builds and tests against stock DuckDB v2.0.0 with extension-ci-tools v2.0.0.
-- Host hooks for the BoilStream server: `boilstream_quack_set_capability_context_factory` retains an
-  immutable capability context for native session callbacks, and `boilstream_install_local_session_v2`
-  installs a local native session with a private authority. Both are inert unless a host registers.
 - Login credentials, registration and MFA state, and generic remote secrets are owned by the DuckDB
-  connection and the authenticated identity (tenant-aware in the BoilStream fork). Nothing is written
+  connection and the authenticated identity . Nothing is written
   to files or browser storage; credential files left by older releases are ignored. See the README
   section "Login lifetime" for the cache limits.
 
@@ -46,22 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authenticated responses must carry a response signature; a missing `x-boilstream-response-signature`
   header is an error, not a pass-through.
 - Authentication errors are reported with private, safe diagnostics; raw server text is not echoed.
-  In the BoilStream fork the extension also installs a query error privacy policy, but only once a
-  BoilStream host has registered through the Quack bridge: a standalone DuckDB keeps its full
-  diagnostics.
-- The query error privacy classifier follows the DuckDB 2.0 tokenizer: an input that ends inside an
-  open comment, string, dollar quote or hidden NUL stays private, and `U&"..."` identifiers and
-  comments before an argument list are recognized.
+
 - Secret metadata bytes are preserved exactly through JSON serialization; malformed secret inputs,
   signing text and inconsistent payload lengths fail closed.
 - Secret list replacement is atomic and validated as a whole; conflicts on remote writes are resolved
   by the server's authoritative result, and retry keys are scoped to one authenticated call.
-
-### Fixed
-
-- The Quack admission hooks (catalog planner, authorizer, post-execute) are installed only once a host
-  has registered its callbacks. A statically linked Quack without the BoilStream host keeps its stock
-  behaviour instead of failing closed with "Catalog planner is not registered".
 
 ### Tests
 
@@ -105,10 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Quack pre-execute SQL-rewriter hook**: new bridge surface for host-registered query-time rewriting.
-  - `boilstream_quack_set_sql_rewriter(fn)` — setter (atomic slot, release-store at boot, acquire-load on the hot path; same lifecycle as the JWT verifier slot).
-  - `boilstream_quack_pre_execute(session_id, sql_in, sql_out_buf, ...)` — `extern "C"` hook handler. Patched Quack calls this between authz and SendQuery; the handler routes through to the host-registered Rust rewriter. Caller owns the output buffer — no allocation crosses the C/Rust boundary.
-  - Registered with patched Quack via `boilstream_lookup_runtime_symbol("quack_set_pre_execute_hook")`, re-using the portable POSIX / Windows shim introduced in v0.6.0. Vanilla DuckDB / stock Quack → no-op.
+- Native hosting compatibility improvements (hosting APIs removed in 0.9.0).
 
 ### Style
 
@@ -123,13 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Quack remote-protocol bridge**: New `src/quack_bridge.{cpp,hpp}` exposing the scalar functions that DuckDB Quack's `quack_authentication_function` / `quack_authorization_function` GLOBAL settings dispatch to:
-  - `boilstream_quack_authn(token)` — HS256 JWT verifier registered via `boilstream_quack_set_jwt_verifier`; populates the bridge SessionMap on success.
-  - `boilstream_quack_authz(session_id, kind, statement)` — read-only gate (allows `SELECT` / `EXPLAIN` / `PRAGMA`, rejects DDL/DML).
-  - `boilstream_quack_bind_session(session_id, tenant_id, …)` — SessionMap upsert used by the auth path.
-  - `boilstream_quack_session_init(session_id, void* client_context)` — `extern "C"` hook handler `dlsym`-registered with patched Quack via `quack_set_session_init_hook`. On each new per-session Quack `Connection`, looks up the session_id in the SessionMap and stamps the tenant_id onto the freshly-spawned `ClientContext` via the fork's `duckdb_set_tenant_id_on_context` (also `dlsym`'d). On vanilla DuckDB / stock Quack the fork symbols aren't present and the bridge degrades silently — community-extension compatibility preserved.
 - **`LookupQuackSecret` auto-vend** in `boilstream_secret_storage.cpp`: on first ATTACH against a `quack:` URI with no `TYPE quack` secret in cache, fetches one through the existing /secrets bootstrap path.
-- **Tests**: `test/cpp/test_quack_attach_red.cpp` (TDD reproducer for the secret-lookup regression, now wired into CMakeLists and CTest as `QuackAttachRedTests`); SQL tests `test/sql/quack_attach_with_manual_secret.test`, `test/sql/quack_bridge.test`, `test/sql/quack_secret_autovend.test`.
+- **Tests**: `test/cpp/test_quack_attach_red.cpp` (TDD reproducer for the secret-lookup regression, now wired into CMakeLists and CTest as `QuackAttachRedTests`); SQL tests `test/sql/quack_attach_with_manual_secret.test`, `test/sql/quack_secret_autovend.test`.
 - **`BOILSTREAM_INSECURE_TLS=1`** local-dev knob: skips certificate verification when set (intended only for `localhost` self-signed cert setups).
 
 ### Diagnostics

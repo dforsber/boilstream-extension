@@ -1,0 +1,182 @@
+UPDATE — 2026-11-07
+The production Rust dependency finding below is fixed by a pinned upstream
+OPAQUE upgrade (crypto-bigint 0.7.10); raw audit has zero findings/warnings.
+See scripts/security/OPAQUE_UPGRADE.txt and cargo-audit-2026-11-07.json.
+Threaded Quack now passes strict compatibility with the fresh source-built
+paired artifact; the public Quack URL remains incompatible. See
+test/wasm/QUACK_COMPATIBILITY.md. Host findings below remain unchanged.
+
+Historical 0.8.1 audit follows:
+
+BoilStream extension security review — 2026-11-06
+
+Base revision: 9a877918f3ec533c6cce72e1f316fc353b203897
+Reviewed candidate: working tree on codex/release-0.8.1-hardening (not published)
+DuckDB revision: d54cbbe3df17e8e5ce68312f483b4155836112aa
+Scope: standalone Rust dependency graph, extension authentication/transport/FFI,
+credential lifetime, bundled C/C++ libraries, and WASM test tooling. This is a
+source/dependency review, not a penetration test or a proof of absence of flaws.
+
+FINDINGS (status after remediation and three independent reviews)
+
+1. HIGH — Bundled Brotli decoder lacks CVE-2026-111497 fix.
+   duckdb/third_party/brotli/common/version.h:20 declares 1.1.0.
+   duckdb/third_party/brotli/dec/decode.cpp:1075 still uses the vulnerable boolean
+   block-switch handling; compared directly with upstream v1.1.0...v1.1.1 patch.
+   duckdb/extension/parquet/column_reader.cpp:658 calls the decoder on Parquet data.
+   Upstream describes an out-of-bounds write with potential remote code execution.
+   Affected when the host includes this bundled Parquet/Brotli implementation and
+   reads attacker-controlled Brotli-compressed data. This is a host dependency;
+   the BoilStream loadable extension itself does not bundle a Parquet decoder.
+   Upgrade to 1.1.1 or 1.2.1, or carry the upstream security patch in DuckDB.
+   https://github.com/google/brotli/releases/tag/v1.1.1
+   https://github.com/google/brotli/compare/v1.1.0...v1.1.1
+
+2. FIXED IN CANDIDATE — URL userinfo bypass of the HTTPS-only policy.
+   The old parser classified http://localhost:80@attacker.example as localhost,
+   while libcurl interpreted attacker.example as the actual host. Login and
+   registration carry passwords/MFA material; secret writes depend on TLS.
+   src/include/boilstream_security.hpp now rejects ambiguous authorities,
+   userinfo, escapes, control characters and invalid ports. Only exact loopback
+   host forms may use HTTP. Every HTTP boundary revalidates the endpoint and
+   disables automatic redirects. Native URL tests and shared SQL regressions
+   pass in stock DuckDB and both browser bundles. Reviewer found no new bypass.
+
+3. MEDIUM — Provider response allocation remains unbounded (PARTIALLY MITIGATED).
+   Successful GET content callbacks now stop before appending beyond 10 MiB,
+   with overflow-safe arithmetic. All returned HTTP bodies are checked before
+   parsing. These changes bound extension parsing and successful streaming GETs.
+   They DO NOT bound the provider's allocation for POST, DELETE or GET errors.
+   DuckDB 2.0 HTTPParams has no receive-limit field; PostRequestInfo buffers its
+   result. The actual HTTPFS revision below also buffers GET status >=400 without
+   invoking content_handler/response_handler. A malicious server can still exhaust
+   memory before control returns to the extension. Provider-level limits covering
+   all status codes, chunked and decoded bodies are required. Host/provider changes
+   are deferred by the user. This cap concerns auth/secret-service messages, not
+   arbitrary SQL query result sets. Do not treat a
+   Content-Length check, timeout or post-receive size check as a complete fix.
+   https://github.com/duckdb/duckdb-httpfs/blob/77392a72077a85897db2519fae11e2c0da972b8a/src/http/httpfs_curl_client.cpp
+
+4. MEDIUM — yyjson 0.9.0 contains GHSA-f4vc-345x-4mvm.
+   duckdb/third_party/yyjson/yyjson.cpp:4252 retains the exact vulnerable u32
+   truncation of a pointer difference before the bigint digit cap.
+   Upstream requires a carefully constructed numeric token larger than 4 GiB on
+   a 64-bit target. Likely impact is a crash; reliable code execution is not
+   established. The large input prerequisite is significant. This is not a
+   demonstrated exploit of the wasm32 build. The candidate caps native authentication JSON before parsing at 10 MiB,
+   below this prerequisite; other host JSON entrypoints remain affected.
+   Upgrade yyjson to 0.13.0 or backport the upstream full-width length fix.
+   https://github.com/ibireme/yyjson/security/advisories/GHSA-f4vc-345x-4mvm
+
+5. MEDIUM / reachability not established — Rust crypto-bigint timing advisory.
+   cargo audit 0.22.0, standalone Cargo.lock: 74 dependencies, 1 vulnerability,
+   no informational warnings. Advisory DB revision:
+   309392b18f6b17022f82c701f300433126901068 (updated 2026-11-06).
+   RUSTSEC-2026-0387 matches crypto-bigint 0.5.5; patched version >=0.7.6.
+   Active dependency paths:
+     opaque-client -> opaque-ke 3.0.0 -> elliptic-curve 0.13.8 -> crypto-bigint
+     opaque-client -> opaque-ke -> voprf 0.5.0 -> elliptic-curve -> crypto-bigint
+   The selected ciphersuite uses Ristretto255/curve25519-dalek. The package match
+   and compiled dependency are confirmed. Independent review agrees with the
+   source-path assessment in scripts/security/RUSTSEC-2026-0387.txt: selected
+   secret arithmetic uses dalek, not crypto-bigint; elliptic-curve supplies hash
+   expansion. This is an applicability assessment, not a patched dependency or
+   timing proof. The raw cargo audit still fails and is not suppressed. Do not
+   describe this as demonstrated OPAQUE key recovery. Upgrade the compatible
+   dependency chain or document and verify an explicit reachability assessment;
+   forcing a 0.7.6 version into the old elliptic-curve requirement is not a fix.
+   https://rustsec.org/advisories/RUSTSEC-2026-0387.html
+
+6. REMEDIATED IN EXTENSION-OWNED PATHS — Credential erasure.
+   Session snapshots and OPAQUE finish results now erase owned token/key strings
+   on destruction and prohibit overwriting copy assignment. Request key copies,
+   decoded keys, derived stack keys, passwords, bootstrap/TOTP strings and the
+   TOTP stack buffer have scope guards; login error paths erase before clear.
+   Serializer output allocations and decrypted plaintext erase on exceptions too.
+   Regression tests cover normal protocol operation and exceptional scope erasure.
+   No guard was found to erase a returned NRVO object in independent review.
+   yyjson readers and writers now use an erasing arena, including superseded
+   writer buffers; the binary serializer uses an erasing stream. HTTP request,
+   response and public header/parameter copies have cleanup guards. Managed
+   credential envelopes erase tokens on assignment/destruction. OPAQUE state
+   ownership begins immediately, covering exceptions before the finish call.
+   Rust AES plaintext and TOTP URI/encoded-seed copies use Zeroizing; URI builders
+   reserve checked capacities before writing secrets. Tests observe real erased
+   allocations before free, not merely an independent zeroization helper.
+   Boundary: caller-owned SQL inputs/results, provider-private repeated headers,
+   network/TLS buffers and upstream crypto internals remain host/library-owned.
+   No claim that every system-wide credential copy is erased or that this prevents
+   a compromised process from reading live credentials. DuckDB is unchanged.
+
+C/C++ DEPENDENCY AUDIT
+
+vcpkg.json has no direct packages. CMake fetches Corrosion v0.5.2 for native builds;
+DuckDB supplies the bundled libraries. Native HTTPFS and Quack are runtime-loaded. The tested macOS ARM64 HTTPFS is
+revision 77392a72077a85897db2519fae11e2c0da972b8a, SHA256
+c2d72a98ad081bf4d62c908b8d9f60b70ab1b83faa9141fc7e7d53526658761d.
+Quack is in the core repository: INSTALL quack succeeds. Tested native revision
+f96420ed46, macOS ARM64 artifact SHA256
+ef547f01cb30412aa6dbade59bdd5254ed897ba4f113a1700e3e01e00a747935. The earlier community
+repository 404 was corrected. Native macOS/Linux ARM64 integration and browser
+EH loading/secret ownership pass. The official threaded Quack artifact imports
+non-shared memory and fails in the shared-memory runtime. Pinned URLs/hashes
+and strict failure criteria are recorded in test/wasm/baseline.json and
+test/wasm/WASM_TEST_STATUS.md. Other deployment artifacts,
+the externally supplied Rust bridge, and platform TLS libraries require auditing
+against the actual deployment artifacts, not a guessed system library version.
+
+All host third_party directory Git trees are recorded in
+scripts/security/cpp-source-inventory.json; incomplete advisory coverage is explicit.
+
+Confirmed source versions:
+  Brotli 1.1.0: affected; see finding 1.
+  yyjson 0.9.0: affected; see finding 4.
+  cpp-httplib 0.53.1: inspected all 23 published upstream repository advisories;
+    the listed fixed versions precede this checkout's version. DuckDB's local
+    patch series was also inspected. No applicable published advisory found.
+    https://github.com/yhirose/cpp-httplib/security/advisories
+  mbedTLS 3.6.7: includes the fixes in the upstream July 2026 security release.
+    DuckDB builds a crypto subset rather than the full TLS handshake library.
+    No applicable published advisory identified in the checked source version.
+    https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-3.6.7
+  fmt 6.1.2: published fmt::say advisory affects >=8.0.0,<12.0.0, not this version.
+  zstd 1.5.6, LZ4 1.9.4, utf8proc 2.9.0, jemalloc 5.3.0-196-ga25b9b8b:
+    source versions identified; no applicable vulnerability confirmed in this review.
+  Other vendored code (including modified miniz, RE2, Snappy, Thrift, FSST and
+    small header libraries) does not have a complete package/version inventory
+    here. It is not certified clean by the above findings.
+
+OSV OSS-Fuzz version queries returned no matches for the queried libraries,
+including yyjson despite its confirmed upstream advisory. These results are a
+coverage limitation, NOT evidence that the C++ dependency set is clean. Primary
+upstream advisories and source patch comparisons supplied the actionable findings.
+
+WASM TOOLING FINDING FIXED DURING TEST WORK
+
+The previous test/wasm/server.js exempted /build/ requests from its '..' check
+and listened on all interfaces with wildcard CORS. A crafted /build/../../ path
+could read files outside the intended build directory. The replacement listens
+only on loopback, serves an exact asset allowlist, rejects traversal, and removes
+the unauthenticated authentication proxy. Regression checks cover these cases.
+The old browser test also logged bootstrap-token prefixes; the new hermetic test
+page accepts no real credentials.
+
+VALIDATION
+
+  cargo audit --file opaque-client/Cargo.lock --json
+  cargo tree --locked --manifest-path opaque-client/Cargo.toml -i crypto-bigint
+  cargo test --locked --manifest-path opaque-client/Cargo.toml
+
+31 Rust tests pass, including a complete production-C-ABI OPAQUE registration/login
+against an actual server, wrong-password rejection and tampered-proof rejection.
+19 native executables and all five SQL files pass on macOS ARM64 and Linux ARM64,
+with zero SQL skips. The Linux run exposed and fixed missing <memory> in a test
+fixture and Rust tests that assumed signed C char. Rust isize declarations now
+use intptr_t, correcting Windows LLP64 ABI width.
+12 browser-harness tests pass; real Chromium EH/threads suites pass 68/70 checks.
+WASM FFI passes 26 base assertions and 27 threaded assertions; the threaded suite
+asserts execution on a real pthread. npm audit reports zero vulnerabilities.
+The Rust advisory and host/provider limitations above remain open. Full browser
+server-authentication and rotation are not qualified; Quack works natively and
+in EH, but threaded Quack remains explicitly unsupported.
+See test/wasm/WASM_TEST_STATUS.md and RELEASE_READINESS.txt for release boundaries.

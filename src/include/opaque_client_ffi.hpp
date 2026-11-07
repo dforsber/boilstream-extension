@@ -65,9 +65,9 @@ int opaque_client_derive_refresh_token(const uint8_t *session_key, size_t sessio
 /// @param plaintext_out Pointer to output buffer (must be at least ciphertext_len bytes)
 /// @param plaintext_out_len Size of output buffer
 /// @return Length of plaintext on success, -1 on error (including auth tag verification failure)
-long opaque_client_aes_gcm_decrypt(const uint8_t *ciphertext_with_tag, size_t ciphertext_with_tag_len,
-                                   const uint8_t *nonce, size_t nonce_len, const uint8_t *encryption_key,
-                                   size_t encryption_key_len, uint8_t *plaintext_out, size_t plaintext_out_len);
+intptr_t opaque_client_aes_gcm_decrypt(const uint8_t *ciphertext_with_tag, size_t ciphertext_with_tag_len,
+                                       const uint8_t *nonce, size_t nonce_len, const uint8_t *encryption_key,
+                                       size_t encryption_key_len, uint8_t *plaintext_out, size_t plaintext_out_len);
 
 //===----------------------------------------------------------------------===//
 // Email/Password Registration FFI
@@ -91,7 +91,7 @@ int registration_validate_password(const uint8_t *password, size_t password_len)
 /// @param uri_buffer Pointer to output buffer for URI
 /// @param uri_buffer_len Size of output buffer
 /// @return Length of URI written to buffer on success, -1 on error (buffer too small or invalid input)
-long registration_build_totp_uri(const char *email, const char *secret, const char *issuer, char *uri_buffer,
-                                 size_t uri_buffer_len);
+intptr_t registration_build_totp_uri(const char *email, const char *secret, const char *issuer, char *uri_buffer,
+                                     size_t uri_buffer_len);
 
 } // extern "C"

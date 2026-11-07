@@ -4,8 +4,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "yyjson.hpp"
-#include "duckdb/main/tenant/active_tenant_registry.hpp"
-#include "duckdb/main/tenant/tenant_context.hpp"
+#include "client_test_context.hpp"
 #include <iostream>
 #include <sstream>
 using namespace duckdb;
@@ -55,7 +54,8 @@ int main(int argc, char **argv) {
 	DuckDB db(nullptr, &cfg);
 	Connection c(db);
 	SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
-	Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
+	Connection transport_connection(db);
+	LoadTestHttpfs(transport_connection);
 	Require(!c.Query("SET httpfs_client_implementation='curl'")->HasError());
 	auto owned_storage = make_uniq<RestApiSecretStorage>(*db.instance, "");
 	auto &storage = *owned_storage;
@@ -142,26 +142,24 @@ int main(int argc, char **argv) {
 		}
 	test("forged_reply_retires_only_its_published_tenant", [&] {
 		Connection a(db), b(db);
-		TenantContext tenant_a, tenant_b;
-		tenant_a.SetTenantId("42");
-		tenant_b.SetTenantId("43");
+		const string tenant_a = "42", tenant_b = "43";
 		auto state_a = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*state_a);
 		auto state_b = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*state_b);
 		state_b->session_key.assign(64, 9);
 		{
-			ActiveTenantRegistry::Guard guard(*db.instance, &tenant_a);
+			ScopedClientTenant guard(*a.context, tenant_a);
 			BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, state_a);
 		}
 		{
-			ActiveTenantRegistry::Guard guard(*db.instance, &tenant_b);
+			ScopedClientTenant guard(*b.context, tenant_b);
 			BoilstreamSessionPublicationTestAccess::Publish(storage, *b.context, state_b);
 		}
 		Require(state_a->authenticated_tenant == "42" && state_b->authenticated_tenant == "43");
 		bool rejected = false;
 		{
-			ActiveTenantRegistry::Guard guard(*db.instance, &tenant_a);
+			ScopedClientTenant guard(*a.context, tenant_a);
 			try {
 				storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_a);
 			} catch (const IOException &) {
@@ -172,7 +170,7 @@ int main(int argc, char **argv) {
 		Require(storage.GetSessionForConnection(b.context->GetConnectionId()) == state_b);
 		Require(!state_b->secret_cache->IsClosed() && state_b->refresh_token == vector<uint8_t>(32, 8));
 		{
-			ActiveTenantRegistry::Guard guard(*db.instance, &tenant_b);
+			ScopedClientTenant guard(*b.context, tenant_b);
 			Require(storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_b) == "synthetic-result");
 		}
 	});

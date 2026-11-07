@@ -97,11 +97,6 @@ public:
 	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
 
 	//! Private embedding API. No SQL binding or constructor from claimed IDs.
-	void InstallLocalSession(ClientContext &context, const BoilstreamLocalSecretHostV2 &host);
-	string RequestLocal(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-	BoilstreamLocalSecretProvider::Response
-	RequestLocalResponse(ClientContext &context, BoilstreamConnectionState &state, const string &request);
-	void ValidateLocal(ClientContext &context, BoilstreamConnectionState &state);
 
 	//! Perform OPAQUE login with password
 	//! Authenticate private state, then publish it for this connection
@@ -267,6 +262,8 @@ private:
 	bool SecretOwnerStillCurrent(optional_ptr<CatalogTransaction> transaction, const SecretOwner &owner,
 	                             uint64_t generation);
 
+	vector<SecretEntry> CloneOwnedSecretSnapshot(optional_ptr<CatalogTransaction> transaction, const SecretOwner &owner,
+	                                             uint64_t generation);
 	shared_ptr<BoilstreamSecretCache> GetSecretCache(optional_ptr<CatalogTransaction> transaction, bool create = false);
 	SecretMatch LookupCachedSecret(const string &path, const string &type,
 	                               const shared_ptr<BoilstreamSecretCache> &cache);

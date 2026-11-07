@@ -1,3 +1,4 @@
+#include "client_test_context.hpp"
 // Synthetic marker checks; never print captured native diagnostics or exceptions.
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
@@ -99,7 +100,7 @@ int main(int argc, char **argv) {
 	DuckDB db(nullptr, &config);
 	Connection connection(db);
 	SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
-	Require(ExtensionHelper::LoadExtension(db, "httpfs") == ExtensionLoadResult::LOADED_EXTENSION);
+	LoadTestHttpfs(connection);
 	auto set = connection.Query("SET httpfs_client_implementation='curl'");
 	Require(set && !set->HasError());
 	db.LoadStaticExtension<BoilstreamExtension>();

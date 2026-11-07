@@ -1,177 +1,79 @@
-# DuckDB WASM + Boilstream Extension Tests
+# DuckDB 2.0 WASM regression tests
 
-This directory contains tests for the boilstream DuckDB extension in both native and WASM environments.
+`npm test` runs real Chromium workers against the built BoilStream WASM extension.
+It does not run native DuckDB, use a CDN, or accept missing extensions as success.
 
-## Overview
+## Baseline
 
-- **Native Extension Testing**: Use Node.js with native DuckDB to test the osx_arm64 extension
-- **WASM Extension Testing**: Use browser with duckdb-wasm to test the WASM extension
+`baseline.json` records the exact package, DuckDB source revision, engine version,
+Emscripten version, and supported platforms. The npm package version is **not** the
+DuckDB engine version: `@duckdb/duckdb-wasm@1.33.1-dev114.0` contains DuckDB **v2.0.0**.
+The test asserts `SELECT version()` and `PRAGMA platform` before loading BoilStream.
+Use the single-threaded `base` bundle for `wasm_eh`, and the `threads` bundle for
+`wasm_threads`. The old MVP bundle is not part of this DuckDB 2.0 baseline.
 
-## Important: WASM vs Native
+## Run
 
-⚠️ **The native Node.js `duckdb` package CANNOT load WASM extensions!**
+From the repository root:
 
-- Native `duckdb` package expects platform-specific binaries (e.g., `osx_arm64`)
-- WASM extensions must be loaded in `@duckdb/duckdb-wasm` (browser environment)
-
-## Setup
-
-```bash
-npm install
+```sh
+npm ci --prefix test/wasm
+(cd test/wasm && npx playwright install chromium)
+rustup toolchain install 1.94.1 --profile minimal --target wasm32-unknown-emscripten
+rustup toolchain install nightly-2026-08-06 --profile minimal --component rust-src
+./build-wasm-fixed.sh wasm_eh
+scripts/build-quack-wasm.sh
+./build-wasm-fixed.sh wasm_threads
+npm test --prefix test/wasm
+npm run test:compatibility --prefix test/wasm
 ```
 
-## WASM Extension Testing (Browser)
+The build requires the Emscripten and Rust versions in `baseline.json`, plus
+the `wasm32-unknown-emscripten` target. It rejects source/toolchain mismatches and
+propagates build failures. The qualification helper starts each variant from fresh build output; the browser runner checks source and artifact hashes against the completed build receipt. Direct community make targets remain available and unchanged in purpose. It never restores old artifacts or changes metadata to
+make an incompatible binary appear compatible.
 
-### Start the Test Server
+For one platform, use `WASM_VARIANTS=wasm_eh npm test --prefix test/wasm` (or
+`wasm_threads`). `BOILSTREAM_WASM_BUILD_DIR` can point to another build root with
+`<variant>/extension/boilstream/boilstream.duckdb_extension.wasm` beneath it.
+CI runs both platforms independently in `WasmTests.yml`.
+The threaded variant rebuilds Rust's standard library with atomics using the
+pinned `rustThreadsToolchain`; rustup's prebuilt standard library cannot be
+linked safely into a shared-memory module.
 
-```bash
-npm run serve
-```
+For the threaded bundle, open with `maximumThreads: 1`, load the extension, then
+`SET threads = 2`. Loading after starting the query worker pool can stall in the
+pinned runtime; see [WASM_TEST_STATUS.md](WASM_TEST_STATUS.md). The tests exercise
+two-thread operation after the extension has loaded.
 
-This starts an HTTP server at `http://localhost:8080`
+For interactive inspection, run `npm run serve --prefix test/wasm` and open the
+printed loopback URL. The page runs the core suite; Node adds harness and compatibility checks. No authentication token
+or real account is needed. The server exposes only declared assets and does not
+proxy authentication traffic.
 
-### Run the Test
+## Coverage and boundaries
 
-1. Open your browser to: http://localhost:8080/test-wasm-browser.html
-2. Click the **"Run Test"** button
-3. Watch the log output
+- Actual DuckDB 2.0 engine and matching WASM platform; extension load and registration.
+- Shared `test/sql/boilstream_pragmas.test` and `boilstream_grammar.test`, including
+  exact query results, expected error messages, grammar/PRAGMA equivalence,
+  new-connection grammar activation, argument validation, and no-session behavior.
+- Shared `client_boundary.test`: client APIs remain registered and server-only
+  authentication functions are absent.
+- Unowned authentication result IDs, empty unauthenticated secret stores on two
+  connections, recovery after rejected operations, and malformed extension rejection.
+- Real-worker negative tests prove wrong engine baselines and missing artifacts fail.
+- Optional Quack absence is tested with a local 404 fixture. A separate mandatory run requires successful loading and client secret registration: EH uses the pinned public artifact; threads uses a fresh source build with verified shared-memory imports. No incompatibility is accepted as success. See [QUACK_COMPATIBILITY.md](QUACK_COMPATIBILITY.md) for artifact provenance and deployment requirements.
+- Test-harness regressions ensure failures cannot become warnings or false passes.
+- Both single-threaded and threaded workers, with deadlines and worker cleanup.
+- Server path traversal rejection, byte ranges, and cross-origin isolation headers.
 
-### What the Test Does
+CI also executes 26 base / 27 threaded Rust WASM FFI assertions using the same archive linked into
+each extension, including RFC 4231 HMAC and malformed OPAQUE response checks.
+See [`../../opaque-client/test-wasm/README.md`](../../opaque-client/test-wasm/README.md).
 
-1. ✅ Loads DuckDB WASM from CDN
-2. ✅ Creates a worker and instantiates DuckDB
-3. ✅ Runs a basic query (`SELECT 42`)
-4. ⏳ Attempts to load the boilstream extension
-
-### Expected Results
-
-**If extension is properly set up:**
-```
-✅ SUCCESS: Boilstream extension is loaded and ready!
-```
-
-**If extension needs setup:**
-```
-⚠️  DuckDB works, extension loading needs setup
-```
-
-## Extension Repository Setup
-
-For the WASM extension to load, it must be in the DuckDB extension repository format:
-
-```
-build/wasm_threads/repository/
-└── v1.4.3/
-    └── wasm_threads/
-        ├── boilstream.duckdb_extension.wasm
-        └── boilstream.duckdb_extension.info  (optional metadata)
-```
-
-This structure is created automatically when you build with:
-```bash
-make wasm_mvp
-# or
-make wasm_threads
-```
-
-## Native Extension Testing (Node.js)
-
-⚠️ **Note**: This tests the NATIVE extension, not WASM!
-
-```bash
-npm test
-```
-
-This uses the native `duckdb` package and loads:
-```
-build/release/repository/v1.4.3/osx_arm64/boilstream.duckdb_extension
-```
-
-## Files
-
-- `test-wasm-browser.html` - Browser-based test for WASM extension
-- `server.js` - Simple HTTP server for serving the test
-- `test-native.js` - Node.js test for native extension (for comparison)
-- `package.json` - Dependencies and scripts
-
-## Architecture
-
-### WASM Extension Loading
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Browser                                            │
-│  ┌───────────────────────────────────────────────┐ │
-│  │  @duckdb/duckdb-wasm                          │ │
-│  │  (from CDN: jsdelivr.net)                     │ │
-│  └───────────────────────────────────────────────┘ │
-│                     ↓                               │
-│  ┌───────────────────────────────────────────────┐ │
-│  │  LOAD boilstream                              │ │
-│  └───────────────────────────────────────────────┘ │
-│                     ↓                               │
-│  ┌───────────────────────────────────────────────┐ │
-│  │  Fetch from repository:                       │ │
-│  │  /build/wasm_threads/repository/v1.4.3/       │ │
-│  │         wasm_threads/boilstream.wasm          │ │
-│  └───────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
-```
-
-### Why a Web Server?
-
-The test needs a web server because:
-
-1. **CORS**: WASM files must be served with proper headers
-2. **File Access**: Browsers can't access local files via `file://` protocol
-3. **Extension Loading**: DuckDB needs to fetch the extension via HTTP
-
-## Troubleshooting
-
-### Extension Not Loading
-
-**Error**: `Extension 'boilstream' not found`
-
-**Solution**:
-1. Build the WASM extension: `make wasm_threads`
-2. Verify the file exists:
-   ```bash
-   ls build/wasm_threads/repository/v1.4.3/wasm_threads/boilstream.duckdb_extension.wasm
-   ```
-3. Restart the server: `npm run serve`
-
-### CORS Errors
-
-**Error**: `Cross-Origin Request Blocked`
-
-**Solution**: Make sure you're accessing via `http://localhost:8080`, not `file://`
-
-### Worker Errors
-
-**Error**: `SharedArrayBuffer is not defined`
-
-**Solution**: The server sets the required headers automatically:
-- `Cross-Origin-Opener-Policy: same-origin`
-- `Cross-Origin-Embedder-Policy: require-corp`
-
-If you're using a different server, add these headers.
-
-## Next Steps
-
-Once the extension loads successfully:
-
-1. Test the PRAGMA command:
-   ```javascript
-   await conn.query("PRAGMA boilstream_bootstrap_session('https://localhost/secrets/:TOKEN')");
-   ```
-
-2. Test secret retrieval functions
-
-3. Integration testing with real boilstream server
-
-## Package Versions
-
-- `@duckdb/duckdb-wasm`: v1.32.0 (browser WASM)
-- `duckdb`: v1.4.3 (native Node.js, for comparison testing)
-
-Both are compatible with DuckDB v1.4.x extensions.
+Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the EH Quack artifact and verifies its pinned SHA256; the threaded artifact must be freshly built with scripts/build-quack-wasm.sh and match its input/output receipt before being served locally. The unavailable-dependency case is separate. Successful OPAQUE
+login, encrypted response verification, credential rotation, authenticated
+cross-connection isolation, and remote catalog access require protocol fixtures
+or a separately provisioned integration environment. Native C++ crypto/concurrency
+and Rust tests remain complementary; they do not qualify browser execution of
+those paths. See `WASM_TEST_STATUS.md` for the last local execution result.

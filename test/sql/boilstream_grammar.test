@@ -61,11 +61,13 @@ CREATE DUCKLAKE 'my_lake' 'a description';
 ----
 boilstream_create_ducklake: No endpoint configured
 
+# wasm-error: requires native DuckDB and is not available in DuckDB-WASM
 statement error
 ATTACH DUCKLAKE 'not-a-uuid' AS my_lake;
 ----
 catalog_id must be a canonical UUID
 
+# wasm-error: requires native DuckDB and is not available in DuckDB-WASM
 statement error
 ATTACH DUCKLAKE '7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10' AS my_lake;
 ----

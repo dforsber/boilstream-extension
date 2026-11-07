@@ -9,11 +9,12 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
+#include "boilstream_security.hpp"
 
 #include "duckdb/main/client_context_state.hpp"
 #include "boilstream_secret_cache.hpp"
-#include "boilstream_local_secret_provider.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include <chrono>
 #include <vector>
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <thread>
 
 namespace duckdb {
@@ -29,6 +31,25 @@ namespace duckdb {
 //! authenticated connection state so concurrent tenants can never overwrite
 //! each other's capability or server trust in DuckDB's catalog-global secret set.
 struct ManagedCatalogCredentialEnvelope {
+	ManagedCatalogCredentialEnvelope() = default;
+	ManagedCatalogCredentialEnvelope(const ManagedCatalogCredentialEnvelope &) = default;
+	~ManagedCatalogCredentialEnvelope() {
+		boilstream::Wipe(token);
+	}
+	ManagedCatalogCredentialEnvelope &operator=(const ManagedCatalogCredentialEnvelope &other) {
+		if (this != &other) {
+			boilstream::Wipe(token);
+			token = other.token;
+			expires_at = other.expires_at;
+			endpoint = other.endpoint;
+			catalog_id = other.catalog_id;
+			storage_owner_tenant_id = other.storage_owner_tenant_id;
+			catalog_group = other.catalog_group;
+			server_ca_pem = other.server_ca_pem;
+		}
+		return *this;
+	}
+
 	string token;
 	string expires_at;
 	string endpoint;
@@ -51,29 +72,22 @@ public:
 
 	//! Session state snapshot for thread-safe access
 	struct SessionSnapshot {
+		SessionSnapshot &operator=(const SessionSnapshot &) = delete;
 		string access_token;
 		vector<uint8_t> session_key;
 		string region;
 		uint64_t sequence;
 		bool has_session_key;
+		~SessionSnapshot() {
+			boilstream::Wipe(access_token);
+			boilstream::Wipe(session_key);
+		}
 	};
 
 	explicit BoilstreamConnectionState(string endpoint = "")
 	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()),
-	      authentication_endpoint(std::move(endpoint)), local_session(false) {
-	}
-
-	explicit BoilstreamConnectionState(shared_ptr<BoilstreamLocalSecretProvider> provider)
-	    : client_sequence(0), token_expires_at(provider->ExpiresAt()), is_exchanging(false),
-	      last_version_check(std::chrono::system_clock::time_point::min()), local_provider(std::move(provider)),
-	      local_session(true) {
-	}
-
-	// Dispatch kind survives logout. Revoking authority must never switch a
-	// local operation into remote fallback or turn its failure into a cache miss.
-	bool IsLocalSession() const {
-		return local_session;
+	      authentication_endpoint(std::move(endpoint)) {
 	}
 
 	//! Prevent copying (contains mutex)
@@ -126,9 +140,6 @@ public:
 	//! Last time catalog versions were checked
 	std::chrono::system_clock::time_point last_version_check;
 
-	//! Local callbacks can re-enter on another worker: never wait for them.
-	std::atomic<bool> in_secret_lookup {false};
-
 private:
 	std::mutex remote_lookup_mutex;
 	std::condition_variable remote_lookup_changed;
@@ -141,12 +152,7 @@ public:
 	class SecretLookupGuard {
 	public:
 		explicit SecretLookupGuard(BoilstreamConnectionState &state, const std::function<bool()> &cancelled = {})
-		    : state_(state), acquired_(false), remote_(!state.IsLocalSession()) {
-			if (!remote_) {
-				bool expected = false;
-				acquired_ = state_.in_secret_lookup.compare_exchange_strong(expected, true);
-				return;
-			}
+		    : state_(state), acquired_(false) {
 			std::unique_lock<std::mutex> lock(state_.remote_lookup_mutex);
 			const auto thread = std::this_thread::get_id();
 			while (state_.remote_lookup_active) {
@@ -163,10 +169,6 @@ public:
 		~SecretLookupGuard() {
 			if (!acquired_)
 				return;
-			if (!remote_) {
-				state_.in_secret_lookup.store(false);
-				return;
-			}
 			{
 				std::lock_guard<std::mutex> lock(state_.remote_lookup_mutex);
 				state_.remote_lookup_active = false;
@@ -183,7 +185,6 @@ public:
 	private:
 		BoilstreamConnectionState &state_;
 		bool acquired_;
-		bool remote_;
 	};
 
 	//========================================================================
@@ -226,8 +227,6 @@ public:
 	//! Check if session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid() {
 		lock_guard<mutex> lock(session_lock);
-		if (local_provider)
-			return !local_provider->Expired();
 		if (access_token.empty() || session_key.empty()) {
 			return false;
 		}
@@ -266,16 +265,8 @@ public:
 	//! Detect logout while a replacement exchange is in flight.
 	std::atomic<uint64_t> authentication_generation {0};
 
-	// Written only while unpublished; copies are taken under session_lock.
-	shared_ptr<BoilstreamLocalSecretProvider> local_provider;
-	shared_ptr<BoilstreamLocalSecretProvider> GetLocalProvider() {
-		lock_guard<mutex> lock(session_lock);
-		return local_provider;
-	}
-
 	//! Clear session state (on error or logout)
 	void ClearSession() {
-		shared_ptr<BoilstreamLocalSecretProvider> retired_local;
 		secret_cache->Close();
 		{
 			lock_guard<mutex> lock(expiration_lock);
@@ -284,7 +275,6 @@ public:
 		{
 			authentication_generation.fetch_add(1);
 			lock_guard<mutex> lock(session_lock);
-			retired_local = std::move(local_provider);
 			// Secure memory wiping using volatile to prevent compiler optimization
 			SecureZeroString(access_token);
 			access_token.clear();
@@ -298,12 +288,21 @@ public:
 			is_exchanging = false;
 			bootstrap_token_hash.clear();
 		}
-		ClearManagedCatalogCredentials();
+		// Retire under the same mutex used by publication. A worker finishing
+		// after logout cannot resurrect credentials in this old session object.
+		{
+			lock_guard<mutex> lock(managed_catalog_credentials_lock);
+			managed_catalog_cache_closed = true;
+			SecureClearManagedCatalogCredentials();
+		}
 	}
 
 	//! Cache one exact managed credential for this authenticated connection.
 	void StoreManagedCatalogCredential(const string &scope, const ManagedCatalogCredentialEnvelope &credential) {
 		lock_guard<mutex> lock(managed_catalog_credentials_lock);
+		if (managed_catalog_cache_closed) {
+			throw IOException("Managed credential session is closed");
+		}
 		static constexpr idx_t MAX_MANAGED_CATALOG_CREDENTIALS = 10000;
 		if (managed_catalog_credentials.size() >= MAX_MANAGED_CATALOG_CREDENTIALS &&
 		    managed_catalog_credentials.find(scope) == managed_catalog_credentials.end()) {
@@ -322,7 +321,7 @@ public:
 	bool TryGetManagedCatalogCredential(const string &scope, ManagedCatalogCredentialEnvelope &credential) {
 		lock_guard<mutex> lock(managed_catalog_credentials_lock);
 		auto entry = managed_catalog_credentials.find(scope);
-		if (entry == managed_catalog_credentials.end()) {
+		if (managed_catalog_cache_closed || entry == managed_catalog_credentials.end()) {
 			SecureZeroManagedCatalogCredential(credential);
 			credential = ManagedCatalogCredentialEnvelope {};
 			return false;
@@ -331,7 +330,7 @@ public:
 		return true;
 	}
 
-	//! Remove all managed credentials on logout/session reset.
+	//! Invalidate entries without retiring a live session (capacity/version refresh).
 	void ClearManagedCatalogCredentials() {
 		lock_guard<mutex> lock(managed_catalog_credentials_lock);
 		SecureClearManagedCatalogCredentials();
@@ -356,6 +355,8 @@ public:
 	}
 
 private:
+	bool managed_catalog_cache_closed = false; // Guarded by managed_catalog_credentials_lock.
+
 	static void SecureZeroManagedCatalogCredential(ManagedCatalogCredentialEnvelope &credential) {
 		SecureZeroString(credential.token);
 	}
@@ -422,7 +423,6 @@ public:
 private:
 	friend class RestApiSecretStorage;
 	string authentication_endpoint;
-	const bool local_session;
 };
 
 } // namespace duckdb

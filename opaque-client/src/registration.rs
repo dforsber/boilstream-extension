@@ -1,3 +1,4 @@
+use zeroize::Zeroizing;
 // Email/Password Registration with MFA Enrollment
 // Provides data structures and utilities for user registration flow
 
@@ -162,16 +163,38 @@ pub fn validate_password(password: &str) -> Result<(), RegistrationError> {
 pub fn build_totp_uri(email: &str, secret: &str, issuer: Option<&str>) -> String {
     let issuer = encode_uri_component(issuer.unwrap_or("BoilStream"));
     let email = encode_uri_component(email);
-    let secret = encode_uri_component(secret);
-    format!(
-        "otpauth://totp/{}:{}?secret={}&issuer={}&algorithm=SHA512&digits=6&period=30",
-        issuer, email, secret, issuer
-    )
+    let secret = Zeroizing::new(encode_uri_component(secret));
+    let parts = [
+        "otpauth://totp/",
+        &issuer,
+        ":",
+        &email,
+        "?secret=",
+        secret.as_str(),
+        "&issuer=",
+        &issuer,
+        "&algorithm=SHA512&digits=6&period=30",
+    ];
+    let capacity = parts
+        .iter()
+        .try_fold(0usize, |size, part| size.checked_add(part.len()))
+        .expect("TOTP URI size overflow");
+    // Reserve the entire output before copying the seed: no retired plaintext allocation.
+    let mut uri = String::with_capacity(capacity);
+    for part in parts {
+        uri.push_str(part);
+    }
+    uri
 }
 
 fn encode_uri_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
+    // Each input byte expands to at most three bytes; avoid reallocating secret text.
+    let capacity = value
+        .len()
+        .checked_mul(3)
+        .expect("URI component size overflow");
+    let mut encoded = String::with_capacity(capacity);
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             encoded.push(byte as char);
@@ -194,7 +217,10 @@ pub fn parse_signup_error(response: &SignupResponse) -> RegistrationError {
         Some("SSO_REQUIRED") => RegistrationError::SsoRequired,
         Some("RATE_LIMITED") => RegistrationError::RateLimited,
         _ => RegistrationError::UnknownError(
-            response.error.clone().unwrap_or_else(|| "Unknown error".to_string())
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| "Unknown error".to_string()),
         ),
     }
 }

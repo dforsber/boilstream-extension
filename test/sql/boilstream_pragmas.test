@@ -83,6 +83,7 @@ PRAGMA boilstream_create_ducklake('my_lake');
 ----
 No endpoint configured
 
+# wasm-error: requires native DuckDB and is not available in DuckDB-WASM
 statement error
 PRAGMA boilstream_attach_ducklake('7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10', 'my_lake');
 ----
@@ -91,6 +92,7 @@ requires an active Boilstream session
 statement error
 PRAGMA boilstream_attach_ducklake('7a1cde30-4c5c-4a52-9b7a-0c5e2b2e1f10');
 ----
+No function matches
 
 statement error
 SELECT * FROM boilstream_ducklakes();
@@ -119,3 +121,34 @@ statement error
 SET boilstream.tenant_id = '42';
 ----
 syntax error
+
+# Authority confusion must be rejected before credentials or network I/O.
+statement error
+PRAGMA boilstream_login('http://localhost:80@attacker.example/user@example.com', 'test-password-long', '123456');
+----
+URL authority must not contain userinfo
+
+statement error
+PRAGMA boilstream_register_user('http://127.0.0.1:80@attacker.example/user@example.com', 'test-password-long');
+----
+URL authority must not contain userinfo
+
+statement error
+PRAGMA boilstream_bootstrap_session('http://localhost:80@attacker.example/secrets:token');
+----
+URL authority must not contain userinfo
+
+statement error
+PRAGMA boilstream_login('http://%6cocalhost/user@example.com', 'test-password-long', '123456');
+----
+URL authority must not contain userinfo or escapes
+
+statement error
+PRAGMA boilstream_login('http://localhost:65536/user@example.com', 'test-password-long', '123456');
+----
+URL has invalid port
+
+statement error
+PRAGMA boilstream_login('http://127.1/user@example.com', 'test-password-long', '123456');
+----
+URL must use HTTPS

@@ -30,8 +30,9 @@ struct BoilstreamRegistrationOutput {
 	BoilstreamRegistrationOutput(const BoilstreamRegistrationOutput &) = delete;
 	BoilstreamRegistrationOutput &operator=(const BoilstreamRegistrationOutput &) = delete;
 	~BoilstreamRegistrationOutput() {
-		for (auto &row : rows)
+		for (auto &row : rows) {
 			BoilstreamConnectionState::SecureZeroString(row.value);
+		}
 	}
 };
 class BoilstreamRegistrationContext;

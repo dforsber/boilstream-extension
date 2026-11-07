@@ -268,6 +268,38 @@ TEST_CASE("Managed catalog credentials are isolated per authenticated connection
 	REQUIRE(loaded.token == "member-token");
 }
 
+TEST_CASE("Managed cache invalidation is reusable but retirement rejects late publication",
+          "[quack][credentials][lifetime]") {
+	const string scope = "quack:pod.example.test:9494/catalog/9a927d1b-30f5-48da-91eb-af1492bf31c0";
+	BoilstreamConnectionState state;
+	ManagedCatalogCredentialEnvelope credential, loaded;
+	credential.token = "first-live-token";
+	state.StoreManagedCatalogCredential(scope, credential);
+	REQUIRE(state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == credential.token);
+	state.ClearManagedCatalogCredentials();
+	REQUIRE_FALSE(state.TryGetManagedCatalogCredential(scope, loaded));
+	credential.token = "replacement-live-token";
+	state.StoreManagedCatalogCredential(scope, credential);
+	REQUIRE(state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == credential.token);
+
+	state.ClearSession();
+	REQUIRE(state.managed_catalog_credentials.empty());
+	// Deterministic completion-after-retirement ordering: this is the write
+	// an already validated HTTP worker could otherwise publish after logout.
+	REQUIRE_THROWS_AS(state.StoreManagedCatalogCredential(scope, credential), IOException);
+	REQUIRE(state.managed_catalog_credentials.empty());
+	REQUIRE_FALSE(state.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token.empty());
+	state.ClearManagedCatalogCredentials();
+	REQUIRE_THROWS_AS(state.StoreManagedCatalogCredential(scope, credential), IOException);
+	BoilstreamConnectionState successor;
+	successor.StoreManagedCatalogCredential(scope, credential);
+	REQUIRE(successor.TryGetManagedCatalogCredential(scope, loaded));
+	REQUIRE(loaded.token == credential.token);
+}
+
 TEST_CASE("Catalog-qualified managed credential wins over a broader user secret",
           "[quack][credentials][scope][multitenant]") {
 	QuackAttachFixture fixture;

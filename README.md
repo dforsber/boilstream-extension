@@ -18,15 +18,16 @@ and process restarts require login again. The extension does not save credential
 to files or browser storage, and ignores credential files left by older releases.
 Secure restart login is deferred.
 
-Generic remote secrets are private to the authenticated session and active tenant,
-including worker-thread tenant context in the BoilStream DuckDB fork. A tenant
-change requires login again. Logout, replacement and connection teardown retire
-the owner's cache; credentials are never copied into shared `memory` storage.
-Complete secret lists replace the cache atomically after validation. Each owner
-has at most 10,000 entries, 10 MiB of serialized entries, and 1 MiB per entry;
-capacity errors preserve existing entries. Explicit secrets created without login
-remain local to that connection and tenant. Provider compatibility is qualified
-against the BoilStream DuckDB fork's secret lookup behavior.
+Generic remote secrets are private to the authenticated connection. Logout,
+replacement and connection teardown retire its cache; credentials are never
+copied into shared `memory` storage. Complete secret lists replace the cache
+atomically after validation. Each owner has at most 10,000 entries, 10 MiB of
+serialized entries, and 1 MiB per entry; capacity errors preserve existing
+entries. Explicit secrets created without login remain local to that connection.
+
+This is a client extension for stock DuckDB. It provides remote authentication,
+secret access and Quack client attachment. It does not provide server hosting
+callbacks or an embedded-server session API.
 
 ## Running the extension
 
@@ -92,7 +93,7 @@ SET active_grammar_extensions = ['shell', 'boilstream']; -- DuckDB CLI, keeps th
 
 `RESET active_grammar_extensions` turns the statements back into syntax errors; the PRAGMA forms always
 work. To stop the automatic activation for a whole process, `SET boilstream_grammar_auto_activate = false`
-or export `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` before the first connection opens. Note that DuckDB 2.0 parses dotted setting names only when quoted: `SET "boilstream.tenant_id" = ...`.
+or export `BOILSTREAM_GRAMMAR_AUTO_ACTIVATE=0` before the first connection opens.
 
 ## Local development: trust the test server's CA
 

@@ -20,8 +20,8 @@ public:
 	};
 	using Entries = case_insensitive_map_t<Entry>;
 	static constexpr idx_t MAX_ENTRIES = 10000;
-	static constexpr idx_t MAX_BYTES = 10 * 1024 * 1024;
-	static constexpr idx_t MAX_ENTRY_BYTES = 1024 * 1024;
+	static constexpr idx_t MAX_BYTES = 10ULL * 1024 * 1024;
+	static constexpr idx_t MAX_ENTRY_BYTES = 1024ULL * 1024;
 
 	static shared_ptr<const SecretEntry> PrepareSecret(unique_ptr<const BaseSecret> secret, idx_t bytes) {
 		if (!secret || secret->GetName().GetIdentifierName().empty() || (bytes == 0 || bytes > MAX_ENTRY_BYTES)) {
@@ -57,8 +57,9 @@ public:
 	shared_ptr<const SecretEntry> Get(const string &name, bool allow_expired = false) {
 		lock_guard<mutex> guard(lock);
 		auto it = entries.find(name);
-		if (closed || it == entries.end() || (!allow_expired && !Fresh(it->second)))
+		if (closed || it == entries.end() || (!allow_expired && !Fresh(it->second))) {
 			return nullptr;
+		}
 		return it->second.secret;
 	}
 	vector<shared_ptr<const SecretEntry>> Snapshot(bool allow_expired = false) {
@@ -66,9 +67,11 @@ public:
 		lock_guard<mutex> guard(lock);
 		if (!closed) {
 			result.reserve(entries.size());
-			for (auto &it : entries)
-				if (allow_expired || Fresh(it.second))
+			for (auto &it : entries) {
+				if (allow_expired || Fresh(it.second)) {
 					result.push_back(it.second.secret);
+				}
+			}
 		}
 		return result;
 	}
@@ -82,6 +85,7 @@ public:
 		lock_guard<mutex> guard(lock);
 		CheckAdmission(entry, expected);
 	}
+	// NOLINTNEXTLINE(performance-unnecessary-value-param) -- retain ownership through callbacks and cache replacement
 	void Put(Entry entry, uint64_t expected) {
 		const auto &name = entry.secret->secret->GetName().GetIdentifierName();
 		Entry retired;
@@ -104,11 +108,13 @@ public:
 	void Replace(Entries replacement, uint64_t expected, bool complete = true) {
 		idx_t total = 0;
 		auto earliest = Time::max();
-		if (replacement.size() > MAX_ENTRIES)
+		if (replacement.size() > MAX_ENTRIES) {
 			throw IOException("Too many BoilStream secrets");
+		}
 		for (const auto &it : replacement) {
-			if (it.second.bytes > MAX_ENTRY_BYTES || it.second.bytes > MAX_BYTES - total)
+			if (it.second.bytes > MAX_ENTRY_BYTES || it.second.bytes > MAX_BYTES - total) {
 				throw IOException("BoilStream secret cache capacity exhausted");
+			}
 			total += it.second.bytes;
 			earliest = std::min(earliest, it.second.expires);
 		}
@@ -163,8 +169,9 @@ private:
 		return entry.expires > std::chrono::system_clock::now() + std::chrono::minutes(5);
 	}
 	void CheckRevision(uint64_t expected) {
-		if (closed || revision != expected)
+		if (closed || revision != expected) {
 			throw IOException("BoilStream secret update was superseded");
+		}
 	}
 	void CheckAdmission(const Entry &entry, uint64_t expected) {
 		CheckRevision(expected);

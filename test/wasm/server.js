@@ -1,126 +1,97 @@
 #!/usr/bin/env node
+import { createServer } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import { dirname, resolve, basename, extname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
 
-/**
- * Simple HTTP server for testing DuckDB WASM with boilstream extension
- *
- * Usage:
- *   node server.js
- *   Then open http://localhost:8080/test-wasm-browser.html
- */
+const here = dirname(fileURLToPath(import.meta.url));
+export const baseline = JSON.parse(await readFile(resolve(here, 'baseline.json'), 'utf8'));
+export const artifactPath = variant => resolve(process.env.BOILSTREAM_WASM_BUILD_DIR || resolve(here, '../../build'),
+  variant, 'extension/boilstream/boilstream.duckdb_extension.wasm');
+export const quackArtifactPath = variant => resolve(here, '../../build/compatibility', baseline.engineVersion,
+  variant, 'quack.duckdb_extension.wasm');
+const dist = resolve(here, 'node_modules/@duckdb/duckdb-wasm/dist');
+const publicFiles = new Set(['test-wasm-browser.html', 'suite.js', 'sql-runner.js', 'baseline.json']);
+const sqlFiles = new Set(['boilstream_pragmas.test', 'boilstream_grammar.test', 'client_boundary.test']);
+const runtimeFiles = new Set(['duckdb-browser.mjs', 'duckdb-base.wasm', 'duckdb-threads.wasm',
+  'duckdb-browser-base.worker.js', 'duckdb-browser-threads.worker.js', 'duckdb-browser-threads.pthread.worker.js']);
+let bundlePromise;
+function browserBundle() {
+  bundlePromise ??= build({ entryPoints: [resolve(here, 'suite.js')], bundle: true,
+    write: false, format: 'esm', platform: 'browser' }).then(result => result.outputFiles[0].contents);
+  return bundlePromise;
+}
 
-import { createServer } from 'http';
-import { request as httpsRequest } from 'https';
-import { readFile } from 'fs/promises';
-import { join, dirname, extname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = 8080;
-const AUTH_SERVER = 'https://localhost'; // Boilstream auth server
-
-const MIME_TYPES = {
-  '.html': 'text/html',
-  '.js': 'application/javascript',
-  '.wasm': 'application/wasm',
-  '.json': 'application/json',
-  '.css': 'text/css',
-};
-
-const server = createServer(async (req, res) => {
-  try {
-    // Remove query string and decode URL
-    const url = decodeURIComponent(req.url.split('?')[0]);
-
-    // Security: prevent directory traversal
-    if (url.includes('..') && !url.startsWith('/build/')) {
-      res.writeHead(403);
-      res.end('Forbidden');
-      return;
+// Exact route allowlist: no arbitrary repository access and no credential proxy.
+export function createTestServer() {
+  return createServer(async (req, res) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
+      const route = decodeURIComponent(req.url.split('?')[0]);
+      if (route === '/fixtures/corrupt.duckdb_extension.wasm') {
+        const content = Buffer.alloc(1024);
+        res.writeHead(200, { 'Content-Type': 'application/wasm', 'Content-Length': content.length });
+        res.end(req.method === 'HEAD' ? undefined : content);
+        return;
+      }
+      if (route === '/suite.js') {
+        const content = await browserBundle();
+        res.writeHead(200, { 'Content-Type': 'text/javascript', 'Content-Length': content.length });
+        res.end(req.method === 'HEAD' ? undefined : content);
+        return;
+      }
+      let file;
+      if (route === '/') file = resolve(here, 'test-wasm-browser.html');
+      else if (publicFiles.has(route.slice(1))) file = resolve(here, route.slice(1));
+      else if (route.startsWith('/runtime/') && runtimeFiles.has(route.slice(9))) file = resolve(dist, basename(route));
+      else if (route.startsWith('/sql/') && sqlFiles.has(route.slice(5))) file = resolve(here, '../sql', basename(route));
+      else {
+        const match = /^\/extension\/(wasm_eh|wasm_threads)\/boilstream\.duckdb_extension\.wasm$/.exec(route);
+        if (match) file = artifactPath(match[1]);
+        const quack = /^\/fixtures\/core-extensions\/v2\.0\.0\/(wasm_eh|wasm_threads)\/quack\.duckdb_extension\.wasm$/.exec(route);
+        if (quack) file = quackArtifactPath(quack[1]);
+      }
+      if (!file) { res.writeHead(404).end('Not found'); return; }
+      const { size } = await stat(file);
+      let start = 0, end = size - 1, status = 200;
+      if (req.headers.range) {
+        const match = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range);
+        start = match ? Number(match[1]) : -1;
+        end = match?.[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+        if (!Number.isSafeInteger(start) || start < 0 || start > end) {
+          res.writeHead(416, { 'Content-Range': `bytes */${size}` }).end(); return;
+        }
+        status = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+      }
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+        '.wasm': 'application/wasm', '.json': 'application/json' };
+      res.writeHead(status, { 'Content-Type': types[extname(file)] || 'text/plain',
+        'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes' });
+      res.end(req.method === 'HEAD' ? undefined : (await readFile(file)).subarray(start, end + 1));
+    } catch (error) {
+      if (!res.headersSent) res.writeHead(error.code === 'ENOENT' ? 404 : error instanceof URIError ? 400 : 500);
+      res.end('Test resource unavailable');
     }
+  });
+}
 
-    // Proxy /auth/* and /secrets/* requests to boilstream auth server
-    if (url.startsWith('/auth/') || url.startsWith('/secrets')) {
-      console.log(`Proxying: ${req.method} ${url} -> ${AUTH_SERVER}${url}`);
+export async function startServer(port = 0) {
+  await browserBundle();
+  const server = createTestServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
 
-      // Prepare proxy request options
-      const proxyOptions = {
-        hostname: 'localhost',
-        port: 443,
-        path: url,
-        method: req.method,
-        headers: {
-          ...req.headers,
-          host: 'localhost', // Override host header
-        },
-        rejectUnauthorized: false, // Allow self-signed certs for localhost testing
-      };
-
-      // Create proxy request
-      const proxyReq = httpsRequest(proxyOptions, (proxyRes) => {
-        // Copy status and headers from proxy response
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-
-        // Pipe response data
-        proxyRes.pipe(res);
-      });
-
-      // Handle proxy errors
-      proxyReq.on('error', (error) => {
-        console.error('Proxy error:', error);
-        res.writeHead(502);
-        res.end('Bad Gateway - Could not reach auth server');
-      });
-
-      // Pipe request data to proxy
-      req.pipe(proxyReq);
-
-      return; // Exit early, proxy handles response
-    }
-
-    let filePath;
-
-    // Handle build directory access
-    if (url.startsWith('/build/')) {
-      filePath = join(__dirname, '..', '..', url);
-    } else if (url === '/') {
-      filePath = join(__dirname, 'test-wasm-browser.html');
-    } else {
-      filePath = join(__dirname, url);
-    }
-
-    console.log(`Request: ${url} -> ${filePath}`);
-
-    const content = await readFile(filePath);
-    const ext = extname(filePath);
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-    // Add CORS headers for WASM loading
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Access-Control-Allow-Origin': '*',
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    });
-    res.end(content);
-
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      res.writeHead(404);
-      res.end('Not Found');
-    } else {
-      console.error('Server error:', error);
-      res.writeHead(500);
-      res.end('Internal Server Error');
-    }
-  }
-});
-
-server.listen(PORT, () => {
-  console.log(`\n╔════════════════════════════════════════════════════════════╗`);
-  console.log(`║  DuckDB WASM Test Server                                  ║`);
-  console.log(`╚════════════════════════════════════════════════════════════╝\n`);
-  console.log(`Server running at http://localhost:${PORT}/`);
-  console.log(`\nOpen in browser: http://localhost:${PORT}/test-wasm-browser.html`);
-  console.log(`\nProxy enabled: /auth/* -> ${AUTH_SERVER}/auth/*`);
-  console.log(`\nPress Ctrl+C to stop\n`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const { url } = await startServer(Number(process.env.PORT || 8080));
+  console.log(`WASM tests: ${url}`);
+}
