@@ -45,15 +45,19 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
 endif()
 
 # Embedded multi-extension builds provide one shared Rust staticlib, avoiding
-# duplicate OPAQUE exports and Rust runtimes. Standalone client builds keep their
-# own platform-specific Cargo path below.
+# duplicate OPAQUE exports and Rust runtimes. Standalone client builds keep
+# their own platform-specific Cargo path below.
 if(BOILSTREAM_EXTERNAL_RUST_LIB)
   if(NOT TARGET ${BOILSTREAM_EXTERNAL_RUST_LIB})
-    message(FATAL_ERROR
-            "External Rust library target does not exist: ${BOILSTREAM_EXTERNAL_RUST_LIB}")
+    message(
+      FATAL_ERROR
+        "External Rust library target does not exist: ${BOILSTREAM_EXTERNAL_RUST_LIB}"
+    )
   endif()
-  message(STATUS
-          "boilstream: Using external Rust library target '${BOILSTREAM_EXTERNAL_RUST_LIB}'")
+  message(
+    STATUS
+      "boilstream: Using external Rust library target '${BOILSTREAM_EXTERNAL_RUST_LIB}'"
+  )
   add_library(opaque_client_rust ALIAS ${BOILSTREAM_EXTERNAL_RUST_LIB})
 elseif(IS_WASM_BUILD)
   # WASM build: Manual cargo (Corrosion doesn't support Emscripten)
