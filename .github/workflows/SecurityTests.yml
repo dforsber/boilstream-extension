@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Verify shared and standalone Rust library selection
+        run: python3 scripts/test-rust-library-selection.py -v
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path opaque-client/Cargo.toml
       - run: make release GEN=ninja OVERRIDE_GIT_DESCRIBE=v2.0.0
