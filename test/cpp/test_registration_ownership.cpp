@@ -316,7 +316,6 @@ int main() {
 		Reject([&] { Read(f.storage, *f.a.context); });
 	});
 
-
 	test("reauthentication_retires_previous_account_enrollment", [] {
 		Fixture f;
 		BoilstreamSessionPublicationTestAccess::Login(f.storage, *f.a.context, "first");

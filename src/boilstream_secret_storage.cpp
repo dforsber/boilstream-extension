@@ -1941,8 +1941,7 @@ shared_ptr<BoilstreamRegistrationContext> RestApiSecretStorage::RegistrationOwne
 	const auto current_auth = GetSessionForConnection(context.GetConnectionId());
 	if (owner) {
 		lock_guard<mutex> guard(owner->lock);
-		if (owner->bound &&
-		    (!owner->MatchesAuthentication(current_auth) || context.IsInterrupted())) {
+		if (owner->bound && (!owner->MatchesAuthentication(current_auth) || context.IsInterrupted())) {
 			owner->Reset();
 		}
 	}
@@ -2904,8 +2903,8 @@ RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bo
 		string response;
 		boilstream::WipeOnExit wipe_response(response);
 
-		response = HttpPostWithState(
-		    AppendPlatformParams(state->GetEndpointUrl() + (match ? "/match" : "/get")), body, *state);
+		response = HttpPostWithState(AppendPlatformParams(state->GetEndpointUrl() + (match ? "/match" : "/get")), body,
+		                             *state);
 
 		if (response.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) {
 			throw IOException("Oversized secret response");
@@ -3088,8 +3087,7 @@ void RestApiSecretStorage::DropSecretByName(const Identifier &secret_name, OnEnt
 		if (state->GetEndpointUrl().empty()) {
 			throw IOException("Secret endpoint is not configured");
 		}
-		HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name)),
-		           *state);
+		HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name)), *state);
 
 	} else if (!cache->Get(name, true) && on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
 		throw CatalogException("Secret not found");
@@ -3223,8 +3221,7 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	string response;
 	boilstream::WipeOnExit wipe_response(response);
 
-	const auto url =
-	    AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id));
+	const auto url = AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id));
 	response = HttpGetWithState(url, conn_state);
 
 	ManagedCatalogCredentialEnvelope credential;
