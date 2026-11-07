@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, appendFile } from 'node:fs/promises';
 import { startAuthFixture } from './auth-fixture.js';
 import { chromium } from 'playwright';
 import { dirname, join } from 'node:path';
@@ -8,6 +8,9 @@ import { wasmBuildInputs, verifyWasmBuild } from './build-inputs.js';
 import { startServer, baseline, artifactPath } from './server.js';
 
 const authenticated = process.argv.includes('--authenticated');
+async function summary(message) {
+  if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, message + '\n');
+}
 const variants = process.env.WASM_VARIANTS ? process.env.WASM_VARIANTS.split(',') : baseline.variants;
 assert(variants.length > 0 && variants.every(v => baseline.variants.includes(v)), 'Invalid WASM_VARIANTS');
 const pkg = JSON.parse(await readFile(new URL('./node_modules/@duckdb/duckdb-wasm/package.json', import.meta.url), 'utf8'));
@@ -91,12 +94,15 @@ try {
       assert(auth.counts.finish - before.finish >= 8, 'Real authentication and recovery must complete');
       assert(auth.counts.secrets - before.secrets >= 8, 'Bootstrap must fetch authenticated secrets');
       assert(auth.counts.catalogs - before.catalogs >= 20, 'Catalog and isolation checks must reach the authority');
+      await summary(`- ${variant}: strict authenticated browser qualification passed.`);
     } else {
       assert.equal(auth.counts.login - before.login, 1, 'Transport probe must send OPAQUE start');
       assert.equal(auth.counts.finish - before.finish, 1, 'Transport probe must complete real OPAQUE');
       assert.equal(auth.counts.encrypted - before.encrypted, 1, 'Transport probe must receive a signed encrypted reply');
       assert.equal(auth.counts.requests - before.requests, 0, 'Failed authentication must publish no usable session');
+      const blocker = `${variant}: **Successful authenticated browser coverage is BLOCKED.** The pinned host drops POST response headers. The passing test proves rejection without publishing a session, not successful login.`;
       console.log(`[${variant}] BLOCKED successful authenticated coverage: baseline POST discards response headers; run npm run test:authenticated`);
+      await summary(`- ${blocker} Run npm run test:authenticated after correcting the host. See test/wasm/WASM_TEST_STATUS.md.`);
     }
     await context.close();
   }
