@@ -41,7 +41,12 @@ PY
 # modified/stale objects survive and receive a receipt for different inputs.
 staging="$(mktemp -d "$repo/build/quack-openssl.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
+node scripts/record-quack-build.mjs --snapshot "$staging/inputs.json"
 tar -xzf "$archive" -C "$staging"
+# Compile the immutable Git snapshot, never a concurrently editable checkout.
+mkdir -p "$staging/quack-source"
+git -C "$source_dir" archive "$revision" | tar -xf - -C "$staging/quack-source"
+source_dir="$staging/quack-source"
 openssl_build="$staging/output"
 openssl_install="$staging/install"
 quack_build="$staging/quack-build"
@@ -58,10 +63,12 @@ emcmake cmake -S duckdb -B "$quack_build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DUSE_WASM_THREADS=ON -DWASM_LOADABLE_EXTENSIONS=1 \
   -DBUILD_EXTENSIONS_ONLY=ON -DBUILD_SHELL=OFF -DBUILD_UNITTESTS=OFF -DEXTENSION_STATIC_BUILD=OFF \
   -DDUCKDB_EXTENSION_CONFIGS="$repo/scripts/quack-wasm.cmake" \
-  -DBOILSTREAM_QUACK_SOURCE="$source_dir" -DBOILSTREAM_QUACK_OPENSSL="$openssl_install" \
+  -DBOILSTREAM_QUACK_SOURCE="$source_dir" -DBOILSTREAM_QUACK_REVISION="$revision" \
+  -DBOILSTREAM_QUACK_OPENSSL="$openssl_install" \
   -DDUCKDB_EXPLICIT_PLATFORM=wasm_threads -DOVERRIDE_GIT_DESCRIBE="$(field engineVersion)" \
   -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_INCLUDE_DIR="$openssl_install/include" \
   -DOPENSSL_SSL_LIBRARY="$openssl_install/lib/libssl.a" \
   -DOPENSSL_CRYPTO_LIBRARY="$openssl_install/lib/libcrypto.a"
 cmake --build "$quack_build" --target quack_loadable_extension --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
-node scripts/record-quack-build.mjs "$quack_build/extension/quack/quack.duckdb_extension.wasm"
+[[ -z "$(git -C duckdb status --porcelain)" ]] || { echo 'DuckDB changed during Quack build' >&2; exit 1; }
+node scripts/record-quack-build.mjs "$quack_build/extension/quack/quack.duckdb_extension.wasm" "$staging/inputs.json"

@@ -90,24 +90,21 @@ elseif(IS_WASM_BUILD)
     set(RUST_WASM_EXTRA_ARGS -Zbuild-std=std,panic_abort)
   endif()
 
-  add_custom_command(
-    OUTPUT ${RUST_LIB_PATH}
+  # Let Cargo track every Rust module/build input, including future modules. A
+  # CMake OUTPUT rule listing only lib.rs/registration.rs can silently retain an
+  # old archive when another module changes. Cargo's own incremental check is
+  # cheap and must run on every extension build (as Corrosion does natively).
+  add_custom_target(
+    rust_opaque_client ALL
     COMMAND
       ${RUST_WASM_COMMAND} build --locked ${RUST_WASM_EXTRA_ARGS}
       ${RUST_BUILD_FLAG} --target=${RUST_TARGET}
       --target-dir=${CMAKE_CURRENT_BINARY_DIR}/rust
-    DEPENDS opaque-client/Cargo.toml
-            opaque-client/Cargo.lock
-            opaque-client/src/lib.rs
-            opaque-client/src/registration.rs
-            opaque-client/.cargo/config.toml
-            CMakeLists.txt
-            test/wasm/baseline.json
+    BYPRODUCTS ${RUST_LIB_PATH}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/opaque-client
-    COMMENT "Building Rust OPAQUE client library for WASM"
+    COMMENT "Checking all Rust OPAQUE build inputs for WASM"
     VERBATIM)
 
-  add_custom_target(rust_opaque_client ALL DEPENDS ${RUST_LIB_PATH})
   add_library(opaque_client_rust STATIC IMPORTED GLOBAL)
   set_target_properties(opaque_client_rust PROPERTIES IMPORTED_LOCATION
                                                       ${RUST_LIB_PATH})

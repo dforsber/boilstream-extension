@@ -56,3 +56,14 @@ The community descriptor continues to reference BoilStream source and exclude
 only MVP. The extra Quack source build is confined to our regression workflow;
 it does not replace DuckDB's central build/sign/deploy pipeline or add OpenSSL
 to BoilStream's native library dependencies. No existing release tag is moved.
+
+## BoilStream build freshness
+
+The qualification helper also removes its own generated variant build directory
+before compiling BoilStream, preventing reuse across SDK changes. Both builders snapshot their inputs before compiling and refuse a receipt if those inputs change during the build. Quack compiles an immutable Git archive in its temporary tree. Cargo is invoked
+on every WASM make build so it tracks all Rust modules, including future ones.
+Before browser execution, `boilstream.build.json` must match the current sources,
+Cargo lock/configuration, recipes, baseline, submodule revisions and artifact hash.
+A missing receipt, stale source snapshot or replaced artifact fails before launch.
+These qualification receipts are uploaded with the CI artifacts; central community
+builds still use the normal make targets and do not require browser receipts.

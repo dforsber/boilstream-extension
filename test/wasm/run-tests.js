@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import { readFile, access } from 'node:fs/promises';
 import { chromium } from 'playwright';
+import { dirname, join } from 'node:path';
+import { wasmBuildInputs, verifyWasmBuild } from './build-inputs.js';
 import { startServer, baseline, artifactPath } from './server.js';
 
 const variants = process.env.WASM_VARIANTS ? process.env.WASM_VARIANTS.split(',') : baseline.variants;
@@ -11,6 +13,13 @@ assert.equal(pkg.version, baseline.packageVersion, 'Run npm ci to install the ex
 for (const variant of variants) {
   try { await access(artifactPath(variant)); }
   catch { throw new Error(`Missing ${artifactPath(variant)}; run ./build-wasm-fixed.sh ${variant} from the repository root`); }
+  let receipt;
+  try { receipt = JSON.parse(await readFile(join(dirname(artifactPath(variant)), 'boilstream.build.json'), 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`Missing ${variant} build receipt; run ./build-wasm-fixed.sh ${variant}`);
+    throw error;
+  }
+  verifyWasmBuild(await readFile(artifactPath(variant)), receipt, await wasmBuildInputs(baseline, variant));
 }
 await import('./prepare-compatibility.js');
 const { server, url } = await startServer();

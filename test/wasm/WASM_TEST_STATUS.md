@@ -2,7 +2,7 @@
 
 The pinned upstream OPAQUE upgrade removes the production audit failure. The
 source-built shared-memory Quack module passes all 70 strict threaded checks.
-The harness now has 14 tests and rejects stale receipts or replaced artifacts.
+The harness now has 15 tests and rejects stale receipts or replaced artifacts.
 All 35 native Rust tests pass, including four cross-version OPAQUE 3 peer tests.
 The standalone wasm-bindgen target also compiles. See
 [QUACK_COMPATIBILITY.md](QUACK_COMPATIBILITY.md) for the fresh-build procedure and

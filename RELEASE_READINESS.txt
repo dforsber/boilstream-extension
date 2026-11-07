@@ -3,7 +3,7 @@ The two failing CI causes have been repaired in source: production cargo audit
 is clean after the pinned upstream OPAQUE upgrade, and the rebuilt shared-memory
 Quack module passes strict browser compatibility. Existing v3 password records
 are covered by four cross-version interoperability tests. There are 35 native
-Rust tests and 14 browser-harness tests. Consult the GitHub runs for the exact source commit before deployment.
+Rust tests and 15 browser-harness tests. Consult the GitHub runs for the exact source commit before deployment.
 
 Fresh OpenSSL and Quack build trees prevent reuse of stale objects. The public
 Quack artifact is still unchanged; deployments need the paired CI artifact or an

@@ -120,3 +120,15 @@ test('Quack receipts reject changed source inputs and replaced artifacts', async
   assert.throws(() => verifyQuackBuild(bytes, { inputs: { revision: 'different' }, sha256: sha256(bytes) }, inputs), /inputs changed/);
   assert.throws(() => verifyQuackBuild(bytes, { inputs, sha256: 'wrong' }, inputs), /differs from its build receipt/);
 });
+
+
+test('BoilStream receipts reject changed source and altered artifacts', async () => {
+  const { verifyWasmBuild } = await import('./build-inputs.js');
+  const { sha256 } = await import('./quack-build.js');
+  const bytes = Buffer.from('synthetic artifact');
+  const inputs = { variant: 'wasm_threads', source: { 'module.rs': 'original' } };
+  const receipt = { inputs, sha256: sha256(bytes) };
+  verifyWasmBuild(bytes, receipt, inputs);
+  assert.throws(() => verifyWasmBuild(bytes, receipt, { ...inputs, source: { 'module.rs': 'changed' } }), /inputs changed/);
+  assert.throws(() => verifyWasmBuild(Buffer.from('old artifact'), receipt, inputs), /differs from its build receipt/);
+});

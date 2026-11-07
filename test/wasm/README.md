@@ -30,7 +30,7 @@ npm run test:compatibility --prefix test/wasm
 
 The build requires the Emscripten and Rust versions in `baseline.json`, plus
 the `wasm32-unknown-emscripten` target. It rejects source/toolchain mismatches and
-propagates build failures. It never restores old artifacts or changes metadata to
+propagates build failures. The qualification helper starts each variant from fresh build output; the browser runner checks source and artifact hashes against the completed build receipt. Direct community make targets remain available and unchanged in purpose. It never restores old artifacts or changes metadata to
 make an incompatible binary appear compatible.
 
 For one platform, use `WASM_VARIANTS=wasm_eh npm test --prefix test/wasm` (or

@@ -63,6 +63,7 @@ jobs:
           name: boilstream-v2.0.0-extension-${{ matrix.variant }}
           path: |
             build/${{ matrix.variant }}/extension/boilstream/boilstream.duckdb_extension.wasm
+            build/${{ matrix.variant }}/extension/boilstream/boilstream.build.json
             build/compatibility/v2.0.0/${{ matrix.variant }}/quack.duckdb_extension.wasm
             build/compatibility/v2.0.0/${{ matrix.variant }}/quack.build.json
           if-no-files-found: error

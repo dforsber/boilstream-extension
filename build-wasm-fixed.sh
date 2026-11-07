@@ -25,9 +25,15 @@ actual_emcc="$(emcc --version | sed -n '1s/.*) \([0-9][0-9.]*\).*/\1/p')"
 if [[ "$actual_emcc" != "$expected_emcc" ]]; then
   echo "Expected Emscripten $expected_emcc, got $actual_emcc. Activate the qualified SDK first." >&2; exit 1
 fi
+# This qualification helper deliberately starts with fresh compiler objects.
+# Community builds retain their normal make targets; no host source is changed.
+# The variant was allowlisted above, so this removes only generated build output.
+rm -rf -- "$PROJ_DIR/build/$variant"
+node scripts/record-wasm-build.mjs "$variant" --snapshot
 export WASM_BUILD_TYPE="$variant"
 make "$variant" OVERRIDE_GIT_DESCRIBE="$(baseline_field engineVersion)" EXTENSION_STATIC_BUILD=0
 artifact="$PROJ_DIR/build/$variant/extension/boilstream/boilstream.duckdb_extension.wasm"
 test -s "$artifact"
+node scripts/record-wasm-build.mjs "$variant"
 echo "Built $artifact"
 echo "Test with: WASM_VARIANTS=$variant npm test --prefix test/wasm"
