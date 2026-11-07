@@ -10,6 +10,82 @@ pub struct PendingHandshake {
     started: u64,
 }
 
+pub fn start(
+    pin: Pin,
+    entropy: Zeroizing<[u8; 32]>,
+    now: u64,
+) -> Result<(String, PendingHandshake), Error> {
+    now.checked_add(CHANNEL_SECONDS + crate::wire::FUTURE_SKEW_SECONDS)
+        .ok_or(Error::Expired)?;
+    let prologue = pin.prologue();
+    let resolver = EntropyResolver::new(entropy)?;
+    let mut noise = snow::Builder::with_resolver(
+        SUITE.parse().map_err(|_| Error::InvalidInput)?,
+        Box::new(resolver),
+    )
+    .prologue(&prologue)
+    .map_err(|_| Error::InvalidInput)?
+    .remote_public_key(pin.public_key())
+    .map_err(|_| Error::InvalidInput)?
+    .build_initiator()
+    .map_err(|_| Error::InvalidInput)?;
+    let mut message = [0; CLIENT_BYTES];
+    let length = noise
+        .write_message(&[], &mut message)
+        .map_err(|_| Error::Authentication)?;
+    if length != CLIENT_BYTES {
+        return Err(Error::InvalidMessage);
+    }
+    Ok((
+        encode_message(CLIENT_PREFIX, &message),
+        PendingHandshake {
+            noise,
+            pin,
+            started: now,
+        },
+    ))
+}
+
+impl PendingHandshake {
+    pub fn finish(mut self, response: &str, now: u64) -> Result<Channel, Error> {
+        if now < self.started || now - self.started >= HANDSHAKE_SECONDS {
+            return Err(Error::Expired);
+        }
+        let message = decode_message(response, SERVER_PREFIX, SERVER_BYTES)?;
+        let mut payload = Zeroizing::new([0; 72]);
+        let length = self
+            .noise
+            .read_message(&message, payload.as_mut())
+            .map_err(|_| Error::Authentication)?;
+        if length != 72 || !self.noise.is_handshake_finished() {
+            return Err(Error::InvalidMessage);
+        }
+        let expires = u64::from_be_bytes(
+            payload[64..72]
+                .try_into()
+                .map_err(|_| Error::InvalidMessage)?,
+        );
+        if expires <= now
+            || expires > self.started + CHANNEL_SECONDS + crate::wire::FUTURE_SKEW_SECONDS
+        {
+            return Err(Error::Expired);
+        }
+        let transcript = self
+            .noise
+            .get_handshake_hash()
+            .try_into()
+            .map_err(|_| Error::InvalidMessage)?;
+        Channel::from_authenticated_master(
+            payload[..64]
+                .try_into()
+                .map_err(|_| Error::InvalidMessage)?,
+            transcript,
+            &self.pin,
+            expires,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,81 +222,5 @@ mod tests {
         let pin = Pin::new("https://example.test", key).unwrap();
         assert!(start(pin.clone(), Zeroizing::new([0; 32]), 1).is_err());
         assert!(start(pin, Zeroizing::new([1; 32]), u64::MAX).is_err());
-    }
-}
-
-pub fn start(
-    pin: Pin,
-    entropy: Zeroizing<[u8; 32]>,
-    now: u64,
-) -> Result<(String, PendingHandshake), Error> {
-    now.checked_add(CHANNEL_SECONDS + crate::wire::FUTURE_SKEW_SECONDS)
-        .ok_or(Error::Expired)?;
-    let prologue = pin.prologue();
-    let resolver = EntropyResolver::new(entropy)?;
-    let mut noise = snow::Builder::with_resolver(
-        SUITE.parse().map_err(|_| Error::InvalidInput)?,
-        Box::new(resolver),
-    )
-    .prologue(&prologue)
-    .map_err(|_| Error::InvalidInput)?
-    .remote_public_key(pin.public_key())
-    .map_err(|_| Error::InvalidInput)?
-    .build_initiator()
-    .map_err(|_| Error::InvalidInput)?;
-    let mut message = [0; CLIENT_BYTES];
-    let length = noise
-        .write_message(&[], &mut message)
-        .map_err(|_| Error::Authentication)?;
-    if length != CLIENT_BYTES {
-        return Err(Error::InvalidMessage);
-    }
-    Ok((
-        encode_message(CLIENT_PREFIX, &message),
-        PendingHandshake {
-            noise,
-            pin,
-            started: now,
-        },
-    ))
-}
-
-impl PendingHandshake {
-    pub fn finish(mut self, response: &str, now: u64) -> Result<Channel, Error> {
-        if now < self.started || now - self.started >= HANDSHAKE_SECONDS {
-            return Err(Error::Expired);
-        }
-        let message = decode_message(response, SERVER_PREFIX, SERVER_BYTES)?;
-        let mut payload = Zeroizing::new([0; 72]);
-        let length = self
-            .noise
-            .read_message(&message, payload.as_mut())
-            .map_err(|_| Error::Authentication)?;
-        if length != 72 || !self.noise.is_handshake_finished() {
-            return Err(Error::InvalidMessage);
-        }
-        let expires = u64::from_be_bytes(
-            payload[64..72]
-                .try_into()
-                .map_err(|_| Error::InvalidMessage)?,
-        );
-        if expires <= now
-            || expires > self.started + CHANNEL_SECONDS + crate::wire::FUTURE_SKEW_SECONDS
-        {
-            return Err(Error::Expired);
-        }
-        let transcript = self
-            .noise
-            .get_handshake_hash()
-            .try_into()
-            .map_err(|_| Error::InvalidMessage)?;
-        Channel::from_authenticated_master(
-            payload[..64]
-                .try_into()
-                .map_err(|_| Error::InvalidMessage)?,
-            transcript,
-            &self.pin,
-            expires,
-        )
     }
 }
