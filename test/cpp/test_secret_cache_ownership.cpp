@@ -4,7 +4,6 @@
 #include "duckdb.hpp"
 #include "boilstream_secret_storage.hpp"
 #include "duckdb/main/config.hpp"
-#include "client_test_context.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -144,46 +143,15 @@ int main() {
 		Require(f.Read(f.a) == "synthetic-a" && f.Read(f.b) == "synthetic-b");
 		Require(f.Match(f.a) == "synthetic-a" && f.Match(f.b) == "synthetic-b");
 	});
-	test("client_setting_switch_requires_new_authentication", [] {
+
+	test("sequential_connections_keep_distinct_owned_secrets", [] {
 		Fixture f;
-		const string first = "42", second = "43";
-		{
-			ScopedClientTenant guard(*f.a.context, first);
-			f.Login(f.a);
-			f.Cache(f.a);
-			Require(f.Read(f.a) == "synthetic-a");
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, second);
-			Reject([&] { f.Read(f.a); });
-		}
-		Reject([&] { f.Read(f.a); });
-		{
-			ScopedClientTenant guard(*f.a.context, first);
-			Require(f.Read(f.a) == "synthetic-a");
-		}
-	});
-	test("sequential_client_settings_keep_distinct_owned_secrets", [] {
-		Fixture f;
-		const string first = "42", second = "43";
-		{
-			ScopedClientTenant guard(*f.a.context, first);
-			f.Login(f.a);
-			f.Cache(f.a);
-		}
-		{
-			ScopedClientTenant guard(*f.b.context, second);
-			f.Login(f.b, "synthetic-b");
-			f.Cache(f.b, "owned", "synthetic-b");
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, first);
-			Require(f.Read(f.a) == "synthetic-a");
-		}
-		{
-			ScopedClientTenant guard(*f.b.context, second);
-			Require(f.Read(f.b) == "synthetic-b");
-		}
+		f.Login(f.a);
+		f.Cache(f.a);
+		f.Login(f.b, "synthetic-b");
+		f.Cache(f.b, "owned", "synthetic-b");
+		Require(f.Read(f.a) == "synthetic-a");
+		Require(f.Read(f.b) == "synthetic-b");
 	});
 	test("contextless_lookup_never_borrows_connection_credentials", [] {
 		Fixture f;

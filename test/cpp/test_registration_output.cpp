@@ -4,7 +4,6 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/main/client_context_state.hpp"
-#include "client_test_context.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -225,23 +224,7 @@ int main() {
 		Require(!f.a.Query("SELECT 1")->HasError());
 		Require(f.a.Query(f.Sql(id))->HasError());
 	});
-	test("tenant_change_retires_pending_result_permanently", [] {
-		Fixture f;
-		const string a = "42", b = "43";
-		uint64_t id;
-		{
-			ScopedClientTenant g(*f.a.context, a);
-			id = f.Publish(f.a);
-		}
-		{
-			ScopedClientTenant g(*f.a.context, b);
-			Reject([&] { f.storage->TakeRegistrationOutput(*f.a.context, id); });
-		}
-		{
-			ScopedClientTenant g(*f.a.context, a);
-			Reject([&] { f.storage->TakeRegistrationOutput(*f.a.context, id); });
-		}
-	});
+
 	test("first_login_retires_unauthenticated_output", [] {
 		Fixture f;
 		auto id = f.Publish(f.a);

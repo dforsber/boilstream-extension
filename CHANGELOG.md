@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native and WASM tests assert that server authentication functions are absent
   while the client API remains registered. Community build entrypoints are unchanged.
 
+- Removed legacy `boilstream.tenant_id` routing, `multitenant=true` URL rewriting,
+  and display-name prefix stripping. Connection-owned authentication and managed
+  catalog wire credentials remain intact.
+- Native security CI installs matching HTTPFS/Quack artifacts and fails on any
+  SQL dependency skip; Rust audit treats warnings as failures.
+- Added a local OPAQUE protocol fixture and native positive control. Browser
+  authentication qualification exposes a DuckDB-WASM 2.0 host blocker: POST
+  drops response headers required for signature verification. The default
+  browser regression checks rejection without publishing a session; this is
+  not successful authentication coverage. See `test/wasm/WASM_TEST_STATUS.md`.
+
 ## [0.8.2] - 2026-11-07
 
 ### Fixed
@@ -122,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Native hosting compatibility improvements (hosting APIs removed in 0.9.0).
+- Native hosting compatibility improvements (hosting APIs removed in 0.8.3).
 
 ### Style
 

@@ -6,7 +6,6 @@
 #include <thread>
 #include <atomic>
 #include "duckdb/main/client_context_state.hpp"
-#include "client_test_context.hpp"
 using namespace duckdb;
 static void Require(bool value) {
 	if (!value)
@@ -192,41 +191,13 @@ int main() {
 		f.storage.EndRegistrationOperation(*f.a.context, cached.generation);
 		Require(Read(f.storage, *f.a.context) == "synthetic-a");
 	});
-	test("tenant_change_retires_old_registration_permanently", [] {
-		Fixture f;
-		const string a = "42", b = "43";
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Store(f.storage, *f.a.context, "tenant-a");
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, b);
-			Reject([&] { Read(f.storage, *f.a.context); });
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Reject([&] { Read(f.storage, *f.a.context); });
-		}
-	});
+
 	test("worker_reuse_preserves_distinct_connection_owners", [] {
 		Fixture f;
-		const string a = "42", b = "43";
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Store(f.storage, *f.a.context, "tenant-a");
-		}
-		{
-			ScopedClientTenant guard(*f.b.context, b);
-			Store(f.storage, *f.b.context, "tenant-b");
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Require(Read(f.storage, *f.a.context) == "tenant-a");
-		}
-		{
-			ScopedClientTenant guard(*f.b.context, b);
-			Require(Read(f.storage, *f.b.context) == "tenant-b");
-		}
+		Store(f.storage, *f.a.context, "account-a");
+		Store(f.storage, *f.b.context, "account-b");
+		Require(Read(f.storage, *f.a.context) == "account-a");
+		Require(Read(f.storage, *f.b.context) == "account-b");
 	});
 	test("cancellation_invalidates_pending_publication", [] {
 		Fixture f;
@@ -336,33 +307,15 @@ int main() {
 		Require(Read(f.storage, *f.a.context) == "owned");
 	});
 
-	test("query_begin_retires_previous_tenant_enrollment", [] {
+	test("query_begin_retires_previous_account_enrollment", [] {
 		Fixture f;
-		const string a = "42", b = "43";
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Store(f.storage, *f.a.context, "tenant-a");
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, b);
-			auto r = f.a.Query("SELECT 1");
-			Require(r && !r->HasError());
-		}
-		{
-			ScopedClientTenant guard(*f.a.context, a);
-			Reject([&] { Read(f.storage, *f.a.context); });
-		}
-	});
-	test("oversized_tenant_rejected_and_old_state_retired", [] {
-		Fixture f;
-		Store(f.storage, *f.a.context, "standalone");
-		const string large(4097, '9');
-		{
-			ScopedClientTenant guard(*f.a.context, large);
-			Reject([&] { f.storage.BeginRegistration(*f.a.context, "https://same.invalid", "same@example.com"); });
-		}
+		BoilstreamSessionPublicationTestAccess::Login(f.storage, *f.a.context, "first");
+		Store(f.storage, *f.a.context, "enrollment");
+		BoilstreamSessionPublicationTestAccess::Login(f.storage, *f.a.context, "second");
+		Require(!f.a.Query("SELECT 1")->HasError());
 		Reject([&] { Read(f.storage, *f.a.context); });
 	});
+
 
 	test("reauthentication_retires_previous_account_enrollment", [] {
 		Fixture f;

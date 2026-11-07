@@ -140,39 +140,25 @@ int main(int argc, char **argv) {
 				        other.authentication_generation.load() == 0);
 			});
 		}
-	test("forged_reply_retires_only_its_published_tenant", [&] {
+	test("forged_reply_retires_only_its_published_connection", [&] {
 		Connection a(db), b(db);
-		const string tenant_a = "42", tenant_b = "43";
 		auto state_a = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*state_a);
 		auto state_b = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*state_b);
 		state_b->session_key.assign(64, 9);
-		{
-			ScopedClientTenant guard(*a.context, tenant_a);
-			BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, state_a);
-		}
-		{
-			ScopedClientTenant guard(*b.context, tenant_b);
-			BoilstreamSessionPublicationTestAccess::Publish(storage, *b.context, state_b);
-		}
-		Require(state_a->authenticated_tenant == "42" && state_b->authenticated_tenant == "43");
+		BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, state_a);
+		BoilstreamSessionPublicationTestAccess::Publish(storage, *b.context, state_b);
 		bool rejected = false;
-		{
-			ScopedClientTenant guard(*a.context, tenant_a);
-			try {
-				storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_a);
-			} catch (const IOException &) {
-				rejected = true;
-			}
+		try {
+			storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_a);
+		} catch (const IOException &) {
+			rejected = true;
 		}
 		Require(rejected && state_a->session_key.empty() && state_a->secret_cache->IsClosed());
 		Require(storage.GetSessionForConnection(b.context->GetConnectionId()) == state_b);
 		Require(!state_b->secret_cache->IsClosed() && state_b->refresh_token == vector<uint8_t>(32, 8));
-		{
-			ScopedClientTenant guard(*b.context, tenant_b);
-			Require(storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_b) == "synthetic-result");
-		}
+		Require(storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_b) == "synthetic-result");
 	});
 	test("retired_request_failure_preserves_replacement_session", [&] {
 		Connection a(db);

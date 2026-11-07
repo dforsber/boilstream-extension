@@ -13,7 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --version 0.22.0 --locked
       # Keep the original findings visible. No ignore flag or success override.
-      - run: cargo audit --file opaque-client/Cargo.lock --json > cargo-audit.json
+      - run: cargo audit --deny warnings --file opaque-client/Cargo.lock --json > cargo-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -30,6 +30,20 @@ jobs:
       - run: cargo test --locked --manifest-path opaque-client/Cargo.toml
       - run: make release GEN=ninja OVERRIDE_GIT_DESCRIBE=v2.0.0
       - run: build/release/duckdb -c 'INSTALL httpfs; INSTALL quack;'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify the authenticated browser fixture against the native client
+        run: node test/wasm/check-native-auth-fixture.js
+      - name: Run every native SQL test without optional dependency skips
+        run: |
+          platform=$(build/release/duckdb -csv -noheader -c 'PRAGMA platform;')
+          repository="build/release/repository/v2.0.0/$platform"
+          mkdir -p "$repository"
+          cp "$HOME/.duckdb/extensions/v2.0.0/$platform/httpfs.duckdb_extension" "$repository/"
+          cp "$HOME/.duckdb/extensions/v2.0.0/$platform/quack.duckdb_extension" "$repository/"
+          python3 scripts/test-native-sql-harness.py
+          python3 scripts/test-native-sql.py
       - name: Build against the exact host, HTTPFS and Quack artifacts
         run: |
           platform=$(build/release/duckdb -csv -noheader -c 'PRAGMA platform;')

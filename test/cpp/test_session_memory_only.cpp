@@ -6,7 +6,6 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "boilstream_secret_storage.hpp"
-#include "client_test_context.hpp"
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -238,38 +237,21 @@ int main(int argc, char **argv) {
 		Require(state->GetEndpointUrl() == argv[1] && state->bootstrap_token_hash == "synthetic-bootstrap-identity");
 	});
 
-	test("tenant_switch_cannot_reuse_session_status_or_authority", [&] {
+	test("other_connection_cannot_reuse_session_status_authority_or_refresh", [&] {
 		Fixture f;
-		const string first = "42", second = "43";
-		{
-			ScopedClientTenant guard(*f.connection.context, first);
-			BoilstreamSessionPublicationTestAccess::Publish(f.storage, *f.connection.context, Pending(argv[1]));
-			Require(f.storage.IsSessionTokenValid(*f.connection.context));
-		}
-		{
-			ScopedClientTenant guard(*f.connection.context, second);
-			Require(!f.storage.IsSessionTokenValid(*f.connection.context));
-			Require(f.storage.GetEndpointUrl(*f.connection.context).empty());
-			Require(f.storage.GetBootstrapTokenHash(*f.connection.context).empty());
-			Require(f.storage.GetTokenExpiresAt(*f.connection.context) == std::chrono::system_clock::time_point::min());
-		}
-	});
-	test("tenant_switch_cannot_send_another_tenants_refresh_credential", [&] {
-		Fixture f;
-		const string first = "42", second = "43";
+		Connection other(f.db);
 		auto state = Pending(argv[1]);
-		{
-			ScopedClientTenant guard(*f.connection.context, first);
-			BoilstreamSessionPublicationTestAccess::Publish(f.storage, *f.connection.context, state);
-		}
-		{
-			ScopedClientTenant guard(*f.connection.context, second);
-			RejectResume(f, *f.connection.context);
-		}
+		BoilstreamSessionPublicationTestAccess::Publish(f.storage, *f.connection.context, state);
+		Require(f.storage.IsSessionTokenValid(*f.connection.context));
+		Require(!f.storage.IsSessionTokenValid(*other.context));
+		Require(f.storage.GetEndpointUrl(*other.context).empty());
+		Require(f.storage.GetBootstrapTokenHash(*other.context).empty());
+		Require(f.storage.GetTokenExpiresAt(*other.context) == std::chrono::system_clock::time_point::min());
+		RejectResume(f, *other.context);
 		Require(f.storage.GetSessionForConnection(f.connection.context->GetConnectionId()) == state &&
 		        state->IsSessionTokenValid());
-		// The runner also requires exactly one request overall, from the earlier valid
-		// same-tenant resume control. An HTTP rejection alone does not pass this gate.
+		// Runner requires exactly one request overall, from the owned refresh control.
 	});
+
 	return failed ? 1 : 0;
 }

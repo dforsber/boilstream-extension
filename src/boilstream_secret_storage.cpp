@@ -335,12 +335,7 @@ RestApiSecretStorage::RestApiSecretStorage(DatabaseInstance &db_p, const string 
 //! transactions without context (no authenticated session exists without a connection).
 shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSession(optional_ptr<CatalogTransaction> transaction) {
 	if (transaction && transaction->HasContext()) {
-		auto &ctx = transaction->GetContext();
-		auto state = GetSessionForConnection(ctx.GetConnectionId());
-		if (state && state->authenticated_tenant != GetTenantId(ctx)) {
-			throw IOException("BoilStream session belongs to a different tenant context");
-		}
-		return state;
+		return GetSessionForContext(transaction->GetContext());
 	}
 	return nullptr;
 }
@@ -402,8 +397,7 @@ shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForConnect
 }
 
 shared_ptr<BoilstreamConnectionState> RestApiSecretStorage::GetSessionForContext(ClientContext &context) {
-	auto state = GetSessionForConnection(context.GetConnectionId());
-	return state && state->authenticated_tenant == GetTenantId(context) ? state : nullptr;
+	return GetSessionForConnection(context.GetConnectionId());
 }
 
 void RestApiSecretStorage::SetEndpoint(const string &endpoint) {
@@ -797,7 +791,6 @@ void RestApiSecretStorage::PublishSession(ClientContext &context, shared_ptr<Boi
 	const auto connection_id = context.GetConnectionId();
 	context.registered_state->GetOrCreate<BoilstreamSessionCleanup>("boilstream_session_cleanup", *this, connection_id);
 	const auto key = "@connection:" + std::to_string(connection_id);
-	pending->authenticated_tenant = GetTenantId(context);
 	// This state is still private. Retain a refresh credential only when the
 	// server supports using it; all credentials remain connection-owned memory.
 	if (!supports_resumption) {
@@ -1843,89 +1836,11 @@ string RestApiSecretStorage::GetEndpointUrl(ClientContext &context) {
 	return state ? state->GetEndpointUrl() : "";
 }
 
-bool RestApiSecretStorage::IsMultiTenantMode(ClientContext &context) {
-	return !GetTenantId(context).empty();
-}
-
-string RestApiSecretStorage::GetTenantId(ClientContext &context) {
-	Value tenant_id;
-	return context.TryGetCurrentSetting("boilstream.tenant_id", tenant_id) ? tenant_id.ToString() : "";
-}
-
-string RestApiSecretStorage::StripTenantPrefix(const string &name, ClientContext &context) {
-	auto tenant_id = GetTenantId(context);
-	if (tenant_id.empty()) {
-		return name;
-	}
-
-	// Tenant prefix format: __BS_u{tenant_id}__
-	string prefix = "__BS_u" + tenant_id + "__";
-	if (name.find(prefix) == 0) {
-		return name.substr(prefix.length());
-	}
-	return name;
-}
-
-string RestApiSecretStorage::AppendMultiTenantParam(const string &url, optional_ptr<CatalogTransaction> transaction) {
-	// If no transaction or no context, return URL unchanged
-	if (!transaction || !transaction->HasContext()) {
-		return url;
-	}
-	return AppendMultiTenantParam(url, transaction->GetContext());
-}
-
-string RestApiSecretStorage::AppendMultiTenantParam(const string &url, ClientContext &context) {
-	if (!IsMultiTenantMode(context)) {
-		return url;
-	}
-
-	// Append ?multitenant=true (or &multitenant=true if URL already has query params)
-	if (url.find('?') != string::npos) {
-		return url + "&multitenant=true";
-	}
-	return url + "?multitenant=true";
-}
-
-string RestApiSecretStorage::AppendPlatformParams(const string &url, optional_ptr<CatalogTransaction> transaction) {
-	// If no transaction or no context, only add WASM param if applicable
-	if (!transaction || !transaction->HasContext()) {
-		if (IsWasmMode()) {
-			if (url.find('?') != string::npos) {
-				return url + "&platform=wasm";
-			}
-			return url + "?platform=wasm";
-		}
-		return url;
-	}
-	return AppendPlatformParams(url, transaction->GetContext());
-}
-
-string RestApiSecretStorage::AppendPlatformParams(const string &url, ClientContext &context) {
-	string result = url;
-	bool has_params = (url.find('?') != string::npos);
-
-	// Add multitenant param if in multi-tenant mode
-	if (IsMultiTenantMode(context)) {
-		if (has_params) {
-			result += "&multitenant=true";
-		} else {
-			result += "?multitenant=true";
-			has_params = true;
-		}
-		BOILSTREAM_LOG("AppendPlatformParams: Added multitenant=true");
-	}
-
-	// Add platform=wasm if running in WASM environment (compile-time constant)
+string RestApiSecretStorage::AppendPlatformParams(const string &url) {
 	if (IsWasmMode()) {
-		if (has_params) {
-			result += "&platform=wasm";
-		} else {
-			result += "?platform=wasm";
-		}
-		BOILSTREAM_LOG("AppendPlatformParams: Added platform=wasm");
+		return url + (url.find('?') == string::npos ? "?platform=wasm" : "&platform=wasm");
 	}
-
-	return result;
+	return url;
 }
 
 // Pending enrollment has no database-global credentials or connection-id map.
@@ -1949,7 +1864,7 @@ public:
 	uint64_t output_id = 0;
 	unique_ptr<BoilstreamRegistrationOutput> output;
 	bool bound = false, ready = false, busy = false, verifying = false;
-	string tenant, base_url, email, session_token, totp_uri;
+	string base_url, email, session_token, totp_uri;
 	void ClearOutput() {
 		output.reset();
 		output_id = 0;
@@ -1969,7 +1884,7 @@ public:
 		had_authentication = false;
 		authentication_generation = 0;
 		bound = ready = busy = verifying = false;
-		for (auto value : {&tenant, &base_url, &email, &session_token, &totp_uri}) {
+		for (auto value : {&base_url, &email, &session_token, &totp_uri}) {
 			BoilstreamConnectionState::SecureZeroString(*value);
 			value->clear();
 		}
@@ -1978,10 +1893,9 @@ public:
 		Reset();
 	}
 	void QueryBegin(ClientContext &context) override {
-		const auto current = RestApiSecretStorage::GetTenantId(context);
 		const auto current_auth = storage.GetSessionForConnection(context.GetConnectionId());
 		lock_guard<mutex> guard(lock);
-		if (bound && (current != tenant || !MatchesAuthentication(current_auth) || context.IsInterrupted())) {
+		if (bound && (!MatchesAuthentication(current_auth) || context.IsInterrupted())) {
 			Reset();
 		}
 	}
@@ -2021,7 +1935,6 @@ shared_ptr<BoilstreamRegistrationContext> RestApiSecretStorage::RegistrationOwne
 	if (&DatabaseInstance::GetDatabase(context) != &db) {
 		throw IOException("Registration belongs to a different database");
 	}
-	const auto tenant = GetTenantId(context);
 	auto owner =
 	    create ? context.registered_state->GetOrCreate<BoilstreamRegistrationContext>("boilstream_registration", *this)
 	           : context.registered_state->Get<BoilstreamRegistrationContext>("boilstream_registration");
@@ -2029,12 +1942,9 @@ shared_ptr<BoilstreamRegistrationContext> RestApiSecretStorage::RegistrationOwne
 	if (owner) {
 		lock_guard<mutex> guard(owner->lock);
 		if (owner->bound &&
-		    (owner->tenant != tenant || !owner->MatchesAuthentication(current_auth) || context.IsInterrupted())) {
+		    (!owner->MatchesAuthentication(current_auth) || context.IsInterrupted())) {
 			owner->Reset();
 		}
-	}
-	if (tenant.size() > 4096) {
-		throw InvalidInputException("Registration tenant identity is too long");
 	}
 	if (context.IsInterrupted()) {
 		throw IOException("Registration was interrupted");
@@ -2060,10 +1970,9 @@ BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginRegistration(ClientCon
 		throw InvalidInputException("Invalid registration authority or account length");
 	}
 	auto owner = RegistrationOwner(context, true);
-	const auto tenant = GetTenantId(context);
 	const auto current_auth = GetSessionForConnection(context.GetConnectionId());
 	// Allocate identity copies before invalidating any ready registration.
-	string new_base = base_url, new_email = email, new_tenant = tenant;
+	string new_base = base_url, new_email = email;
 	lock_guard<mutex> guard(owner->lock);
 	if (owner->busy) {
 		throw IOException("A registration operation is already in progress for this connection");
@@ -2072,7 +1981,6 @@ BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginRegistration(ClientCon
 		owner->Reset();
 		owner->base_url.swap(new_base);
 		owner->email.swap(new_email);
-		owner->tenant.swap(new_tenant);
 		owner->bound = true;
 		owner->authentication = current_auth;
 		owner->had_authentication = bool(current_auth);
@@ -2173,7 +2081,7 @@ uint64_t RestApiSecretStorage::CompleteRegistration(ClientContext &context, uint
 		throw IOException("Registration is not ready for verification");
 	}
 	if (output) {
-		// Retain only the tenant/account binding for the one-shot recovery result.
+		// Retain only the account binding for the one-shot recovery result.
 		owner->ClearEnrollment();
 		owner->output = std::move(output);
 		owner->output_id = id;
@@ -2219,9 +2127,6 @@ void RestApiSecretStorage::EndRegistrationOperation(ClientContext &context, uint
 namespace {
 class LocalBoilstreamSecrets : public ClientContextState {
 public:
-	explicit LocalBoilstreamSecrets(string tenant) : tenant(std::move(tenant)) {
-	}
-	const string tenant;
 	shared_ptr<BoilstreamSecretCache> cache = make_shared_ptr<BoilstreamSecretCache>();
 	~LocalBoilstreamSecrets() override {
 		cache->Close();
@@ -2244,14 +2149,10 @@ RestApiSecretStorage::SecretOwner RestApiSecretStorage::GetSecretOwner(optional_
 		}
 		return {state, state->secret_cache};
 	}
-	// Explicit secrets without a login are local to this connection and tenant.
+	// Explicit secrets without a login are local to this connection.
 	// They are never mirrored into database-wide memory storage.
-	auto local = create ? context.registered_state->GetOrCreate<LocalBoilstreamSecrets>("boilstream_local_secrets",
-	                                                                                    GetTenantId(context))
+	auto local = create ? context.registered_state->GetOrCreate<LocalBoilstreamSecrets>("boilstream_local_secrets")
 	                    : context.registered_state->Get<LocalBoilstreamSecrets>("boilstream_local_secrets");
-	if (local && local->tenant != GetTenantId(context)) {
-		throw IOException("Local BoilStream secrets belong to a different tenant context");
-	}
 	return {nullptr, local ? local->cache : nullptr};
 }
 
@@ -2889,7 +2790,7 @@ void RestApiSecretStorage::WriteSecretWithState(const BaseSecret &secret, OnCrea
 	boilstream::WipeOnExit wipe_body(body);
 	yyjson_mut_doc_free(doc);
 
-	HttpPostWithState(AppendPlatformParams(url, transaction), body, conn_state);
+	HttpPostWithState(AppendPlatformParams(url), body, conn_state);
 
 	BOILSTREAM_LOG("WriteSecretWithState: POST successful");
 }
@@ -3004,7 +2905,7 @@ RestApiSecretStorage::FetchSecret(const string &selector, const string &type, bo
 		boilstream::WipeOnExit wipe_response(response);
 
 		response = HttpPostWithState(
-		    AppendPlatformParams(state->GetEndpointUrl() + (match ? "/match" : "/get"), transaction), body, *state);
+		    AppendPlatformParams(state->GetEndpointUrl() + (match ? "/match" : "/get")), body, *state);
 
 		if (response.size() > BoilstreamSecretCache::MAX_ENTRY_BYTES) {
 			throw IOException("Oversized secret response");
@@ -3134,7 +3035,7 @@ RestApiSecretStorage::FetchAllSecretsFromServer(optional_ptr<CatalogTransaction>
 	CheckCatalogVersions(*state, &transaction->GetContext());
 	const auto revision = cache->Revision();
 	try {
-		auto response = HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl(), transaction), *state);
+		auto response = HttpGetWithState(AppendPlatformParams(state->GetEndpointUrl()), *state);
 		if (GetSession(transaction) != state || transaction->GetContext().IsInterrupted()) {
 			throw IOException("Secret fetch was superseded");
 		}
@@ -3187,7 +3088,7 @@ void RestApiSecretStorage::DropSecretByName(const Identifier &secret_name, OnEnt
 		if (state->GetEndpointUrl().empty()) {
 			throw IOException("Secret endpoint is not configured");
 		}
-		HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name), transaction),
+		HttpDelete(AppendPlatformParams(state->GetEndpointUrl() + "/" + StringUtil::URLEncode(name)),
 		           *state);
 
 	} else if (!cache->Get(name, true) && on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
@@ -3323,7 +3224,7 @@ RestApiSecretStorage::FetchManagedCatalogCredential(const string &catalog_id, Bo
 	boilstream::WipeOnExit wipe_response(response);
 
 	const auto url =
-	    AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id), transaction);
+	    AppendPlatformParams(ManagedCatalogCredentialUrl(conn_state.GetEndpointUrl(), catalog_id));
 	response = HttpGetWithState(url, conn_state);
 
 	ManagedCatalogCredentialEnvelope credential;

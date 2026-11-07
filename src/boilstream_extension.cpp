@@ -182,9 +182,6 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 	// We need "https://host:port/secrets/ducklakes"
 	string ducklakes_url = endpoint_url + "/ducklakes";
 
-	// Append multi-tenant parameter if in multi-tenant mode
-	ducklakes_url = RestApiSecretStorage::AppendMultiTenantParam(ducklakes_url, context);
-
 	// Retain the state used to construct the authenticated request URL.
 	if (!conn_state) {
 		throw IOException("No active session. Call PRAGMA boilstream_bootstrap_session first.");
@@ -261,11 +258,11 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamDucklakesInit(ClientContex
 			row.emplace_back();
 		}
 
-		// catalog_name (strip tenant prefix for display)
+		// catalog_name (preserve the server-provided name)
 		auto catalog_name_val = duckdb_yyjson::yyjson_obj_get(val, "catalog_name");
 		if (catalog_name_val && duckdb_yyjson::yyjson_is_str(catalog_name_val)) {
 			string catalog_name = SafeYyjsonGetStr(catalog_name_val);
-			row.emplace_back(RestApiSecretStorage::StripTenantPrefix(catalog_name, context));
+			row.emplace_back(catalog_name);
 		} else {
 			row.emplace_back();
 		}
@@ -447,8 +444,8 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 		auto &secret = *entry.secret;
 		vector<Value> row;
 
-		// name (strip tenant prefix for display)
-		row.emplace_back(RestApiSecretStorage::StripTenantPrefix(secret.GetName().GetIdentifierName(), context));
+		// name (preserve the server-provided name)
+		row.emplace_back(secret.GetName().GetIdentifierName());
 
 		// type
 		row.emplace_back(secret.GetType());
@@ -735,9 +732,6 @@ static string CreateDucklake(ClientContext &context, const FunctionParameters &p
 	// Construct the ducklakes creation URL
 	string create_url = endpoint_url + "/ducklakes";
 
-	// Append multi-tenant parameter if in multi-tenant mode
-	create_url = RestApiSecretStorage::AppendMultiTenantParam(create_url, context);
-
 	// Build request body using yyjson
 	boilstream::JsonArena doc_arena;
 	auto doc = doc_arena.New();
@@ -995,13 +989,12 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 
 	// Build list of available ducklakes for user to attach manually
 	// This avoids context switches and system catalog transaction issues
-	// Strip tenant prefix for user-friendly display
 	string ducklakes_list;
 	for (size_t i = 0; i < ducklake_names.size(); i++) {
 		if (i > 0) {
 			ducklakes_list += ", ";
 		}
-		ducklakes_list += EscapeSqlLiteral(RestApiSecretStorage::StripTenantPrefix(ducklake_names[i], context));
+		ducklakes_list += EscapeSqlLiteral(ducklake_names[i]);
 	}
 
 	// Return status with available legacy DuckLake secret names. Managed catalog

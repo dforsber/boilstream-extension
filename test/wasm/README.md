@@ -47,7 +47,7 @@ pinned runtime; see [WASM_TEST_STATUS.md](WASM_TEST_STATUS.md). The tests exerci
 two-thread operation after the extension has loaded.
 
 For interactive inspection, run `npm run serve --prefix test/wasm` and open the
-printed loopback URL. The page runs the core suite; Node adds harness and compatibility checks. No authentication token
+printed loopback URL. The page runs the core suite; Node adds harness, compatibility and authenticated-transport checks. No authentication token
 or real account is needed. The server exposes only declared assets and does not
 proxy authentication traffic.
 
@@ -71,9 +71,32 @@ CI also executes 26 base / 27 threaded Rust WASM FFI assertions using the same a
 each extension, including RFC 4231 HMAC and malformed OPAQUE response checks.
 See [`../../opaque-client/test-wasm/README.md`](../../opaque-client/test-wasm/README.md).
 
-Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the EH Quack artifact and verifies its pinned SHA256; the threaded artifact must be freshly built with scripts/build-quack-wasm.sh and match its input/output receipt before being served locally. The unavailable-dependency case is separate. Successful OPAQUE
-login, encrypted response verification, credential rotation, authenticated
-cross-connection isolation, and remote catalog access require protocol fixtures
-or a separately provisioned integration environment. Native C++ crypto/concurrency
-and Rust tests remain complementary; they do not qualify browser execution of
-those paths. See `WASM_TEST_STATUS.md` for the last local execution result.
+Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the EH Quack artifact and verifies its pinned SHA256; the threaded artifact must be freshly built with scripts/build-quack-wasm.sh and match its input/output receipt before being served locally. The unavailable-dependency case is separate. The default browser lane also performs a real OPAQUE exchange and proves that
+login fails closed when this baseline drops POST response headers. It prints
+`BLOCKED successful authenticated coverage`, and this must not be read as a
+successful authentication qualification.
+
+Run the strict local qualification separately:
+
+```sh
+WASM_VARIANTS=wasm_eh npm run test:authenticated --prefix test/wasm
+WASM_VARIANTS=wasm_threads npm run test:authenticated --prefix test/wasm
+node test/wasm/check-native-auth-fixture.js
+```
+
+The first two commands currently exit nonzero on the pinned host. The last is a
+native positive control requiring `make release` and installed matching HTTPFS
+and Quack; it proves that the fixture's OPAQUE, signatures and AES-GCM envelopes
+are accepted by the actual client. CI runs this positive control in the native
+security workflow. The peer is rebuilt through Cargo on each run, uses the
+existing locked dependencies, and exchanges only ephemeral fixture credentials
+over private stdio. No production accounts or private server modules are used.
+
+The strict browser suite includes account replacement, two-connection isolation,
+forged/missing/stale signatures, encrypted-body corruption and closed-connection
+isolation. Those cases after the first login remain **unqualified** until the
+host is corrected. On a corrected baseline, remove the expected-failure transport
+probe and make this strict suite mandatory. Browser email/password/MFA handlers,
+refresh-token resumption, managed credential vending and a live remote Quack
+query still require additional integration coverage. Native tests are
+complementary and do not fill those browser gaps. See `WASM_TEST_STATUS.md`.

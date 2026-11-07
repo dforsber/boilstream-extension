@@ -3,7 +3,7 @@
 //
 // boilstream_connection_state.hpp
 //
-// Per-connection authentication state for multi-tenant support.
+// Per-connection authentication state for remote client sessions.
 // Each DuckDB connection gets its own OPAQUE session credentials.
 //
 //===----------------------------------------------------------------------===//
@@ -23,7 +23,7 @@
 namespace duckdb {
 
 //! Complete server-owned credential for one managed catalog. Kept in the
-//! authenticated connection state so concurrent tenants can never overwrite
+//! authenticated connection state so concurrent connections can never overwrite
 //! each other's capability or server trust in DuckDB's catalog-global secret set.
 struct ManagedCatalogCredentialEnvelope {
 	ManagedCatalogCredentialEnvelope() = default;
@@ -56,7 +56,7 @@ struct ManagedCatalogCredentialEnvelope {
 
 //! Per-connection authentication state for boilstream extension.
 //! Stored in ClientContext via RegisteredStateManager with key "boilstream_auth".
-//! Each connection has independent OPAQUE session credentials for multi-tenant isolation.
+//! Each connection has independent OPAQUE session credentials for connection isolation.
 class BoilstreamConnectionState : public ClientContextState {
 public:
 	//! Catalog version info from server
@@ -237,8 +237,7 @@ public:
 		return authentication_endpoint;
 	}
 
-	//! Set while unpublished, then immutable. Empty denotes standalone, not a wildcard.
-	string authenticated_tenant;
+	//! Cached remote secrets belong exclusively to this authenticated session.
 	shared_ptr<BoilstreamSecretCache> secret_cache = make_shared_ptr<BoilstreamSecretCache>();
 
 	//! Detect logout while a replacement exchange is in flight.

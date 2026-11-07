@@ -8,7 +8,8 @@
     "test:harness": "node --test harness.test.js",
     "test:browser": "node run-tests.js",
     "test:compatibility": "node run-tests.js",
-    "serve": "node server.js"
+    "serve": "node server.js",
+    "test:authenticated": "node run-tests.js --authenticated"
   },
   "devDependencies": {
     "@duckdb/duckdb-wasm": "1.33.1-dev114.0",

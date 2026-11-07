@@ -9,13 +9,28 @@ ownership, actual registration/MFA handlers, diagnostic redaction in debug and
 release builds, independently signed HTTP responses, credential cleanup,
 connection isolation and stale-session publication. The newly enabled tests use
 stock DuckDB APIs and the exact matching HTTPFS artifact. These native results
-do not qualify successful browser authentication.
+do not qualify successful browser authentication. All five native SQL files also
+pass with zero skips; CI now requires every terminal test event to be successful with zero skips.
+The pinned upstream `--fail-require-skip` flag misses skips printed on stderr;
+`scripts/test-native-sql.py` checks structured events from both streams instead.
 
 The harness has 15 passing tests and rejects changed build inputs, stale receipts
 and replaced artifacts. npm audit reports zero vulnerabilities; the production
 Cargo lockfile audit passes. Server hosting tests are no longer part of this
 client distribution. `client_boundary.test` instead verifies the retained client
 API and absence of the removed server SQL functions, in native and browser runs.
+
+Local results after this cleanup: 24 CTest executables, 35 Rust tests, 15 harness
+tests, 72 EH / 73 threaded compatibility checks (including the explicitly labeled
+failure probe), and 26 / 27 Rust WASM FFI assertions passed. The strict native
+SQL gate also fails as intended when required dependency artifacts are withheld.
+The native OPAQUE fixture positive control passes. Strict authenticated browser
+qualification fails on both variants as described below.
+
+An additional `cargo clippy --example browser_peer -- -D warnings` check fails on
+pre-existing raw-pointer API and missing safety documentation diagnostics in the
+unchanged `opaque-client/src` code. Clippy is not included among the passing gates;
+`cargo audit --deny warnings` and the Rust tests do pass.
 
 ## Required browser qualification
 
@@ -35,11 +50,34 @@ results from the earlier 0.8.x hosting builds do not qualify this candidate.
 | Negative controls | Wrong engine, missing/corrupt artifact, wrong SQL result and unsupported directives must fail |
 
 The SQL inventory check requires an explicit browser coverage decision for every
-file. Native managed attachment tests remain native-only. Successful browser
-OPAQUE login, encrypted signed responses, credential rotation, authenticated
-cross-connection isolation and remote catalogs still require protocol fixtures or
-a separately provisioned integration environment. No gap-free browser coverage
-is claimed.
+file. Native managed attachment tests remain native-only.
+
+## Authenticated browser qualification is BLOCKED
+
+Local execution of the new real OPAQUE fixture completes both handshake messages
+in the browser, then login fails with `IO Error: Token exchange failed`. The same
+fixture succeeds through the native public SQL client, including signed AES-GCM
+responses and three account replacements/catalog fetches.
+
+The pinned host's [`HTTPWasmClient::Post`](https://github.com/duckdb/duckdb-wasm/blob/deb938860faf52dec5e8b5dbcc7371858c15e9e4/lib/src/http_wasm.cc#L541)
+copies body and status but never response headers into `HTTPResponse`. The
+required response signature and timestamp are therefore unavailable to the
+extension. DELETE has the same header loss. GET already returns headers.
+Disabling verification would accept unauthenticated responses and is not a fix.
+
+`npm test` now runs a mandatory **failure regression**, completing real OPAQUE
+and verifying that the rejected reply publishes no usable session. It explicitly
+prints the blocker. `npm run test:authenticated` is the strict qualification and
+must fail on this baseline. Its later success/isolation/tampering cases remain
+unqualified. Both commands use the same fresh extension artifacts and real
+browser workers; neither injects session state nor replaces SQL query results.
+
+Before claiming working authenticated WASM or publishing a release qualified for
+it, the host must preserve POST/DELETE response headers (and error bodies), a
+corrected DuckDB 2.0 baseline must be pinned, and the strict suite must pass and
+become mandatory in CI. No DuckDB library or community build entrypoint was
+changed here. Email/password/MFA, refresh resumption, managed catalog credential
+vending and live remote Quack queries remain separate browser coverage gaps.
 
 ## Threaded runtime and Quack
 

@@ -24,13 +24,14 @@ function browserBundle() {
 }
 
 // Exact route allowlist: no arbitrary repository access and no credential proxy.
-export function createTestServer() {
+export function createTestServer(authFixture) {
   return createServer(async (req, res) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     try {
+      if (authFixture && await authFixture.handle(req, res)) return;
       if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
       const route = decodeURIComponent(req.url.split('?')[0]);
       if (route === '/fixtures/corrupt.duckdb_extension.wasm') {
@@ -81,9 +82,9 @@ export function createTestServer() {
   });
 }
 
-export async function startServer(port = 0) {
+export async function startServer(port = 0, authFixture) {
   await browserBundle();
-  const server = createTestServer();
+  const server = createTestServer(authFixture);
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { readFile, access } from 'node:fs/promises';
+import { startAuthFixture } from './auth-fixture.js';
 import { chromium } from 'playwright';
 import { dirname, join } from 'node:path';
 import { wasmBuildInputs, verifyWasmBuild } from './build-inputs.js';
 import { startServer, baseline, artifactPath } from './server.js';
 
+const authenticated = process.argv.includes('--authenticated');
 const variants = process.env.WASM_VARIANTS ? process.env.WASM_VARIANTS.split(',') : baseline.variants;
 assert(variants.length > 0 && variants.every(v => baseline.variants.includes(v)), 'Invalid WASM_VARIANTS');
 const pkg = JSON.parse(await readFile(new URL('./node_modules/@duckdb/duckdb-wasm/package.json', import.meta.url), 'utf8'));
@@ -22,9 +24,10 @@ for (const variant of variants) {
   verifyWasmBuild(await readFile(artifactPath(variant)), receipt, await wasmBuildInputs(baseline, variant));
 }
 await import('./prepare-compatibility.js');
-const { server, url } = await startServer();
-let browser;
+const auth = await startAuthFixture();
+let server, url, browser;
 try {
+  ({ server, url } = await startServer(0, auth));
   browser = await chromium.launch({ headless: true });
   const hardDeadline = setTimeout(() => { console.error('Browser test process exceeded its cleanup deadline'); process.exit(1); }, 250_000 * variants.length);
   hardDeadline.unref();
@@ -72,17 +75,37 @@ try {
     console.log(`[${variant}] PASS wrong engine baseline and missing artifact fail the suite`);
     result.passed += 3; // optional dependency and two guard tests above
     console.log(JSON.stringify(result));
+    const before = { ...auth.counts };
     let compatibilityTimer;
     const compatibility = await Promise.race([
-      page.evaluate(v => window.runSuite(v, message => window.reportTest(message), { quack: true }), variant),
+      page.evaluate(({ variant, authenticated }) => window.runSuite(variant, message => window.reportTest(message),
+        { quack: true, authenticated, authTransportProbe: !authenticated }), { variant, authenticated }),
       new Promise((_, reject) => { compatibilityTimer = setTimeout(() => reject(new Error(`${variant} Quack compatibility exceeded 90s`)), 90_000); compatibilityTimer.unref(); }),
     ]).finally(() => clearTimeout(compatibilityTimer));
     assert.deepEqual(unexpected, [], 'Quack compatibility caused unexpected network access or browser errors');
     assert.equal(compatibility.quackCompatibility, 'supported', 'Quack compatibility is mandatory');
-    console.log(JSON.stringify({ ...compatibility, mode: 'core-quack' }));
+    console.log(JSON.stringify({ ...compatibility, protocol: auth.counts, mode: 'core-quack' }));
+    auth.assertHealthy();
+    if (authenticated) {
+      assert.equal(auth.counts.faults - before.faults, 5, 'Every forged response must reach the browser');
+      assert(auth.counts.finish - before.finish >= 8, 'Real authentication and recovery must complete');
+      assert(auth.counts.secrets - before.secrets >= 8, 'Bootstrap must fetch authenticated secrets');
+      assert(auth.counts.catalogs - before.catalogs >= 20, 'Catalog and isolation checks must reach the authority');
+    } else {
+      assert.equal(auth.counts.login - before.login, 1, 'Transport probe must send OPAQUE start');
+      assert.equal(auth.counts.finish - before.finish, 1, 'Transport probe must complete real OPAQUE');
+      assert.equal(auth.counts.encrypted - before.encrypted, 1, 'Transport probe must receive a signed encrypted reply');
+      assert.equal(auth.counts.requests - before.requests, 0, 'Failed authentication must publish no usable session');
+      console.log(`[${variant}] BLOCKED successful authenticated coverage: baseline POST discards response headers; run npm run test:authenticated`);
+    }
     await context.close();
   }
+} catch (error) {
+  console.error("Authenticated fixture progress:", auth.counts);
+  auth.assertHealthy();
+  throw error;
 } finally {
   await browser?.close();
-  await new Promise(resolve => server.close(resolve));
+  await auth.close();
+  if (server) await new Promise(resolve => server.close(resolve));
 }

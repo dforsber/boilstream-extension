@@ -28,3 +28,14 @@ statement error
 SELECT boilstream_quack_debug_session_count();
 ----
 does not exist
+
+# Server routing settings are not part of the public client contract.
+query I
+SELECT count(*) FROM duckdb_settings() WHERE name = 'boilstream.tenant_id';
+----
+0
+
+statement error
+SET "boilstream.tenant_id" = '42';
+----
+unrecognized configuration parameter

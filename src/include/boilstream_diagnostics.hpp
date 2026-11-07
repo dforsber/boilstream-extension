@@ -47,6 +47,4 @@ template <size_t N>
 	}
 	BoilstreamThrowHttpStatus(stage, status);
 }
-// Preserve only reviewed public diagnostics at the core query-error boundary.
-// This allowlist intentionally defaults unknown future messages to redaction.
 } // namespace duckdb

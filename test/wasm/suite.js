@@ -1,4 +1,5 @@
 import * as duckdb from '@duckdb/duckdb-wasm/dist/duckdb-browser.mjs';
+import { runAuthenticatedTests, runAuthTransportProbe } from './authenticated.js';
 import { runSqlTests } from './sql-runner.js';
 
 function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -41,7 +42,7 @@ export async function runSuite(variant, report = () => {}, options = {}) {
     const platform = (await c.query('PRAGMA platform')).toArray()[0].platform;
     assert(platform === variant, `Expected platform ${variant}, got ${platform}`);
     report(`PASS ${version} / ${platform}`); passed++;
-    // Keep this lane hermetic. Network-backed auth is a separate qualification.
+    // All traffic, including authenticated protocol tests, stays on loopback.
     await c.query('SET autoinstall_known_extensions = false; SET autoload_known_extensions = false;');
     await c.query(`SET custom_extension_repository = '${location.origin}/fixtures/${options.quack ? 'core-extensions' : 'extensions'}'`);
     const extension = `${location.origin}/extension/${variant}/boilstream.duckdb_extension.wasm`;
@@ -89,6 +90,8 @@ export async function runSuite(variant, report = () => {}, options = {}) {
       assert((await connection.query('SELECT 42 AS answer')).toArray()[0].answer === 42, 'Connection unusable after rejection');
       passed += 3;
     }
+    if (options.authTransportProbe) passed += await runAuthTransportProbe(connect, report);
+    if (options.authenticated) passed += await runAuthenticatedTests(connect, report);
     // Wrong extension content must cause a hard load failure, not a warning/pass.
     await rejects(c, `LOAD '${location.origin}/fixtures/corrupt.duckdb_extension.wasm'`, /metadata|magic|invalid.*extension/i);
     passed++;

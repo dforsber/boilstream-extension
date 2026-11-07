@@ -93,7 +93,7 @@ public:
 	//! Get session by connection ID (returns nullptr if not found)
 	shared_ptr<BoilstreamConnectionState> GetSessionForConnection(idx_t connection_id);
 
-	//! Context-aware authority access; a changed tenant must authenticate again.
+	//! Connection-owned authority access; no database-wide credential fallback.
 	shared_ptr<BoilstreamConnectionState> GetSessionForContext(ClientContext &context);
 
 	//! Private embedding API. No SQL binding or constructor from claimed IDs.
@@ -198,16 +198,6 @@ public:
 	//! Authenticated routing never falls back to the database default.
 	string GetEndpointUrl(ClientContext &context);
 
-	//! Check if multi-tenant mode is active (boilstream.tenant_id setting is set and non-empty)
-	static bool IsMultiTenantMode(ClientContext &context);
-
-	//! Get the tenant ID from context (returns empty string if not in multi-tenant mode)
-	static string GetTenantId(ClientContext &context);
-
-	//! Strip tenant prefix from a name (e.g., "__BS_u123__duckie" -> "duckie")
-	//! Returns the original name if no prefix found or not in multi-tenant mode
-	static string StripTenantPrefix(const string &name, ClientContext &context);
-
 	//! Check if running in WASM environment (compile-time constant)
 	static constexpr bool IsWasmMode() {
 #ifdef __EMSCRIPTEN__
@@ -217,21 +207,10 @@ public:
 #endif
 	}
 
-	//! Append ?multitenant=true to URL if in multi-tenant mode
-	//! Uses transaction to access ClientContext for checking the tenant_id setting
-	string AppendMultiTenantParam(const string &url, optional_ptr<CatalogTransaction> transaction);
+	//! Advertise the WASM platform for remote credential selection.
+	static string AppendPlatformParams(const string &url);
 
-	//! Append ?multitenant=true to URL if in multi-tenant mode (using explicit context)
-	static string AppendMultiTenantParam(const string &url, ClientContext &context);
-
-	//! Append platform query parameters to URL (multitenant, wasm)
-	//! Combines IsMultiTenantMode and IsWasmMode checks
-	static string AppendPlatformParams(const string &url, ClientContext &context);
-
-	//! Append platform query parameters using transaction context
-	string AppendPlatformParams(const string &url, optional_ptr<CatalogTransaction> transaction);
-
-	//! Begin one exclusive registration/MFA operation for this connection and tenant.
+	//! Begin one exclusive registration/MFA operation for this connection.
 	//! A ready registration is reusable only for the same authority and email.
 	BoilstreamRegistrationSnapshot BeginRegistration(ClientContext &context, const string &base_url,
 	                                                 const string &email);

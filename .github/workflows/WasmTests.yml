@@ -53,7 +53,7 @@ jobs:
         env:
           WASM_BUILD_TYPE: ${{ matrix.variant }}
           BOILSTREAM_RUST_WASM_LIB: ${{ github.workspace }}/build/${{ matrix.variant }}/extension/boilstream/rust/wasm32-unknown-emscripten/release/libopaque_client.a
-      - name: Run regressions and mandatory Quack compatibility
+      - name: Run regressions, mandatory Quack compatibility and host transport probe
         run: npm test
         working-directory: test/wasm
         env:
