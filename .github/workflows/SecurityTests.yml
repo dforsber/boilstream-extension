@@ -14,12 +14,25 @@ jobs:
       - run: cargo install cargo-audit --version 0.22.0 --locked
       # Keep the original findings visible. No ignore flag or success override.
       - run: cargo audit --deny warnings --file opaque-client/Cargo.lock --json > cargo-audit.json
+      - run: cargo audit --deny warnings --file protocol-client/Cargo.lock --json > client-protocol-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: cargo-audit
-          path: cargo-audit.json
+          path: |
+            cargo-audit.json
+            client-protocol-audit.json
           if-no-files-found: error
+  client-protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path protocol-client/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path protocol-client/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path protocol-client/Cargo.toml
   native-security:
     runs-on: ubuntu-latest
     steps:

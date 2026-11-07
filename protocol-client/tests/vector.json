@@ -1,0 +1,21 @@
+{
+  "request_key": "b60debac92eb05e7702a4c2539585f0b55425d9ba177c6e557b39569e5e5f16b",
+  "response_key": "f8e072099cacefe702a9a3f378191ca58b28888935c2dda4a4dc581faf99dfa4",
+  "request": {
+    "method": "POST",
+    "target": "/secrets/match",
+    "body": "{\"name\":\"test\"}",
+    "cookie": null,
+    "idempotency_key": "fixture-1"
+  },
+  "response": {
+    "status": 403,
+    "body": "{\"error\":\"forbidden\"}",
+    "cookies": [
+      "session=synthetic; HttpOnly"
+    ],
+    "session_resumption": true
+  },
+  "request_wire": "BS2.AgEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHwABAgMEBQYHCAkKCwwNDg8AAAAAAAAABwAAAABlU_EAAAAAAGVT8XgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgMEBQYHCAkKC3vJDch0OU-UymzNaBohNRjGFUGkwPf6cjOuvty0DkOlZz-X8kc2mFQMaMbUQqWgp8qh0JdqMQjMn180b6XIvM0FP73njkQUgfOtOhPka2Kk_Tsa3yyYAWEtIqwQIgeMgsq76yBnopXybfcqTrgY7k-TnkLyir0B-wIWeOYCovLhNQfGqg",
+  "response_wire": "BS2.AgIAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHwABAgMEBQYHCAkKCwwNDg8AAAAAAAAABwAAAABlU_EAAAAAAGVT8XhdZ0NGHpp01Bg34Bd5TKsl8D_3jfuKq6htKShdy6UngQwNDg8QERITFBUWF733FSswrribfa_K9xbPqbMn7YGgh-LBs1r1j0iQccqJ7ZFXTUjx-B06MPIKWdPrsh_buZ8WWS9wsnKTmVDKinEkZiiJed3-ezcYmCD4h76Du_nlwnoQWGBL5jj-hdSjWTkgjGwrzrWOBP8dAr-XOIs4XyUEj-UewxKnJcYEMwbOowumAVE"
+}

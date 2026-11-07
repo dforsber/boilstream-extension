@@ -1,0 +1,19 @@
+[package]
+name = "boilstream-protocol-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+include = ["Cargo.toml", "Cargo.lock", "README.md", "src/**", "tests/vector.json"]
+description = "Client request encryption and response verification for BoilStream"
+repository = "https://github.com/dforsber/boilstream-extension"
+
+[dependencies]
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
+base64 = "0.22.1"
+hkdf = "0.12.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+zeroize = { version = "1.8", features = ["derive"] }
