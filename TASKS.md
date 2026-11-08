@@ -1,5 +1,52 @@
 # Application protocol client integration
 
+## APPSEC2-NATIVE-AUTH — One real-client scenario across native/EH/pthreads
+
+Owner: codex-root,2026-11-08. Full coordinated release remains active. No subagents,
+main merge, publication or final release signoff.
+
+- Extracted authenticated-scenario.js so native and both WASM clients run the
+  same registration, MFA, account replacement, email/bootstrap login, replay,
+  secret CRUD/tenancy, tampered reply/no retry, unknown outcome and revocation
+  assertions. Native SQL uses the actual selected DuckDB shared library and LOADs
+  the actual extension, HTTPFS and Quack. No auth implementation or private key
+  resides in the public SQL adapter. Actual transport remains C++/Rust/HTTPFS.
+- Private test-only middleware observes native plaintext requests, rejects
+  exposed passwords/outer credentials, strips all security response headers and
+  corrupts exactly one real response after the router completes its mutation.
+  Controls use private stdin, never production HTTP endpoints. DB enrollment and
+  revocation assertions are shared with browser qualification.
+- Native source headers/library build/extension selection must agree before
+  loading. Both native build trees are refreshed incrementally. A wrong-source
+  or wrong-extension negative control is in the public harness. No source hashes,
+  inventories, receipts, forced clean or cached-output fallback added.
+- Real private coordinated gate PASS5/5,0 ignored in72.27s, private
+  ../logs/native-shared-auth-gate.log (session89123 terminal). This closes loaded
+  native email/MFA/account-replacement and native tamper/revocation coverage.
+  Native adapter also passes exact embedded-NUL/NULL values, error continuation
+  and connection-local table isolation checks (native-sql-adapter-tests.log).
+  Its value encoder preserves explicit lengths, avoiding a false oracle caused
+  by C-string truncation. Shared harness PASS15/15; format-check and JS syntax PASS.
+- Public native CI now compiles and checks this adapter; authenticated success
+  still belongs to the mandatory private gate. Production extension/server APIs,
+  SPA/direct integration, locks and ordinary community distribution are unchanged.
+  Retain earlier24/24 native CTest and full production clang-tidy results; no
+  production implementation changed in this checkpoint.
+- GitHub603fcdb WASM PASS; Rust audit/client protocol PASS; native still running.
+  Distribution got past CMake but vcpkg bootstrap download returned504, before
+  compilation. Retried failed jobs; all-green status remains unproven.
+- Incremental review: security—private wire controls exercise real router/crypto;
+  test quality—shared assertions avoid native/browser drift and adapter preserves
+  exact data; compatibility—selected2.0 shared library and normal CMake/Cargo,
+  no community publish/signing changes. These are not the final three reviews.
+
+Remaining: successful resumption/credential rotation, live managed catalog/Quack,
+obsolete production wire cleanup, C++ dependency review, private release gates,
+remote CI and three final reviews. Inspection found PerformOpaqueResume currently
+has no production callsite: resolve its intended public entrypoint and prove real
+rotation rather than counting negative internal-method tests as success.
+Disks23GiB/1.2TiB free;8/50GiB guards maintained. No main merge or release claim.
+
 ## APPSEC2-REGISTRATION — Authenticated parsing and loaded browser enrollment
 
 Owner: codex-root,2026-11-08. Full coordinated release goal remains active.

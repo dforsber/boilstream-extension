@@ -22,7 +22,7 @@ responsibilities; a public green check alone does not qualify authentication.
   that omits secrets without a known expiry. Explicit SQL now fetches an
   authenticated server snapshot on both platforms; the generic WASM secret
   callback remains cache-only to avoid recursive HTTP.
-- Both browsers perform real concurrent email registration, cached enrollment and
+- Native and both browsers execute one shared scenario for email registration, cached enrollment and
   account replacement. Failed signup clears the prior enrollment; wrong MFA codes
   can be retried, completed enrollment cannot be reused, and ten unique recovery
   codes are returned. Replayed TOTP is refused; a fresh code permits email login.
@@ -47,7 +47,10 @@ from artifact-free unit runs. Missing artifacts fail. The private release target
 `test-application-protocol-release` first audits dependencies, then runs standalone
 transport tests and the loaded-client gate. It must pass for coordinated release.
 The private server implementation and installation private keys stay private;
-[real-server.js](real-server.js) receives only public pins and synthetic credentials.
+[real-server.js](real-server.js) and [real-server-native.js](real-server-native.js)
+receive only public pins and synthetic credentials. Their SQL adapters share
+[authenticated-scenario.js](authenticated-scenario.js); native transport observation
+and fault injection remain private.
 
 The runners invoke ordinary CMake/Cargo incremental builds before loading WASM
 artifacts. Selected CMake source paths and platform are checked. No source hash
@@ -59,7 +62,7 @@ make targets remain unchanged.
 All24 native C++ suites pass, including migrated memory-only resume and
 registration-response parsing/result ownership. Malformed authenticated JSON,
 exact cookie parsing, control bytes, bounds and duplicate fields have direct
-production parser tests. Loaded native email/MFA, successful resumption,
+production parser tests. Successful resumption,
 credential rotation, managed catalog credential vending and live remote Quack
 queries still need actual-server coverage. Catalog polling has pure parser/planner
 tests and real channel rejection; these do not replace successful remote coverage.

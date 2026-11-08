@@ -123,3 +123,25 @@ test('threaded Quack rejects non-shared modules and missing entrypoints', async 
   assert.throws(() => assertThreadedQuack(module(false)), /must import shared memory/);
   assert.throws(() => assertThreadedQuack(module(true)), /Missing real Quack entrypoint/);
 });
+
+// A mismatched header/library selection must fail before any build or SQL runs.
+test('native driver refuses source or extension from a different build tree', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { assertNativeSelection } = await import('./ensure-native-build.js');
+  const root = await mkdtemp(join(tmpdir(), 'boilstream-native-selection-'));
+  try {
+    for (const part of ['source', 'other', 'build/extension/boilstream'])
+      await mkdir(join(root, part), { recursive: true });
+    const extension = join(root, 'build/extension/boilstream/boilstream.duckdb_extension');
+    await writeFile(extension, 'synthetic-not-loadable');
+    await writeFile(join(root, 'other.duckdb_extension'), 'synthetic-not-loadable');
+    await writeFile(join(root, 'build/CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${join(root, 'source')}\n`);
+    const selected = { source: join(root, 'source'), build: join(root, 'build'), extension,
+      driver: join(root, 'runner/native_protocol_driver') };
+    assertNativeSelection(selected);
+    assert.throws(() => assertNativeSelection({ ...selected, source: join(root, 'other') }), /same selected tree/);
+    assert.throws(() => assertNativeSelection({ ...selected, extension: join(root, 'other.duckdb_extension') }), /selected build tree/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

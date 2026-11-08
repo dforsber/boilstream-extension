@@ -69,6 +69,17 @@ jobs:
             -DBOILSTREAM_HTTPFS_EXTENSION_PATH="$HOME/.duckdb/extensions/v2.0.0/$platform/httpfs.duckdb_extension" \
             -DBOILSTREAM_QUACK_EXTENSION_PATH="$HOME/.duckdb/extensions/v2.0.0/$platform/quack.duckdb_extension"
           cmake --build build/security-tests --parallel 2
+      - name: Build the native adapter used by private authenticated coverage
+        run: |
+          cmake -S test/native -B build/native-protocol -G Ninja \
+            -DDUCKDB_BUILD_DIR="$PWD/build/release" \
+            -DDUCKDB_SOURCE_DIR="$PWD/duckdb"
+          cmake --build build/native-protocol --parallel 2
+          platform=$(build/release/duckdb -csv -noheader -c 'PRAGMA platform;')
+          python3 test/native/check_sql_driver.py build/native-protocol/native_protocol_driver \
+            "$HOME/.duckdb/extensions/v2.0.0/$platform/httpfs.duckdb_extension" \
+            "$HOME/.duckdb/extensions/v2.0.0/$platform/quack.duckdb_extension" \
+            "$PWD/build/release/extension/boilstream/boilstream.duckdb_extension"
       - run: ctest --test-dir build/security-tests --output-on-failure
       - uses: actions/upload-artifact@v4
         if: always()
