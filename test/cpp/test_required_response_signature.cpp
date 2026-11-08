@@ -1,33 +1,26 @@
-// Signature fixtures come from independent Python hashlib/hmac code.
+// Public adversarial boundary tests. Successful cryptographic exchanges are
+// qualified by the private actual-server/native/WASM integration gate.
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/main/extension_helper.hpp"
 #include "boilstream_secret_storage.hpp"
-#include "yyjson.hpp"
-#include "client_test_context.hpp"
+#include "boilstream_protocol.hpp"
 #include <iostream>
-#include <sstream>
+#include <stdexcept>
 using namespace duckdb;
-using namespace duckdb_yyjson;
-static void Require(bool ok) {
+struct AssertionFailure {
+	int line;
+};
+static void RequireAt(bool ok, int line) {
 	if (!ok)
-		throw std::runtime_error("assertion");
+		throw AssertionFailure {line};
 }
+#define Require(value) RequireAt((value), __LINE__)
 class BoilstreamSessionPublicationTestAccess {
 public:
 	static void Publish(RestApiSecretStorage &s, ClientContext &ctx,
 	                    const shared_ptr<BoilstreamConnectionState> &state) {
 		auto old = s.GetSessionForConnection(ctx.GetConnectionId());
 		s.PublishSession(ctx, state, old, old ? old->authentication_generation.load() : 0, true);
-	}
-	static void Verify(RestApiSecretStorage &s, const string &body, uint16_t status,
-	                   const case_insensitive_map_t<string> &headers, const vector<uint8_t> &key) {
-		s.VerifyResponseSignature(body, status, headers, key);
-	}
-	static vector<uint8_t> RequestKey(RestApiSecretStorage &s, BoilstreamConnectionState &state) {
-		vector<uint8_t> key;
-		s.BuildAuthenticatedHeaders("GET", "https://synthetic.invalid/secrets", "", state, &key);
-		return key;
 	}
 	static void Delete(RestApiSecretStorage &s, const string &url, BoilstreamConnectionState &state) {
 		s.HttpDelete(url, state);
@@ -39,171 +32,166 @@ struct Config : DBConfig {
 		options.maximum_threads = 2;
 	}
 };
-static void Seed(BoilstreamConnectionState &s, bool finish = false) {
-	s.session_key.assign(64, 7);
-	s.access_token = string(64, 'a');
-	s.region = "synthetic-region";
-	s.refresh_token.assign(32, 8);
-	s.token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(1);
-	s.is_exchanging = finish;
+static const string AUTHORITY = "https://synthetic.invalid";
+static const string MARKER = "private-boundary-marker";
+static shared_ptr<BoilstreamProtocol> Protocol() {
+	std::array<uint8_t, 32> key {};
+	key[0] = 9;
+	return make_shared_ptr<BoilstreamProtocol>(AUTHORITY, key);
 }
-int main(int argc, char **argv) {
-	if (argc != 2)
-		return 2;
-	Config cfg;
-	DuckDB db(nullptr, &cfg);
-	Connection c(db);
-	SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
-	Connection transport_connection(db);
-	LoadTestHttpfs(transport_connection);
-	Require(!c.Query("SET httpfs_client_implementation='curl'")->HasError());
+static void Seed(BoilstreamConnectionState &state) {
+	state.session_key.assign(64, 7);
+	state.access_token = MARKER;
+	state.refresh_token.assign(32, 8);
+	state.token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(1);
+	state.protocol = Protocol();
+}
+class UntrustedHTTP : public HTTPUtil {
+public:
+	string mode;
+	size_t requests = 0;
+	bool safe_request = false;
+	explicit UntrustedHTTP(string mode) : mode(std::move(mode)) {
+	}
+	unique_ptr<HTTPParams> InitializeParameters(DatabaseInstance &, const string &) override {
+		auto params = make_uniq<HTTPParams>(*this);
+		params->extra_headers["Authorization"] = MARKER;
+		params->extra_headers["Cookie"] = MARKER;
+		params->follow_location = true;
+		params->retries = 3;
+		return params;
+	}
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &) override {
+		++requests;
+		auto &post = request.Cast<PostRequestInfo>();
+		string body(reinterpret_cast<const char *>(post.buffer_in), post.buffer_in_len);
+		safe_request = request.url == AUTHORITY + "/auth/api/protocol/v2/handshake" && body.find("BH2.c.") == 0 &&
+		               body.find(MARKER) == string::npos && !request.headers.HasHeader("Authorization") &&
+		               !request.headers.HasHeader("Cookie") && request.params.extra_headers.empty() &&
+		               request.params.retries == 0 && !request.params.follow_location;
+		if (mode == "exception")
+			throw IOException(MARKER);
+		auto response =
+		    make_uniq<HTTPResponse>(mode == "status" ? static_cast<HTTPStatusCode>(403) : HTTPStatusCode::OK_200);
+		response->headers.Insert("Set-Cookie", "session=" + MARKER);
+		response->headers.Insert("Location", "https://elsewhere.invalid/" + MARKER);
+		response->headers.Insert("X-Boilstream-Session-Resumption", "enabled");
+		response->headers.Insert("X-Boilstream-Response-Signature", MARKER);
+		post.buffer_out = mode == "oversized" ? string(167, 'x')
+		                  : mode == "empty"   ? ""
+		                                      : "{\"status\":200,\"body\":\"forged-success\"}";
+		return response;
+	}
+};
+int main() {
+	Config config;
+	DuckDB db(nullptr, &config);
 	auto owned_storage = make_uniq<RestApiSecretStorage>(*db.instance, "");
 	auto &storage = *owned_storage;
+	SecretManager::Get(*db.instance).SetEnablePersistentSecrets(false);
 	SecretManager::Get(*db.instance).LoadSecretStorage(std::move(owned_storage));
 	int failures = 0;
 	auto test = [&](const string &name, auto fn) {
 		try {
 			fn();
-			std::cout << "CASE " << name << " PASS" << std::endl;
+			std::cout << "CASE " << name << " PASS\n";
+		} catch (const AssertionFailure &error) {
+			++failures;
+			std::cout << "CASE " << name << " FAIL line " << error.line << "\n";
 		} catch (...) {
 			++failures;
-			std::cout << "CASE " << name << " FAIL" << std::endl;
+			std::cout << "CASE " << name << " FAIL\n";
 		}
 	};
-	const string input((std::istreambuf_iterator<char>(std::cin)), {});
-	auto doc = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(yyjson_read(input.data(), input.size(), 0),
-	                                                                   yyjson_doc_free);
-	Require(bool(doc));
-	auto root = yyjson_doc_get_root(doc.get());
-	Require(yyjson_is_arr(root));
-	size_t i, n;
-	yyjson_val *entry;
-	yyjson_arr_foreach(root, i, n, entry) {
-		auto str = [&](const char *key) {
-			auto v = yyjson_obj_get(entry, key);
-			Require(yyjson_is_str(v));
-			return string(yyjson_get_str(v), yyjson_get_len(v));
-		};
-		test(str("name"), [&] {
-			case_insensitive_map_t<string> headers;
-			auto object = yyjson_obj_get(entry, "headers");
-			size_t j, count;
-			yyjson_val *k, *v;
-			yyjson_obj_foreach(object, j, count, k, v) {
-				headers[string(yyjson_get_str(k), yyjson_get_len(k))] = string(yyjson_get_str(v), yyjson_get_len(v));
-			}
-			bool rejected = false;
-			auto key = vector<uint8_t>(64, yyjson_get_bool(yyjson_obj_get(entry, "wrong_key")) ? 9 : 7);
-			try {
-				BoilstreamSessionPublicationTestAccess::Verify(
-				    storage, str("body"), yyjson_get_uint(yyjson_obj_get(entry, "status")), headers, key);
-			} catch (const IOException &) {
-				rejected = true;
-			}
-			Require(rejected == yyjson_get_bool(yyjson_obj_get(entry, "reject")));
-		});
-	}
-	for (const auto &method : vector<string> {"GET", "POST", "DELETE", "FINALIZE"})
-		for (const auto &mode :
-		     vector<string> {"valid", "missing", "malformed", "wrong-key", "tampered", "stale", "bad-date"}) {
-			test("http_" + method + "_" + mode, [&] {
-				BoilstreamConnectionState state;
-				Seed(state, method == "FINALIZE");
-				BoilstreamConnectionState other;
-				Seed(other);
-				other.session_key.assign(64, 9);
-				const auto generation = state.authentication_generation.load();
-				bool rejected = false;
-				string body;
-				const auto url = string(argv[1]) + "/" + method + "/" + mode;
-				try {
-					if (method == "GET")
-						body = storage.HttpGetWithState(url, state);
-					else if (method == "DELETE")
-						BoilstreamSessionPublicationTestAccess::Delete(storage, url, state);
-					else
-						body = storage.HttpPostWithState(url, "{}", state);
-				} catch (const IOException &) {
-					rejected = true;
-				}
-				Require(rejected == (mode != "valid"));
-				if (mode == "valid") {
-					Require(!state.session_key.empty());
-					if (method != "DELETE")
-						Require(body == "synthetic-result");
-				} else {
-					Require(state.session_key.empty() && state.access_token.empty() && state.refresh_token.empty());
-					Require(state.authentication_generation.load() > generation);
-					Require(state.secret_cache->IsClosed());
-				}
-				Require(other.session_key == vector<uint8_t>(64, 9) && !other.access_token.empty() &&
-				        other.authentication_generation.load() == 0);
-			});
-		}
-	test("forged_reply_retires_only_its_published_connection", [&] {
-		Connection a(db), b(db);
-		auto state_a = make_shared_ptr<BoilstreamConnectionState>();
-		Seed(*state_a);
-		auto state_b = make_shared_ptr<BoilstreamConnectionState>();
-		Seed(*state_b);
-		state_b->session_key.assign(64, 9);
-		BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, state_a);
-		BoilstreamSessionPublicationTestAccess::Publish(storage, *b.context, state_b);
+	auto refuse = [&](auto action) {
 		bool rejected = false;
 		try {
-			storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_a);
-		} catch (const IOException &) {
+			action();
+		} catch (const IOException &error) {
 			rejected = true;
+			Require(string(error.what()).find(MARKER) == string::npos);
 		}
-		Require(rejected && state_a->session_key.empty() && state_a->secret_cache->IsClosed());
-		Require(storage.GetSessionForConnection(b.context->GetConnectionId()) == state_b);
-		Require(!state_b->secret_cache->IsClosed() && state_b->refresh_token == vector<uint8_t>(32, 8));
-		Require(storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *state_b) == "synthetic-result");
-	});
-	test("retired_request_failure_preserves_replacement_session", [&] {
-		Connection a(db);
+		Require(rejected);
+	};
+	for (const auto &method : vector<string> {"GET", "POST", "DELETE", "OPAQUE_START", "OPAQUE_FINISH"}) {
+		for (const auto &mode : vector<string> {"forged", "empty", "oversized", "status", "exception"}) {
+			test(method + "_" + mode, [&] {
+				auto http = make_shared_ptr<UntrustedHTTP>(mode);
+				DBConfig::GetConfig(*db.instance).SetHTTPUtil(http);
+				BoilstreamConnectionState state, other;
+				Seed(state);
+				Seed(other);
+				if (method == "OPAQUE_START" || method == "OPAQUE_FINISH")
+					state.is_exchanging = true;
+				if (method == "OPAQUE_START") {
+					state.session_key.clear();
+					state.access_token.clear();
+					state.refresh_token.clear();
+				}
+				other.session_key.assign(64, 9);
+				auto generation = state.authentication_generation.load();
+				auto send = [&] {
+					if (method == "GET")
+						storage.HttpGetWithState(AUTHORITY + "/secrets", state);
+					else if (method == "DELETE")
+						BoilstreamSessionPublicationTestAccess::Delete(storage, AUTHORITY + "/secrets", state);
+					else {
+						auto path = method == "OPAQUE_START"    ? "/auth/api/opaque-login-start"
+						            : method == "OPAQUE_FINISH" ? "/auth/api/opaque-login-finish"
+						                                        : "/auth/email/login";
+						storage.HttpPostWithState(AUTHORITY + path, MARKER, state);
+					}
+				};
+				refuse(send);
+				Require(http->requests == 1 && http->safe_request);
+				Require(state.session_key.empty() && state.access_token.empty() && state.refresh_token.empty());
+				Require(state.authentication_generation.load() > generation && state.secret_cache->IsClosed());
+				Require(other.session_key == vector<uint8_t>(64, 9) && !other.access_token.empty() &&
+				        !other.secret_cache->IsClosed());
+				refuse(send);
+				Require(http->requests == 1); // No retry or use after channel retirement.
+			});
+		}
+	}
+	test("failed_old_owner_does_not_retire_replacement", [&] {
+		auto http = make_shared_ptr<UntrustedHTTP>("forged");
+		DBConfig::GetConfig(*db.instance).SetHTTPUtil(http);
+		Connection connection(db);
 		auto old = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*old);
-		BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, old);
+		BoilstreamSessionPublicationTestAccess::Publish(storage, *connection.context, old);
 		auto replacement = make_shared_ptr<BoilstreamConnectionState>();
 		Seed(*replacement);
 		replacement->session_key.assign(64, 9);
-		BoilstreamSessionPublicationTestAccess::Publish(storage, *a.context, replacement);
-		// Keep the real old owner alive, as an in-flight request does across replacement.
-		bool rejected = false;
-		try {
-			storage.HttpGetWithState(string(argv[1]) + "/GET/missing", *old);
-		} catch (const IOException &) {
-			rejected = true;
-		}
-		Require(rejected && old->session_key.empty());
-		Require(storage.GetSessionForConnection(a.context->GetConnectionId()) == replacement);
+		BoilstreamSessionPublicationTestAccess::Publish(storage, *connection.context, replacement);
+		refuse([&] { storage.HttpGetWithState(AUTHORITY + "/secrets", *old); });
+		Require(old->session_key.empty());
+		Require(storage.GetSessionForConnection(connection.context->GetConnectionId()) == replacement);
 		Require(replacement->session_key == vector<uint8_t>(64, 9) && !replacement->secret_cache->IsClosed());
-		Require(storage.HttpGetWithState(string(argv[1]) + "/GET/wrong-key", *replacement) == "synthetic-result");
 	});
-	test("request_verification_key_survives_logout", [&] {
-		BoilstreamConnectionState state;
-		Seed(state);
-		auto key = BoilstreamSessionPublicationTestAccess::RequestKey(storage, state);
-		Require(key == vector<uint8_t>(64, 7));
-		state.ClearSession();
-		Require(state.session_key.empty());
-		Require(key == vector<uint8_t>(64, 7));
+	test("closed_channel_requires_explicit_fresh_authentication", [&] {
+		auto http = make_shared_ptr<UntrustedHTTP>("forged");
+		DBConfig::GetConfig(*db.instance).SetHTTPUtil(http);
+		auto channel = Protocol();
+		HTTPHeaders metadata;
+		channel->Close();
+		channel->Close();
+		refuse([&] {
+			channel->Exchange(*db.instance, "POST", AUTHORITY + "/auth/email/login", MARKER, MARKER, &metadata);
+		});
+		Require(http->requests == 0);
+		auto fresh = channel->Fresh();
+		refuse(
+		    [&] { fresh->Exchange(*db.instance, "POST", AUTHORITY + "/auth/email/login", MARKER, MARKER, &metadata); });
+		Require(http->requests == 1 && http->safe_request && !metadata.HasHeader("Set-Cookie"));
 	});
-	test("get_without_session_does_not_send_request", [&] {
-		BoilstreamConnectionState empty;
-		bool rejected = false;
-		try {
-			storage.HttpGetWithState(string(argv[1]) + "/GET/valid", empty);
-		} catch (const IOException &) {
-			rejected = true;
-		}
-		Require(rejected);
-	});
-	test("pre_key_login_start_accepts_unsigned_reply", [&] {
-		BoilstreamConnectionState pending;
-		pending.is_exchanging = true;
-		Require(storage.HttpPostWithState(string(argv[1]) + "/START/missing", "{}", pending) == "synthetic-result");
+	test("authority_mismatch_closes_channel_without_network", [&] {
+		auto http = make_shared_ptr<UntrustedHTTP>("forged");
+		DBConfig::GetConfig(*db.instance).SetHTTPUtil(http);
+		auto channel = Protocol();
+		refuse([&] { channel->Exchange(*db.instance, "GET", "https://elsewhere.invalid/secrets", ""); });
+		refuse([&] { channel->Exchange(*db.instance, "GET", AUTHORITY + "/secrets", ""); });
+		Require(http->requests == 0);
 	});
 	return failures ? 1 : 0;
 }

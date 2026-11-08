@@ -639,8 +639,7 @@ set_tests_properties(
   RegistrationOwnership RegistrationHttp RegistrationOutput
   PROPERTIES TIMEOUT 40 ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
-# Independently signed replies exercise actual HTTP verification and session
-# retirement.
+# Untrusted HTTP responses cannot bypass application proof or retire a sibling.
 add_executable(
   required_response_signature_test
   test_required_response_signature.cpp ../../src/boilstream_secret_storage.cpp
@@ -655,15 +654,11 @@ target_link_libraries(
   required_response_signature_test
   PRIVATE ${BOILSTREAM_AUTH_TEST_LIBRARY} Threads::Threads
           "${EXTENSION_BUILD_DIR}/third_party/mbedtls/libduckdb_mbedtls.a")
-add_test(
-  NAME RequiredResponseSignature
-  COMMAND
-    ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/run_required_response_signature.py
-    $<TARGET_FILE:required_response_signature_test>)
+add_test(NAME RequiredApplicationProtocol
+         COMMAND required_response_signature_test)
 set_tests_properties(
-  RequiredResponseSignature PROPERTIES TIMEOUT 40 ENVIRONMENT
-                                       "QUERY_FARM_TELEMETRY_OPT_OUT=1")
+  RequiredApplicationProtocol PROPERTIES TIMEOUT 40 ENVIRONMENT
+                                         "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
 # Dependency-free production URL, bounded append and erasure regressions.
 add_executable(transport_security_test test_transport_security.cpp)
@@ -709,7 +704,7 @@ foreach(
 endforeach()
 set_property(
   TEST AuthDiagnostics_debug AuthDiagnostics_release RegistrationHttp
-       RequiredResponseSignature
+       RequiredApplicationProtocol
   APPEND
   PROPERTY
     ENVIRONMENT
@@ -724,28 +719,31 @@ endforeach()
 
 # Connection state now owns the real protocol channel rather than header-only
 # signing counters. Compile its adapter in every test that compiles storage or
-# directly exercises the connection state; never substitute a stale archive.
-# The host is a separate CMake tree. File paths alone do not teach this tree how
-# to refresh its static/shared libraries after an extension source change. Run
-# its ordinary incremental build before compiling/linking any test. BYPRODUCTS
-# makes Ninja re-evaluate the link inputs after that build, including Rust.
+# directly exercises the connection state; never substitute a stale archive. The
+# host is a separate CMake tree. File paths alone do not teach this tree how to
+# refresh its static/shared libraries after an extension source change. Run its
+# ordinary incremental build before compiling/linking any test. BYPRODUCTS makes
+# Ninja re-evaluate the link inputs after that build, including Rust.
 add_custom_target(
   boilstream_native_test_dependencies
   COMMAND ${CMAKE_COMMAND} --build "${EXTENSION_BUILD_DIR}" --parallel 2
   BYPRODUCTS ${DUCKDB_LIBS} "${BOILSTREAM_AUTH_TEST_LIBRARY}" "${RUST_LIB_PATH}"
-  USES_TERMINAL
-  VERBATIM)
-get_property(boilstream_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  USES_TERMINAL VERBATIM)
+get_property(
+  boilstream_test_targets
+  DIRECTORY
+  PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS boilstream_test_targets)
   get_target_property(test_type ${target} TYPE)
   if(test_type STREQUAL "EXECUTABLE")
     add_dependencies(${target} boilstream_native_test_dependencies)
   endif()
   get_target_property(test_sources ${target} SOURCES)
-  if("${test_sources}" MATCHES "boilstream_secret_storage\\.cpp" OR
-     target STREQUAL "boilstream_connection_state_test" OR
-     target STREQUAL "wasm_lock_ordering_test")
+  if("${test_sources}" MATCHES "boilstream_secret_storage\\.cpp"
+     OR target STREQUAL "boilstream_connection_state_test"
+     OR target STREQUAL "wasm_lock_ordering_test")
     target_sources(${target} PRIVATE ../../src/boilstream_protocol.cpp)
-    target_include_directories(${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+    target_include_directories(
+      ${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
   endif()
 endforeach()

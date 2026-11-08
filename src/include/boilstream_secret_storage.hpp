@@ -346,6 +346,9 @@ private:
 	//! Rate-limited to VERSION_CHECK_INTERVAL_SECONDS
 	void CheckCatalogVersions(BoilstreamConnectionState &conn_state, optional_ptr<ClientContext> context = nullptr);
 
+	bool BeginCatalogVersionPoll(BoilstreamConnectionState &conn_state, std::chrono::system_clock::time_point now);
+	void ApplyCatalogVersions(BoilstreamConnectionState &conn_state, const boilstream::CatalogVersions &versions);
+
 	//! Fetch catalog versions from server (uses connection state)
 	//! Returns map of catalog_id (UUID) -> CatalogVersionInfo
 	case_insensitive_map_t<CatalogVersionInfo> FetchCatalogVersions(BoilstreamConnectionState &conn_state,

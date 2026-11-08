@@ -1,195 +1,99 @@
-//===----------------------------------------------------------------------===//
-//                         DuckDB
-//
-// test_boilstream_catalog_versions.cpp
-//
-// Unit tests for Catalog Version Polling Feature
-//
-//===----------------------------------------------------------------------===//
-
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch.hpp>
 #include "boilstream_secret_storage.hpp"
-#include "boilstream_connection_state.hpp"
+#include "boilstream_catalog_versions.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/common/http_util.hpp"
-
+#include <atomic>
 #include <thread>
 #include <chrono>
-#include <ctime>
-#include "mbedtls_wrapper.hpp"
-#include "duckdb/common/types/blob.hpp"
 
 using namespace duckdb;
 using namespace std;
 
-//===----------------------------------------------------------------------===//
-// Test Access Friend Class - Allows testing private methods
-//===----------------------------------------------------------------------===//
-
 class BoilstreamCatalogVersionTestAccess {
 public:
-	static duckdb::vector<uint8_t> IntegrityKey(RestApiSecretStorage &storage, const duckdb::vector<uint8_t> &key) {
-		return storage.DeriveIntegrityKey(key);
+	static auto &GetSecretExpiration(BoilstreamConnectionState &state) {
+		return state.secret_expiration;
 	}
-	// Access the catalog_versions map from connection state
-	static case_insensitive_map_t<BoilstreamConnectionState::CatalogVersionInfo> &
-	GetCatalogVersions(BoilstreamConnectionState &conn_state) {
-		return conn_state.catalog_versions;
+	static void RefreshCatalogCredentials(RestApiSecretStorage &storage, const string &name,
+	                                      BoilstreamConnectionState &state) {
+		storage.RefreshCatalogCredentials(name, state);
 	}
-
-	// Access last_version_check timestamp from connection state
-	static std::chrono::system_clock::time_point &GetLastVersionCheck(BoilstreamConnectionState &conn_state) {
-		return conn_state.last_version_check;
+	static void CheckCatalogVersions(RestApiSecretStorage &storage, BoilstreamConnectionState &state) {
+		storage.CheckCatalogVersions(state);
 	}
-
-	// Access secret_expiration map from connection state
-	static case_insensitive_map_t<std::chrono::system_clock::time_point> &
-	GetSecretExpiration(BoilstreamConnectionState &conn_state) {
-		return conn_state.secret_expiration;
+	static bool Begin(RestApiSecretStorage &storage, BoilstreamConnectionState &state,
+	                  std::chrono::system_clock::time_point now) {
+		return storage.BeginCatalogVersionPoll(state, now);
 	}
-
-	// Call RefreshCatalogCredentials with connection state
-	static void RefreshCatalogCredentials(RestApiSecretStorage &storage, const string &catalog_name,
-	                                      BoilstreamConnectionState &conn_state) {
-		storage.RefreshCatalogCredentials(catalog_name, conn_state);
-	}
-
-	// Call CheckCatalogVersions with connection state
-	static void CheckCatalogVersions(RestApiSecretStorage &storage, BoilstreamConnectionState &conn_state) {
-		storage.CheckCatalogVersions(conn_state);
-	}
-
-	// Set endpoint URL (needed to trigger version check logic)
-	static void SetEndpoint(RestApiSecretStorage &storage, const string &endpoint) {
-		storage.SetEndpoint(endpoint);
+	static void Apply(RestApiSecretStorage &storage, BoilstreamConnectionState &state, const string &body) {
+		storage.ApplyCatalogVersions(state, boilstream::ParseCatalogVersions(body));
 	}
 };
-
-//===----------------------------------------------------------------------===//
-// Test Fixture - Keeps Database alive for Storage
-//===----------------------------------------------------------------------===//
 struct TestFixture {
 	duckdb::unique_ptr<DuckDB> db;
 	duckdb::unique_ptr<RestApiSecretStorage> storage;
 	BoilstreamConnectionState conn_state;
-
 	explicit TestFixture(string endpoint = "https://localhost/secrets") : conn_state(endpoint) {
-		db = duckdb::make_uniq<DuckDB>(nullptr);
+		DBConfig config;
+		config.options.load_extensions = false;
+		config.options.maximum_threads = 2;
+		db = duckdb::make_uniq<DuckDB>(nullptr, &config);
 		storage = duckdb::make_uniq<RestApiSecretStorage>(*db->instance, "https://localhost/secrets");
 	}
 };
 
-// Exercise production request signing and response verification at the HTTP seam.
-// Authentication is seeded here; real OPAQUE acceptance is covered separately.
-class CatalogVersionRecordingHTTPUtil : public HTTPUtil {
+// No synthetic successful server crypto. The production client must reject this
+// peer before sending an inner catalog request. Positive transport runs privately
+// against the real server; parser/planner tests below exercise pure client rules.
+class RejectingCatalogHTTP : public HTTPUtil {
 public:
-	struct RecordedRequest {
-		string url;
-		string sequence;
-		bool signed_request;
-	};
-	duckdb::vector<RecordedRequest> requests;
-	string response_body;
-	bool corrupt_signature = false;
-	duckdb::vector<uint8_t> integrity_key;
-
+	duckdb::vector<string> requests;
+	bool valid_hello = false;
 	duckdb::unique_ptr<HTTPParams> InitializeParameters(DatabaseInstance &, const string &) override {
 		return make_uniq<HTTPParams>(*this);
 	}
-
 	duckdb::unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, duckdb::unique_ptr<HTTPClient> &) override {
-		requests.push_back({request.url, request.headers.GetHeaderValue("X-Boilstream-Sequence"),
-		                    !request.headers.GetHeaderValue("X-Boilstream-Signature").empty()});
-		if (response_body.empty()) {
-			throw IOException("catalog version test captured the outgoing request");
-		}
-		// The transport is controlled; production request signing, response verification,
-		// JSON parsing, version comparison and credential invalidation all execute.
-		auto response = make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-		auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-		std::tm utc;
-#ifdef _WIN32
-		gmtime_s(&utc, &now);
-#else
-		gmtime_r(&now, &utc);
-#endif
-		char date[17];
-		std::strftime(date, sizeof(date), "%Y%m%dT%H%M%SZ", &utc);
-		char hash[32], signature[32];
-		duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(response_body.data(), response_body.size(), hash);
-		string hex;
-		for (unsigned char byte : hash) {
-			hex += "0123456789abcdef"[byte >> 4];
-			hex += "0123456789abcdef"[byte & 15];
-		}
-		string canonical = string("200\nx-boilstream-date:") + date + "\n\nx-boilstream-date\n" + hex;
-		duckdb_mbedtls::MbedTlsWrapper::Hmac256(reinterpret_cast<const char *>(integrity_key.data()),
-		                                        integrity_key.size(), canonical.data(), canonical.size(), signature);
-		response->headers.Insert("X-Boilstream-Date", date);
-		if (corrupt_signature)
-			signature[0] ^= 1;
-		response->headers.Insert("X-Boilstream-Response-Signature",
-		                         Blob::ToBase64(string_t(signature, sizeof(signature))));
-		auto &get = request.Cast<GetRequestInfo>();
-		get.response_handler(*response);
-		get.content_handler(reinterpret_cast<const_data_ptr_t>(response_body.data()), response_body.size());
-		return response;
+		requests.push_back(request.url);
+		if (request.type != RequestType::POST_REQUEST)
+			throw IOException("Unexpected request kind");
+		auto &post = request.Cast<PostRequestInfo>();
+		string hello(reinterpret_cast<const char *>(post.buffer_in), post.buffer_in_len);
+		valid_hello = hello.find("BH2.c.") == 0 && hello.find("catalog-version-test-token") == string::npos;
+		post.buffer_out = "forged-server-proof";
+		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 	}
 };
-
-static duckdb::shared_ptr<CatalogVersionRecordingHTTPUtil> RecordCatalogVersionRequests(TestFixture &fixture) {
-	auto http = make_shared_ptr<CatalogVersionRecordingHTTPUtil>();
+static duckdb::shared_ptr<RejectingCatalogHTTP>
+RecordCatalogVersionRequests(TestFixture &fixture, const string &authority = "https://localhost") {
+	auto http = make_shared_ptr<RejectingCatalogHTTP>();
 	DBConfig::GetConfig(*fixture.db->instance).SetHTTPUtil(http);
 	fixture.conn_state.access_token = "catalog-version-test-token";
-	fixture.conn_state.session_key = duckdb::vector<uint8_t>(32, 7);
-	fixture.conn_state.region = "eu-west-1";
-	http->integrity_key =
-	    BoilstreamCatalogVersionTestAccess::IntegrityKey(*fixture.storage, fixture.conn_state.session_key);
+	fixture.conn_state.session_key.assign(32, 7);
+	std::array<uint8_t, 32> key {};
+	key[0] = 9;
+	fixture.conn_state.protocol = make_shared_ptr<BoilstreamProtocol>(authority, key);
 	return http;
 }
 
-TEST_CASE("Catalog version polling uses the authenticated product route", "[boilstream][catalog_versions]") {
+TEST_CASE("Catalog route derives only from the owning canonical endpoint", "[boilstream][catalog_versions]") {
 	for (const auto &base : {"https://localhost", "https://catalog.example:8443", "https://[::1]:8443",
 	                         "https://gateway.example/product"}) {
-		DYNAMIC_SECTION(base) {
-			TestFixture fixture(string(base) + "/secrets");
-			auto http = RecordCatalogVersionRequests(fixture);
-			// A database default change must not redirect this authenticated session.
-			BoilstreamCatalogVersionTestAccess::SetEndpoint(*fixture.storage, "https://other.example/secrets");
-			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-			REQUIRE(http->requests.size() == 1);
-			REQUIRE(http->requests[0].url == string(base) + "/catalog-versions");
-			REQUIRE(http->requests[0].sequence == "0");
-			REQUIRE(http->requests[0].signed_request);
-
-			// A second lookup must not spend another lock-step sequence on a
-			// rate-limited poll, even when the first request failed in transport.
-			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-			REQUIRE(http->requests.size() == 1);
-			REQUIRE(fixture.conn_state.client_sequence == 1);
-		}
+		REQUIRE(boilstream::CatalogVersionsURL(string(base) + "/secrets") == string(base) + "/catalog-versions");
 	}
-}
-
-TEST_CASE("Catalog version polling rejects a noncanonical secrets endpoint", "[boilstream][catalog_versions]") {
-	for (const auto &endpoint : {"https://catalog.example", "https://catalog.example/secrets/other",
+	for (const auto &endpoint : {"", "https://catalog.example", "https://catalog.example/secrets/other",
 	                             "https://catalog.example/secrets?other=value"}) {
-		DYNAMIC_SECTION(endpoint) {
-			TestFixture fixture(endpoint);
-			auto http = RecordCatalogVersionRequests(fixture);
-			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-			REQUIRE(http->requests.empty());
-			REQUIRE(fixture.conn_state.client_sequence == 0);
-		}
+		REQUIRE(boilstream::CatalogVersionsURL(endpoint).empty());
+		TestFixture fixture(endpoint);
+		auto http = RecordCatalogVersionRequests(fixture);
+		BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+		REQUIRE(http->requests.empty());
 	}
 }
 
-//===----------------------------------------------------------------------===//
-// Test: RefreshCatalogCredentials
-//===----------------------------------------------------------------------===//
 TEST_CASE("RefreshCatalogCredentials", "[boilstream][catalog_versions]") {
 	TestFixture fixture;
 
@@ -277,7 +181,7 @@ TEST_CASE("Catalog Version Thread Safety", "[boilstream][catalog_versions][threa
 //===----------------------------------------------------------------------===//
 TEST_CASE("Catalog polling without an authenticated session performs no HTTP", "[boilstream][catalog_versions]") {
 	TestFixture fixture;
-	auto http = make_shared_ptr<CatalogVersionRecordingHTTPUtil>();
+	auto http = make_shared_ptr<RejectingCatalogHTTP>();
 	DBConfig::GetConfig(*fixture.db->instance).SetHTTPUtil(http);
 	BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
 	REQUIRE(http->requests.empty());
@@ -332,34 +236,52 @@ TEST_CASE("Secret Expiration in Connection State", "[boilstream][catalog_version
 	}
 }
 
-TEST_CASE("Catalog polling rate limit expires and remains connection-owned", "[boilstream][catalog_versions]") {
+TEST_CASE("Polling admission is atomic, time bounded and connection owned", "[boilstream][catalog_versions]") {
 	TestFixture fixture;
-	auto http = RecordCatalogVersionRequests(fixture);
-	auto poll = [&] {
-		BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-	};
-	poll();
-	REQUIRE(http->requests.size() == 1);
-	poll();
-	REQUIRE(http->requests.size() == 1);
-	fixture.conn_state.last_version_check = std::chrono::system_clock::now() - std::chrono::seconds(120);
-	poll();
-	REQUIRE(http->requests.size() == 2);
-	REQUIRE(http->requests.back().sequence == "1");
-	BoilstreamConnectionState other("https://localhost/secrets");
-	other.access_token = "other-test-token";
-	other.session_key.assign(32, 7);
-	other.region = "eu-west-1";
-	auto previous = fixture.conn_state.last_version_check;
-	BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, other);
-	REQUIRE(http->requests.size() == 3);
-	REQUIRE(http->requests.back().sequence == "0");
-	REQUIRE(other.client_sequence == 1);
-	REQUIRE(fixture.conn_state.client_sequence == 2);
-	REQUIRE(fixture.conn_state.last_version_check == previous);
+	auto now = std::chrono::system_clock::now();
+	std::atomic<int> admitted {0};
+	std::vector<std::thread> threads;
+	for (size_t i = 0; i < 16; ++i) {
+		threads.emplace_back([&] {
+			if (BoilstreamCatalogVersionTestAccess::Begin(*fixture.storage, fixture.conn_state, now))
+				++admitted;
+		});
+	}
+	for (auto &thread : threads)
+		thread.join();
+	REQUIRE(admitted == 1);
+	REQUIRE_FALSE(
+	    BoilstreamCatalogVersionTestAccess::Begin(*fixture.storage, fixture.conn_state, now - std::chrono::seconds(1)));
+	REQUIRE_FALSE(BoilstreamCatalogVersionTestAccess::Begin(*fixture.storage, fixture.conn_state,
+	                                                        now + std::chrono::seconds(59)));
+	REQUIRE(BoilstreamCatalogVersionTestAccess::Begin(*fixture.storage, fixture.conn_state,
+	                                                  now + std::chrono::seconds(60)));
+	BoilstreamConnectionState other;
+	REQUIRE(BoilstreamCatalogVersionTestAccess::Begin(*fixture.storage, other, now));
+	REQUIRE(fixture.conn_state.last_version_check == now + std::chrono::seconds(60));
+	REQUIRE(other.last_version_check == now);
 }
 
-TEST_CASE("Signed catalog versions drive exact credential invalidation", "[boilstream][catalog_versions]") {
+TEST_CASE("Catalog version parser rejects malformed entries without coercion", "[boilstream][catalog_versions]") {
+	for (const auto &body : {"", "{", "null", "[]", "{}", R"({"catalogs":[]})", R"({"catalogs":{"x":null}})",
+	                         R"({"catalogs":{"x":{"version":-1,"catalog_name":"a"}}})",
+	                         R"({"catalogs":{"x":{"version":1.5,"catalog_name":"a"}}})",
+	                         R"({"catalogs":{"x":{"version":"1","catalog_name":"a"}}})",
+	                         R"({"catalogs":{"x":{"version":1,"catalog_name":""}}})",
+	                         R"({"catalogs":{"":{"version":1,"catalog_name":"a"}}})"}) {
+		INFO(body);
+		REQUIRE(boilstream::ParseCatalogVersions(body).empty());
+	}
+	auto parsed = boilstream::ParseCatalogVersions(
+	    R"({"catalogs":{"first":{"version":0,"catalog_name":"name\u0000tail"},"bad":{"version":true},"last":{"version":18446744073709551615,"catalog_name":"last"}}})");
+	REQUIRE(parsed.size() == 2);
+	REQUIRE(parsed.at("first").version == 0);
+	REQUIRE(parsed.at("first").catalog_name == string("name\0tail", 9));
+	REQUIRE(parsed.at("last").version == UINT64_MAX);
+}
+
+TEST_CASE("Version plans preserve inputs and expire exactly the changed credentials",
+          "[boilstream][catalog_versions]") {
 	struct VersionCase {
 		uint64_t old_version, new_version;
 		bool known, refresh;
@@ -371,52 +293,62 @@ TEST_CASE("Signed catalog versions drive exact credential invalidation", "[boils
 	                          {UINT64_MAX - 1, UINT64_MAX, true, true}}) {
 		DYNAMIC_SECTION(value.old_version << " -> " << value.new_version << " known=" << value.known) {
 			TestFixture fixture;
-			auto http = RecordCatalogVersionRequests(fixture);
 			const string id = "11111111-1111-4111-8111-111111111111";
-			if (value.known) {
+			if (value.known)
 				fixture.conn_state.catalog_versions[id] = {value.old_version, "alpha"};
-			}
+			fixture.conn_state.catalog_versions["unchanged"] = {42, "unrelated"};
 			auto future = std::chrono::system_clock::now() + std::chrono::hours(1);
 			fixture.conn_state.StoreExpiration("alpha", future);
 			fixture.conn_state.StoreExpiration("unrelated", future);
-			BoilstreamConnectionState other("https://localhost/secrets");
+			auto secret = make_uniq<KeyValueSecret>(duckdb::vector<string> {"test://"}, Identifier("test"), "config",
+			                                        Identifier("alpha"));
+			fixture.conn_state.secret_cache->Put(BoilstreamSecretCache::Prepare(std::move(secret), future, 100),
+			                                     fixture.conn_state.secret_cache->Revision());
+			BoilstreamConnectionState other;
 			other.StoreExpiration("alpha", future);
 			other.catalog_versions[id] = {99, "alpha"};
-			http->response_body = "{\"catalogs\":{\"" + id + "\":{\"version\":" + std::to_string(value.new_version) +
-			                      ",\"catalog_name\":\"alpha\"}}}";
-			BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-			REQUIRE(http->requests.size() == 1);
-			REQUIRE(fixture.conn_state.catalog_versions.size() == 1);
+			auto body = "{\"catalogs\":{\"" + id + "\":{\"version\":" + std::to_string(value.new_version) +
+			            ",\"catalog_name\":\"alpha\"}}}";
+			auto incoming = boilstream::ParseCatalogVersions(body);
+			auto plan = boilstream::ReconcileCatalogVersions(fixture.conn_state.catalog_versions, incoming);
+			REQUIRE(plan.refresh.size() == (value.refresh ? 1 : 0));
+			REQUIRE(fixture.conn_state.catalog_versions.size() == (value.known ? 2 : 1));
+			if (value.known)
+				REQUIRE(fixture.conn_state.catalog_versions.at(id).version == value.old_version);
+			REQUIRE(incoming.at(id).version == value.new_version);
+			BoilstreamCatalogVersionTestAccess::Apply(*fixture.storage, fixture.conn_state, body);
 			REQUIRE(fixture.conn_state.catalog_versions.at(id).version == value.new_version);
 			REQUIRE(fixture.conn_state.catalog_versions.at(id).catalog_name == "alpha");
-			REQUIRE(fixture.conn_state.secret_expiration.at("alpha") ==
-			        (value.refresh ? std::chrono::system_clock::time_point::min() : future));
-			REQUIRE(fixture.conn_state.secret_expiration.at("unrelated") == future);
-			REQUIRE_FALSE(fixture.conn_state.session_key.empty());
+			REQUIRE(fixture.conn_state.catalog_versions.at("unchanged").version == 42);
+			auto expected = value.refresh ? std::chrono::system_clock::time_point::min() : future;
+			REQUIRE(fixture.conn_state.GetSecretExpiration("alpha") == expected);
+			REQUIRE(fixture.conn_state.secret_cache->Expiration("alpha") == expected);
+			REQUIRE(fixture.conn_state.GetSecretExpiration("unrelated") == future);
 			REQUIRE(other.GetSecretExpiration("alpha") == future);
 			REQUIRE(other.catalog_versions.at(id).version == 99);
 		}
 	}
 }
 
-TEST_CASE("Catalog polling rejects a forged response and clears only its own session",
-          "[boilstream][catalog_versions]") {
+TEST_CASE("Catalog polling refuses forged server proof and retires only its owner", "[boilstream][catalog_versions]") {
 	TestFixture fixture;
 	auto http = RecordCatalogVersionRequests(fixture);
-	http->response_body =
-	    R"({"catalogs":{"11111111-1111-4111-8111-111111111111":{"version":999,"catalog_name":"alpha"}}})";
-	http->corrupt_signature = true;
-	BoilstreamConnectionState other("https://localhost/secrets");
+	fixture.storage->SetEndpoint("https://other.example/secrets");
+	BoilstreamConnectionState other;
 	other.access_token = "unrelated-test-token";
 	other.session_key.assign(32, 19);
 	auto future = std::chrono::system_clock::now() + std::chrono::hours(1);
 	other.StoreExpiration("alpha", future);
 	BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
-	REQUIRE(http->requests.size() == 1);
+	REQUIRE(http->valid_hello);
+	REQUIRE(http->requests == duckdb::vector<string> {"https://localhost/auth/api/protocol/v2/handshake"});
 	REQUIRE(fixture.conn_state.catalog_versions.empty());
 	REQUIRE(fixture.conn_state.access_token.empty());
 	REQUIRE(fixture.conn_state.session_key.empty());
+	REQUIRE(fixture.conn_state.secret_cache->IsClosed());
 	REQUIRE(other.access_token == "unrelated-test-token");
 	REQUIRE(other.session_key == duckdb::vector<uint8_t>(32, 19));
 	REQUIRE(other.GetSecretExpiration("alpha") == future);
+	BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
+	REQUIRE(http->requests.size() == 1);
 }

@@ -2684,14 +2684,11 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 		return versions;
 	}
 
-	// Use the sibling route protected by the server's OPAQUE middleware.
-	// An unregistered path spends the client's sequence without advancing the
-	// server's sequence, causing the next authenticated request to be rejected.
-	auto pos = base_url.rfind("/secrets");
-	if (pos == string::npos || pos + string("/secrets").size() != base_url.size()) {
+	// All inner routes share the channel's authenticated sequence handling.
+	string url = boilstream::CatalogVersionsURL(base_url);
+	if (url.empty()) {
 		return versions;
 	}
-	string url = base_url.substr(0, pos) + "/catalog-versions";
 
 	string response;
 	boilstream::WipeOnExit wipe_response(response);
@@ -2705,47 +2702,7 @@ RestApiSecretStorage::FetchCatalogVersions(BoilstreamConnectionState &conn_state
 		return versions;
 	}
 
-	// Parse nested structure: {"catalogs": {"uuid": {"version": 3, "catalog_name": "name"}, ...}}
-	boilstream::JsonArena doc_arena;
-	auto doc = doc_arena.Read(response.c_str(), response.size(), 0);
-	if (!doc) {
-		return versions;
-	}
-
-	auto root = yyjson_doc_get_root(doc);
-	auto catalogs_obj = yyjson_obj_get(root, "catalogs");
-	if (!catalogs_obj || !yyjson_is_obj(catalogs_obj)) {
-		yyjson_doc_free(doc);
-		return versions;
-	}
-
-	yyjson_obj_iter iter;
-	yyjson_obj_iter_init(catalogs_obj, &iter);
-	yyjson_val *key, *val;
-	while ((key = yyjson_obj_iter_next(&iter))) {
-		val = yyjson_obj_iter_get_val(key);
-		if (!yyjson_is_obj(val)) {
-			continue;
-		}
-
-		auto version_val = yyjson_obj_get(val, "version");
-		auto name_val = yyjson_obj_get(val, "catalog_name");
-
-		if (version_val && yyjson_is_uint(version_val) && name_val && yyjson_is_str(name_val)) {
-			string catalog_name = SafeGetStr(name_val);
-			string catalog_key = SafeGetStr(key);
-			if (!catalog_name.empty() && !catalog_key.empty()) {
-				CatalogVersionInfo info;
-				info.version = yyjson_get_uint(version_val);
-				info.catalog_name = catalog_name;
-				versions[catalog_key] = info;
-			}
-		}
-	}
-
-	yyjson_doc_free(doc);
-
-	return versions;
+	return boilstream::ParseCatalogVersions(response);
 }
 
 // ---------------------------------------------------------------------------
@@ -2944,47 +2901,37 @@ void RestApiSecretStorage::RefreshCatalogCredentials(const string &catalog_name,
 	// to return new credentials with updated master IP
 }
 
+bool RestApiSecretStorage::BeginCatalogVersionPoll(BoilstreamConnectionState &conn_state,
+                                                   std::chrono::system_clock::time_point now) {
+	lock_guard<mutex> lock(conn_state.version_lock);
+	// Compare timestamps directly: subtracting the initial minimum sentinel overflows.
+	if (conn_state.last_version_check > now - std::chrono::seconds(VERSION_CHECK_INTERVAL_SECONDS)) {
+		return false;
+	}
+	conn_state.last_version_check = now;
+	return true;
+}
+
 void RestApiSecretStorage::CheckCatalogVersions(BoilstreamConnectionState &conn_state,
                                                 optional_ptr<ClientContext> context) {
-	// Rate limit: only check every 60 seconds
-	auto now = std::chrono::system_clock::now();
-	{
-		lock_guard<mutex> lock(conn_state.version_lock);
-		// Compare timestamps directly: subtracting the initial minimum sentinel overflows.
-		if (conn_state.last_version_check > now - std::chrono::seconds(VERSION_CHECK_INTERVAL_SECONDS)) {
-			return; // Too soon, skip check
-		}
-		conn_state.last_version_check = now;
+	if (!BeginCatalogVersionPoll(conn_state, std::chrono::system_clock::now())) {
+		return;
 	}
+	ApplyCatalogVersions(conn_state, FetchCatalogVersions(conn_state, context));
+}
 
-	BOILSTREAM_LOG("CheckCatalogVersions: Checking for version changes");
-
-	// Fetch current versions from server
-	auto new_versions = FetchCatalogVersions(conn_state, context);
-	if (new_versions.empty()) {
-		return; // Request failed or no catalogs
+void RestApiSecretStorage::ApplyCatalogVersions(BoilstreamConnectionState &conn_state,
+                                                const boilstream::CatalogVersions &versions) {
+	if (versions.empty()) {
+		return;
 	}
-
-	// Collect catalogs that need refresh (to avoid holding lock while refreshing)
 	vector<string> catalogs_to_refresh;
-
-	// Compare with cached versions and identify changed catalogs
 	{
 		lock_guard<mutex> lock(conn_state.version_lock);
-		for (const auto &entry : new_versions) {
-			const auto &catalog_id = entry.first;
-			const auto &new_info = entry.second;
-			auto it = conn_state.catalog_versions.find(catalog_id);
-			if (it != conn_state.catalog_versions.end()) {
-				if (new_info.version > it->second.version) {
-					catalogs_to_refresh.push_back(new_info.catalog_name);
-				}
-			}
-			conn_state.catalog_versions[catalog_id] = new_info;
-		}
+		auto update = boilstream::ReconcileCatalogVersions(conn_state.catalog_versions, versions);
+		conn_state.catalog_versions = std::move(update.versions);
+		catalogs_to_refresh = std::move(update.refresh);
 	}
-
-	// Refresh credentials for changed catalogs (outside version_lock)
 	for (const auto &catalog_name : catalogs_to_refresh) {
 		RefreshCatalogCredentials(catalog_name, conn_state);
 	}

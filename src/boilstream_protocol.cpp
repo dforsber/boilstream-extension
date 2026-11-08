@@ -9,7 +9,6 @@
 
 namespace duckdb {
 namespace {
-using namespace duckdb_yyjson;
 string Authority(const string &url) {
 	boilstream::ValidateEndpoint(url);
 	auto start = url.find("://") + 3;
@@ -33,9 +32,9 @@ string Buffer(OpaqueResult result) {
 	}
 	return string(reinterpret_cast<char *>(result.buffer.data), result.buffer.len);
 }
-string Write(boilstream::JsonArena &arena, yyjson_mut_doc *doc) {
+string Write(boilstream::JsonArena &arena, duckdb_yyjson::yyjson_mut_doc *doc) {
 	size_t length = 0;
-	auto value = yyjson_mut_write_opts(doc, 0, &arena.Allocator(), &length, nullptr);
+	auto value = duckdb_yyjson::yyjson_mut_write_opts(doc, 0, &arena.Allocator(), &length, nullptr);
 	if (!value) {
 		throw std::bad_alloc();
 	}
@@ -168,18 +167,18 @@ string BoilstreamProtocol::Exchange(DatabaseInstance &db, const string &method, 
 		}
 		boilstream::JsonArena arena;
 		auto doc = arena.New();
-		auto obj = yyjson_mut_obj(doc);
-		yyjson_mut_doc_set_root(doc, obj);
+		auto obj = duckdb_yyjson::yyjson_mut_obj(doc);
+		duckdb_yyjson::yyjson_mut_doc_set_root(doc, obj);
 		auto target = url.substr(authority.size());
-		yyjson_mut_obj_add_strcpy(doc, obj, "method", method.c_str());
-		yyjson_mut_obj_add_strncpy(doc, obj, "target", target.data(), target.size());
-		yyjson_mut_obj_add_strncpy(doc, obj, "body", body.data(), body.size());
+		duckdb_yyjson::yyjson_mut_obj_add_strcpy(doc, obj, "method", method.c_str());
+		duckdb_yyjson::yyjson_mut_obj_add_strncpy(doc, obj, "target", target.data(), target.size());
+		duckdb_yyjson::yyjson_mut_obj_add_strncpy(doc, obj, "body", body.data(), body.size());
 		if (cookie.empty()) {
-			yyjson_mut_obj_add_null(doc, obj, "cookie");
+			duckdb_yyjson::yyjson_mut_obj_add_null(doc, obj, "cookie");
 		} else {
-			yyjson_mut_obj_add_strncpy(doc, obj, "cookie", cookie.data(), cookie.size());
+			duckdb_yyjson::yyjson_mut_obj_add_strncpy(doc, obj, "cookie", cookie.data(), cookie.size());
 		}
-		yyjson_mut_obj_add_null(doc, obj, "idempotency_key");
+		duckdb_yyjson::yyjson_mut_obj_add_null(doc, obj, "idempotency_key");
 		auto json = Write(arena, doc);
 		boilstream::WipeOnExit wipe_json(json);
 		auto sealed = Buffer(bs_protocol_seal(handle, reinterpret_cast<const uint8_t *>(json.data()), json.size()));
@@ -197,28 +196,31 @@ string BoilstreamProtocol::Exchange(DatabaseInstance &db, const string &method, 
 		CloseLocked();
 		throw IOException("Invalid verified application response");
 	}
-	auto root = yyjson_doc_get_root(doc);
-	auto status = yyjson_obj_get(root, "status");
-	auto payload = yyjson_obj_get(root, "body");
-	if (!yyjson_is_uint(status) || !yyjson_is_str(payload)) {
+	auto root = duckdb_yyjson::yyjson_doc_get_root(doc);
+	auto status = duckdb_yyjson::yyjson_obj_get(root, "status");
+	auto payload = duckdb_yyjson::yyjson_obj_get(root, "body");
+	if (!duckdb_yyjson::yyjson_is_uint(status) || !duckdb_yyjson::yyjson_is_str(payload)) {
 		CloseLocked();
 		throw IOException("Invalid verified application response");
 	}
 	if (metadata) {
 		boilstream::WipeHeaders(*metadata);
 		*metadata = HTTPHeaders();
-		auto cookies = yyjson_obj_get(root, "cookies");
-		for (size_t i = 0; i < yyjson_arr_size(cookies); ++i) {
-			auto value = yyjson_arr_get(cookies, i);
-			metadata->Insert("Set-Cookie", string(yyjson_get_str(value), yyjson_get_len(value)));
+		auto cookies = duckdb_yyjson::yyjson_obj_get(root, "cookies");
+		for (size_t i = 0; i < duckdb_yyjson::yyjson_arr_size(cookies); ++i) {
+			auto value = duckdb_yyjson::yyjson_arr_get(cookies, i);
+			metadata->Insert("Set-Cookie",
+			                 string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value)));
 		}
 		metadata->Insert("X-Boilstream-Session-Resumption",
-		                 yyjson_get_bool(yyjson_obj_get(root, "session_resumption")) ? "enabled" : "disabled");
+		                 duckdb_yyjson::yyjson_get_bool(duckdb_yyjson::yyjson_obj_get(root, "session_resumption"))
+		                     ? "enabled"
+		                     : "disabled");
 	}
-	auto code = yyjson_get_uint(status);
+	auto code = duckdb_yyjson::yyjson_get_uint(status);
 	if (code < 200 || code >= 300) {
 		throw BoilstreamApplicationError(static_cast<int>(code));
 	}
-	return string(yyjson_get_str(payload), yyjson_get_len(payload));
+	return string(duckdb_yyjson::yyjson_get_str(payload), duckdb_yyjson::yyjson_get_len(payload));
 }
 } // namespace duckdb

@@ -175,3 +175,57 @@ contains environment and reserve-controller invocation. Do not use subagents.
   object; actual-server native and public adversarial cases both PASS afterwards.
   Logs private loaded-native-host-refresh.log and public native-untrusted-peer-refresh.log.
   Private checkpoint pushed at18fb89cdb, clean; production Rust pins unchanged.
+
+2026-11-08 catalog/application-boundary migration (owner codex-root):
+- Replaced the catalog suite's fabricated legacy response signatures with pure
+  client parsing/reconciliation and actual production channel rejection. Extracted
+  CatalogVersionsURL, ParseCatalogVersions and ReconcileCatalogVersions; production
+  applies the returned plan under the connection lock, then expires credentials.
+  Existing version comparison/merge semantics preserved, including lower versions.
+- Catalog suite PASS1120 assertions/9 cases: malformed types and unsigned bounds,
+  embedded-NUL preservation, immutable input maps, retained unrelated catalog IDs,
+  exact expiration in both metadata and actual secret cache, sibling ownership,
+  atomic single polling admission under16 concurrent callers, exact60s boundary,
+  clock rollback, initial sentinel, and forged proof refusal before inner traffic.
+- Migrated RequiredResponseSignature to RequiredApplicationProtocol (same C++
+  executable, now no Python signed-reply server). PASS28 cases: GET/POST/DELETE and
+  OPAQUE start/finish reject forged/empty/oversized/status/exception replies; no
+  request retry; inherited auth/cookie headers erased; redirects disabled; no
+  credential disclosure; failed owner cannot retire replacement; closed channels
+  need explicit fresh authentication; authority mismatch sends no network request.
+  Final combined log ../logs/catalog-boundary-final-tests.log PASS2/2 suites.
+  The old Python signing helper remains only for the other legacy suites and must
+  be removed with their migration. Positive crypto/tamper/time/replay oracles are
+  in the Rust/private actual-server gates, not falsely claimed by public negatives.
+- Actual private gate rerun after production refactor and native/EH/pthread rebuild:
+  PASS4/4,0 ignored in65.27s, private ../logs/catalog-client-regression.log. SPA,
+  server production and direct native integration unchanged; no Rust dependency
+  or public/private protocol-pin change needed for this C++ refactor.
+- GitHub9c44b73 evidence: Rust audit/client protocol/wasm-bindgen PASS; browser EH
+  PASS, threaded still running at inspection. Main code quality failed format and
+  a namespace using-directive in the protocol wrapper. Applied the required11.0.1
+  formatter/CMake formatter, and qualified yyjson calls rather than suppressing
+  the tidy finding. Local make format-check PASS. Full5-TU/10-command clang-tidy22
+  PASS with matching macOS SDK flags; no warning suppression. Earlier native
+  clang-tidy attempts failed to locate Apple SDK headers; those logs are retained.
+  check-tidy.py now supplies the selected CMake/xcrun SDK on macOS automatically,
+  respecting explicit overrides and leaving Linux/community behavior unchanged.
+- Incremental reviews (final release reviews still pending): security—pure parsers
+  cannot grant identity, all production input still passes protocol verification;
+  correctness—version/expiry behavior retained, malformed input and UINT64_MAX
+  tested, no new public server implementation; build/release—current native/WASM
+  artifacts exercised, all production TUs checked, no forced clean/source records,
+  community build entry points unchanged. Formatting-only edits need no repeated
+  tests of unchanged registration behavior.
+- Four legacy failures remain: SessionMemoryOnly, RegistrationHttp,
+  AuthDiagnostics_debug and AuthDiagnostics_release. Next migrate actual
+  registration/MFA/resumption plus error privacy with private-server positives,
+  preserving ownership/persistence tripwires. Then obsolete wire cleanup, catalog/
+  remote Quack coverage, C++ dependency audit, remaining CI/release gates and the
+  final three reviews. No full CI-green, main merge or release claim.
+- Final checkpoint verification: automatic macOS SDK selection in check-tidy.py
+  passes the complete5-TU/10-command scan without caller SDK flags (log
+  catalog-tidy-automatic-sdk.log, controller27919 exited0). Final format-check PASS.
+  GitHub run42463401232 for9c44b73 is now SUCCESS: EH, threaded and wasm-bindgen all
+  green. That is prior-checkpoint browser evidence, not full release qualification.
+  All owned test/lint processes terminal; disk23GiB internal/1.2TiB external.

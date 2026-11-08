@@ -51,7 +51,10 @@ make targets remain unchanged.
 
 ## Outstanding coverage and release work
 
-Six legacy C++ suites still need migration from header-based transport. Browser
+Four legacy C++ suites still need migration from header-based transport:
+SessionMemoryOnly, RegistrationHttp, AuthDiagnostics_debug and AuthDiagnostics_release.
+Catalog polling now has pure parser/planner tests and real channel rejection;
+the application boundary suite covers forged transport replies without legacy signatures. Browser
 email/password/MFA, resumption, account replacement, managed catalog credential
 vending and live remote Quack queries still need actual-server coverage. The old
 header-protocol fixture has been removed; its unqualified assertions do not count

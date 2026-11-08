@@ -26,7 +26,8 @@ static void Clear(RestApiSecretStorage &s, ClientContext &) {
 }
 #else
 static void Store(RestApiSecretStorage &s, ClientContext &c, const string &token) {
-	BoilstreamProtocol::Configure(c, "https://same.invalid", "0900000000000000000000000000000000000000000000000000000000000000");
+	BoilstreamProtocol::Configure(c, "https://same.invalid",
+	                              "0900000000000000000000000000000000000000000000000000000000000000");
 	auto a = s.BeginRegistration(c, "https://same.invalid", "same@example.com");
 	s.StoreRegistrationState(c, a.generation, token, "otpauth://synthetic");
 	s.EndRegistrationOperation(c, a.generation);
@@ -57,7 +58,8 @@ struct Fixture {
 		// session is substituted by these pending-enrollment fixtures.
 		for (auto context : {a.context.get(), b.context.get()}) {
 			for (const auto &authority : {"https://same.invalid", "https://other.invalid"}) {
-				BoilstreamProtocol::Configure(*context, authority, "0900000000000000000000000000000000000000000000000000000000000000");
+				BoilstreamProtocol::Configure(*context, authority,
+				                              "0900000000000000000000000000000000000000000000000000000000000000");
 			}
 		}
 	}
@@ -102,9 +104,7 @@ int main() {
 	test("pins_are_required_and_connection_owned", [] {
 		Fixture f;
 		Connection unconfigured(f.db);
-		Reject([&] {
-			f.storage.BeginRegistration(*unconfigured.context, "https://same.invalid", "same@example.com");
-		});
+		Reject([&] { f.storage.BeginRegistration(*unconfigured.context, "https://same.invalid", "same@example.com"); });
 	});
 	test("owner_can_read_pending_registration", [] {
 		Fixture f;

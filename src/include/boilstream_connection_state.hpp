@@ -11,6 +11,7 @@
 #pragma once
 #include "boilstream_security.hpp"
 #include "boilstream_protocol.hpp"
+#include "boilstream_catalog_versions.hpp"
 
 #include "duckdb/main/client_context_state.hpp"
 #include "boilstream_secret_cache.hpp"
@@ -61,10 +62,7 @@ struct ManagedCatalogCredentialEnvelope {
 class BoilstreamConnectionState : public ClientContextState {
 public:
 	//! Catalog version info from server
-	struct CatalogVersionInfo {
-		uint64_t version;
-		string catalog_name;
-	};
+	using CatalogVersionInfo = boilstream::CatalogVersionInfo;
 
 	//! Session state snapshot for thread-safe access
 	struct SessionSnapshot {

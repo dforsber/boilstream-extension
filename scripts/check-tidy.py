@@ -21,10 +21,26 @@ compiled = {
 missing = expected - compiled
 if not expected or missing:
     raise SystemExit('Incomplete clang-tidy coverage: ' + ', '.join(map(str, sorted(missing))))
+# Apple Clang finds SDK headers through its driver. A separately installed
+# clang-tidy does not, so supply the selected SDK explicitly on local macOS.
+# Keep Linux/community CI unchanged and preserve explicit caller overrides.
+sdk_args = []
+if sys.platform == 'darwin' and not any('isysroot' in arg for arg in sys.argv[2:]):
+    cache = (build / 'CMakeCache.txt').read_text()
+    selected = re.search(r'^CMAKE_OSX_SYSROOT:[^=]+=(.*)$', cache, re.MULTILINE)
+    sdk = selected.group(1) if selected else ''
+    if not Path(sdk).is_absolute():
+        command = ['xcrun'] + (['--sdk', sdk] if sdk else []) + ['--show-sdk-path']
+        sdk = subprocess.check_output(command, text=True).strip()
+    headers = Path(sdk) / 'usr/include/c++/v1'
+    if not (headers / 'cstddef').is_file():
+        raise SystemExit('Selected macOS SDK lacks C++ headers: ' + str(headers))
+    sdk_args = ['-extra-arg=-isysroot', '-extra-arg=' + sdk,
+                '-extra-arg=-isystem', '-extra-arg=' + str(headers)]
 pattern = '^' + re.escape(str(root / 'src')) + r'/.*[.]cpp$'
 print(f'Checking all {len(expected)} extension translation units', flush=True)
 subprocess.run([
     sys.executable, str(root / 'duckdb/scripts/run-clang-tidy.py'),
     '-p', str(build), pattern, '-header-filter', '^' + re.escape(str(root / 'src')) + '/',
-    '-quiet', *sys.argv[2:],
+    '-quiet', *sdk_args, *sys.argv[2:],
 ], check=True)
