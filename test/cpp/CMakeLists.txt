@@ -607,8 +607,9 @@ foreach(mode IN ITEMS debug release)
                                        "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 endforeach()
 
-# Actual connection ownership plus loopback registration/MFA handlers.
-foreach(kind IN ITEMS ownership http output)
+# Actual connection ownership, authenticated-body parsing and result
+# publication.
+foreach(kind IN ITEMS ownership responses output)
   add_executable(
     registration_${kind}_test
     test_registration_${kind}.cpp ../../src/boilstream_secret_storage.cpp
@@ -626,13 +627,9 @@ foreach(kind IN ITEMS ownership http output)
 endforeach()
 add_test(NAME RegistrationOwnership COMMAND registration_ownership_test)
 add_test(NAME RegistrationOutput COMMAND registration_output_test)
-add_test(
-  NAME RegistrationHttp
-  COMMAND
-    ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_http.py
-    $<TARGET_FILE:registration_http_test>)
+add_test(NAME RegistrationResponses COMMAND registration_responses_test)
 set_tests_properties(
-  RegistrationOwnership RegistrationHttp RegistrationOutput
+  RegistrationOwnership RegistrationResponses RegistrationOutput
   PROPERTIES TIMEOUT 40 ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
 # Untrusted HTTP responses cannot bypass application proof or retire a sibling.
@@ -694,12 +691,12 @@ set_tests_properties(CredentialCleanup PROPERTIES TIMEOUT 30)
 foreach(
   target IN
   ITEMS auth_diagnostics_debug_test auth_diagnostics_release_test
-        registration_ownership_test registration_http_test
+        registration_ownership_test registration_responses_test
         registration_output_test required_response_signature_test)
   link_rust_dependencies(${target})
 endforeach()
 set_property(
-  TEST AuthDiagnostics_debug AuthDiagnostics_release RegistrationHttp
+  TEST AuthDiagnostics_debug AuthDiagnostics_release RegistrationResponses
        RequiredApplicationProtocol
   APPEND
   PROPERTY
@@ -707,7 +704,7 @@ set_property(
     "BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH}")
 foreach(target IN
         ITEMS auth_diagnostics_debug_test auth_diagnostics_release_test
-              registration_http_test registration_output_test)
+              registration_responses_test registration_output_test)
   target_sources(${target} PRIVATE ../../src/boilstream_grammar.cpp)
   target_include_directories(
     ${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/utf8proc/include)

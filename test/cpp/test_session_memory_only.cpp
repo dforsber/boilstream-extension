@@ -6,6 +6,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "boilstream_secret_storage.hpp"
+#include "boilstream_protocol.hpp"
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -96,6 +97,10 @@ struct Fixture {
 };
 static shared_ptr<BoilstreamConnectionState> Pending(const string &endpoint = "https://session.invalid/secrets") {
 	auto state = make_shared_ptr<BoilstreamConnectionState>(endpoint);
+	std::array<uint8_t, 32> pin {};
+	pin[0] = 9;
+	const auto authority = endpoint.substr(0, endpoint.find('/', endpoint.find("://") + 3));
+	state->protocol = make_shared_ptr<BoilstreamProtocol>(authority, pin);
 	state->access_token = "synthetic-access-token";
 	state->bootstrap_token_hash = "synthetic-bootstrap-identity";
 	state->session_key.assign(32, 7);
@@ -226,15 +231,22 @@ int main(int argc, char **argv) {
 			Require(state && state->GetEndpointUrl() == "https://session" + std::to_string(i) + ".invalid/secrets");
 		}
 	});
-	test("failed_memory_resume_preserves_owned_session", [&] {
+	test("failed_fresh_channel_resume_preserves_owned_session", [&] {
 		Fixture f;
 		auto state = Pending(argv[1]);
+		const auto protocol = state->protocol;
 		BoilstreamSessionPublicationTestAccess::Publish(f.storage, *f.connection.context, state);
 		f.fs->accesses = 0;
 		RejectResume(f, *f.connection.context);
 		Require(f.storage.GetSessionForConnection(f.connection.context->GetConnectionId()) == state);
 		Require(state->IsSessionTokenValid() && state->refresh_token == vector<uint8_t>(32, 9));
 		Require(state->GetEndpointUrl() == argv[1] && state->bootstrap_token_hash == "synthetic-bootstrap-identity");
+		Require(state->protocol == protocol);
+		// A new explicit resume gets a distinct handshake, never a retry of the
+		// rejected channel. Neither attempt changes the published credentials.
+		RejectResume(f, *f.connection.context);
+		Require(state->protocol == protocol && state->IsSessionTokenValid());
+		Require(state->refresh_token == vector<uint8_t>(32, 9));
 	});
 
 	test("other_connection_cannot_reuse_session_status_authority_or_refresh", [&] {
@@ -250,7 +262,7 @@ int main(int argc, char **argv) {
 		RejectResume(f, *other.context);
 		Require(f.storage.GetSessionForConnection(f.connection.context->GetConnectionId()) == state &&
 		        state->IsSessionTokenValid());
-		// Runner requires exactly one request overall, from the owned refresh control.
+		// Runner requires exactly two fresh handshakes overall, from the owned refresh control.
 	});
 
 	return failed ? 1 : 0;

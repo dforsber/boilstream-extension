@@ -81,6 +81,12 @@ ATTACH DUCKLAKE '<catalog-uuid>' AS my_lake;
 BOILSTREAM HELP;
 ```
 
+Registration returns a setup key, verification instruction and authenticator URI.
+If `textplot` is already loaded, the URI is rendered as a QR code. Registration
+does not install extensions or require a third-party download; the setup key and
+URI also work in WASM and offline extension installations.
+
+
 The grammar is activated automatically for every connection opened after the extension loaded, which
 covers builds that link the extension statically. A connection that already existed when `LOAD
 boilstream` ran, and the DuckDB CLI (which selects its own `shell` grammar when it opens a database),

@@ -29,10 +29,10 @@ workers to verify connection ownership, identity changes, cancellation, stale or
 foreign operation IDs, field limits and destruction. The legacy adapter used for
 causal evidence invokes the old contextless API; it is never production code.
 
-`RegistrationHttp` invokes the actual registration/MFA PRAGMA handlers with real
-HTTPFS and Rust helpers against a synthetic loopback server. It verifies separate
-cookies for simultaneous connections, cached-account reuse, switching accounts,
-failed-code retry, successful MFA consumption and retry after failed signup.
-It checks request counts and cookie ownership without printing credentials.
-It examines the returned QR SQL without executing optional textplot installation.
-Live authentication, browser runtime and full product qualification remain separate.
+`RegistrationResponses` exercises the production parsers for already authenticated
+bodies and the actual connection-owned result table. It rejects malformed types,
+duplicate fields, control bytes and excessive sizes; checks exact cookie names;
+preserves pending enrollment after malformed recovery responses; and verifies
+one-use recovery output, sibling isolation and manual setup without `textplot`.
+These parser tests cannot authenticate a peer. Actual encrypted registration/MFA
+and account replacement are exercised by the private server with loaded clients.

@@ -84,11 +84,13 @@ The dependency-free `transport_security_test` exercises the production URL polic
 bounded append and exceptional secret erasure. Native tests have subprocess deadlines. `CredentialCleanup` observes actual JSON allocation/reallocation erasure before free, checks binary serializer contents and erasure, and verifies HTTP cleanup preserves borrowed provider headers.
 
 The stock baseline also runs `AuthDiagnostics_debug`, `AuthDiagnostics_release`,
-`RegistrationOwnership`, `RegistrationOutput`, `RegistrationHttp` and
+`RegistrationOwnership`, `RegistrationOutput`, `RegistrationResponses` and
 `RequiredApplicationProtocol`. Diagnostics and application-boundary cases inject
 untrusted replies into the actual transport; ownership/output cases exercise real
-ClientContexts. `RegistrationHttp` and `SessionMemoryOnly` still require migration
-from the old signed-header protocol and are not release qualification evidence.
+ClientContexts. `RegistrationResponses` tests production authenticated-body parsers
+and one-use result publication. `SessionMemoryOnly` verifies two failed fresh-channel
+handshakes preserve connection-owned resume credentials without filesystem access.
+Neither suite claims successful authentication with its untrusted wire fixtures.
 
 ## Not covered without a server
 

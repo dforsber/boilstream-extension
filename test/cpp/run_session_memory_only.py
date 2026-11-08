@@ -13,9 +13,19 @@ class RejectLogin(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.server.requests += 1
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.handshakes.append(body)
+        if (
+            self.path != "/auth/api/protocol/v2/handshake"
+            or self.headers.get("Cookie")
+            or self.headers.get("Authorization")
+            or any(
+                value in body for value in (b"synthetic-access-token", b"synthetic-bootstrap-identity", bytes([9]) * 32)
+            )
+        ):
+            self.server.invalid = True
         body = b'{"error":"fixture rejection"}'
-        self.send_response(401)
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -25,6 +35,8 @@ class RejectLogin(http.server.BaseHTTPRequestHandler):
 def main():
     server = http.server.HTTPServer(("127.0.0.1", 0), RejectLogin)
     server.requests = 0
+    server.handshakes = []
+    server.invalid = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -40,7 +52,11 @@ def main():
         thread.join()
     # Only the valid, connection-owned refresh credential may reach the network.
     print(f"HTTP_REQUESTS {server.requests}")
-    return result.returncode if result.returncode else int(server.requests != 1)
+    return (
+        result.returncode
+        if result.returncode
+        else int(server.requests != 2 or server.invalid or len(set(server.handshakes)) != 2)
+    )
 
 
 if __name__ == "__main__":

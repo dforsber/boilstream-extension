@@ -20,7 +20,7 @@ export async function runProtocolScenario(variant, fixture) {
   const refuse = async (action, label, expected) => {
     let error; try { await action(); } catch (e) { error = e; }
     check(error, `${label} was accepted`);
-    check(![fixture.password, fixture.siblingPassword].some(value => error.message.includes(value)), `${label} disclosed credentials`);
+    check(![fixture.password, fixture.siblingPassword, fixture.registrationPassword].some(value => error.message.includes(value)), `${label} disclosed credentials`);
     if (expected) check(expected.test(error.message), `${label} failed for an unrelated reason: ${error.message}`);
   };
   try {
@@ -41,6 +41,42 @@ export async function runProtocolScenario(variant, fixture) {
       check(Number((await c.query("SELECT current_setting('threads') AS n")).toArray()[0].n) === 2,
         'Threaded query execution was not enabled');
     }
+    // Real registration ownership, email login and MFA. The private coordinator
+    // generates codes from the URI actually returned by this loaded client.
+    const a = await connect(), b = await connect();
+    await Promise.all([a, b].map(connection => pin(connection, fixture.pin)));
+    const register = async (connection, email) => {
+      const rows = (await connection.query(`PRAGMA boilstream_register_user(${quote(`${fixture.authority}/${email}`)}, ${quote(fixture.registrationPassword)})`)).toArray();
+      check(rows.length === 3, 'Manual enrollment result is missing');
+      const uri = rows[2].qr_code;
+      const parsed = new URL(uri);
+      check(parsed.protocol === 'otpauth:' && parsed.hostname === 'totp', 'Enrollment URI is invalid');
+      check(parsed.searchParams.get('algorithm') === 'SHA512', 'TOTP algorithm differs from server');
+      check(rows[0].qr_code.replaceAll(' ', '') === parsed.searchParams.get('secret'), 'Displayed secret differs from URI');
+      return uri;
+    };
+    const verify = (connection, code) => connection.query(`PRAGMA boilstream_verify_mfa(${quote(code)})`);
+    const [uriA, uriB] = await Promise.all([register(a, 'client-a@example.test'), register(b, 'client-b@example.test')]);
+    check(uriA !== uriB, 'Parallel registrations shared enrollment data');
+    check(await register(a, 'client-a@example.test') === uriA, 'Same account lost cached enrollment');
+    check(await register(a, 'client-c@example.test') !== uriA, 'Account replacement reused old enrollment');
+    await refuse(() => register(a, 'client-b@example.test'), 'Duplicate registration');
+    await refuse(() => verify(a, '123456'), 'Failed signup retained old identity');
+    const uriD = await register(a, 'client-d@example.test');
+    const totpB = await window.fixtureTotp(uriB);
+    await refuse(() => verify(b, totpB.wrong), 'Incorrect enrollment code', /HTTP 401/);
+    const recoveryB = (await verify(b, totpB.code)).toArray().map(row => row.backup_code);
+    check(recoveryB.length === 10 && new Set(recoveryB).size === 10 && recoveryB.every(code => typeof code === 'string' && code.length > 0), 'Recovery codes were not returned');
+    await refuse(() => verify(b, totpB.code), 'Completed registration reused its cookie');
+    const totpD = await window.fixtureTotp(uriD);
+    check((await verify(a, totpD.code)).toArray().length === 10, 'Sibling completion destroyed pending enrollment');
+    const loginB = code => b.query(`PRAGMA boilstream_login(${quote(`${fixture.authority}/client-b@example.test`)}, ${quote(fixture.registrationPassword)}, ${quote(code)})`);
+    await refuse(() => loginB(totpB.code), 'Replayed enrollment TOTP', /HTTP 429/);
+    const fresh = await window.fixtureTotp(uriB, [totpB.code]);
+    await loginB(fresh.code);
+    check((await b.query('SELECT * FROM boilstream_secrets()')).toArray().length === 0, 'Email user inherited another tenant');
+    await b.query("CREATE PERSISTENT SECRET email_owned IN boilstream (TYPE quack, TOKEN 'synthetic-email-secret', SCOPE 'quack:127.0.0.1:1')");
+    check((await b.query('SELECT name FROM boilstream_secrets()')).toArray()[0].name === 'email_owned', 'Email login did not authorize secret access');
     await refuse(() => login(c), 'Missing pin');
     await pin(c, fixture.wrongPin);
     await refuse(() => login(c), 'Wrong installation pin');
@@ -76,7 +112,8 @@ export async function runProtocolScenario(variant, fixture) {
     const afterRevocation = await window.protocolRequestCount();
     await refuse(() => other.query('SELECT * FROM boilstream_secrets()'), 'Retired revoked identity');
     check(await window.protocolRequestCount() === afterRevocation, 'Revoked identity reused its channel');
-    return { variant, authenticated: true, quackCompatibility: true, crud: true, isolated: true, tamperRejected: true, unknownOutcomeVerified: true, revocationRejected: true };
+    check((await b.query('SELECT name FROM boilstream_secrets()')).toArray()[0].name === 'email_owned', 'Revoking another tenant retired the email session');
+    return { variant, registration: true, mfa: true, emailLogin: true, authenticated: true, quackCompatibility: true, crud: true, isolated: true, tamperRejected: true, unknownOutcomeVerified: true, revocationRejected: true };
   } finally {
     for (const c of connections.reverse()) { try { await c.close(); } catch {} }
     await db.terminate();

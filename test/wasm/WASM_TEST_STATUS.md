@@ -22,6 +22,11 @@ responsibilities; a public green check alone does not qualify authentication.
   that omits secrets without a known expiry. Explicit SQL now fetches an
   authenticated server snapshot on both platforms; the generic WASM secret
   callback remains cache-only to avoid recursive HTTP.
+- Both browsers perform real concurrent email registration, cached enrollment and
+  account replacement. Failed signup clears the prior enrollment; wrong MFA codes
+  can be retried, completed enrollment cannot be reused, and ten unique recovery
+  codes are returned. Replayed TOTP is refused; a fresh code permits email login.
+  Email tenant secrets remain isolated and survive another tenant's revocation.
 - Production Rust WASM C ABI checks pass34 EH /35 threaded assertions. Protocol
   core tests pass28 cases per variant. Native Rust strict Clippy passes.
 
@@ -37,7 +42,7 @@ that missing pins cause no network I/O and forged server proof cannot release an
 application request or publish identity. It does **not** claim successful login.
 
 The private server's `make test-application-protocol-clients` explicitly includes
-all four real-router/native/EH/pthread cases, including tests normally excluded
+all five real-router/registration/native/EH/pthread cases, including tests normally excluded
 from artifact-free unit runs. Missing artifacts fail. The private release target
 `test-application-protocol-release` first audits dependencies, then runs standalone
 transport tests and the loaded-client gate. It must pass for coordinated release.
@@ -51,17 +56,15 @@ make targets remain unchanged.
 
 ## Outstanding coverage and release work
 
-Two legacy C++ suites still need migration from header-based transport:
-SessionMemoryOnly and RegistrationHttp. AuthDiagnostics debug/release now pass
-against the actual encrypted transport failure boundary. Malformed authenticated
-application bodies still need parser/actual-server coverage.
-Catalog polling now has pure parser/planner tests and real channel rejection;
-the application boundary suite covers forged transport replies without legacy signatures. Browser
-email/password/MFA, resumption, account replacement, managed catalog credential
-vending and live remote Quack queries still need actual-server coverage. The old
-header-protocol fixture has been removed; its unqualified assertions do not count
-as replacement coverage. Dependency review, remaining release gates and the three
-final reviews remain open. No full GitHub CI-green or publication claim is made.
+All24 native C++ suites pass, including migrated memory-only resume and
+registration-response parsing/result ownership. Malformed authenticated JSON,
+exact cookie parsing, control bytes, bounds and duplicate fields have direct
+production parser tests. Loaded native email/MFA, successful resumption,
+credential rotation, managed catalog credential vending and live remote Quack
+queries still need actual-server coverage. Catalog polling has pure parser/planner
+tests and real channel rejection; these do not replace successful remote coverage.
+Obsolete production wire cleanup, dependency review, remaining release gates and
+three final reviews remain open. No full GitHub CI-green or publication claim.
 
 ## Threaded runtime and Quack
 

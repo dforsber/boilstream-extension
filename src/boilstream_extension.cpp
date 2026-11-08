@@ -1,3 +1,4 @@
+#include "boilstream_auth_response.hpp"
 #include "boilstream_security.hpp"
 #include "boilstream_json.hpp"
 #include "boilstream_http_cleanup.hpp"
@@ -1091,8 +1092,13 @@ static string RegistrationQrResult(ClientContext &context, RestApiSecretStorage 
 	output->rows.push_back({"PRAGMA boilstream_verify_mfa('123456');", false});
 	output->rows.push_back({uri, true});
 	const auto id = storage.PublishRegistrationOutput(context, generation, std::move(output));
-	return "INSTALL textplot FROM community;\nLOAD textplot;\n"
-	       "SELECT unnest(CASE WHEN encode_qr THEN string_split(tp_qr(value), chr(10)) ELSE [value] END) AS qr_code "
+	// Enrollment must remain usable offline and in WASM when the optional
+	// renderer is absent. A preloaded textplot still provides the QR display.
+	if (!DatabaseInstance::GetDatabase(context).ExtensionIsLoaded("textplot")) {
+		return "SELECT value AS qr_code FROM boilstream_auth_result(" + std::to_string(id) +
+		       "::UBIGINT) ORDER BY ordinal;";
+	}
+	return "SELECT unnest(CASE WHEN encode_qr THEN string_split(tp_qr(value), chr(10)) ELSE [value] END) AS qr_code "
 	       "FROM boilstream_auth_result(" +
 	       std::to_string(id) + "::UBIGINT) ORDER BY ordinal;";
 }
@@ -1193,23 +1199,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	}
 
 	// Parse CSRF token from JSON response
-	boilstream::JsonArena csrf_doc_arena;
-	auto csrf_doc = csrf_doc_arena.Read(csrf_response.c_str(), csrf_response.size(), 0);
-	if (!csrf_doc) {
-		throw IOException("Failed to parse CSRF response");
-	}
-	auto csrf_root = duckdb_yyjson::yyjson_doc_get_root(csrf_doc);
-	auto csrf_token_val = duckdb_yyjson::yyjson_obj_get(csrf_root, "csrf_token");
-	if (!csrf_token_val || !duckdb_yyjson::yyjson_is_str(csrf_token_val)) {
-		duckdb_yyjson::yyjson_doc_free(csrf_doc);
-		throw IOException("CSRF response missing csrf_token field");
-	}
-	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
+	string csrf_token = BoilstreamAuthResponse(csrf_response).Text("csrf_token");
 	boilstream::WipeOnExit wipe_csrf_token(csrf_token);
-	duckdb_yyjson::yyjson_doc_free(csrf_doc);
-	if (csrf_token.empty()) {
-		throw IOException("CSRF token is empty");
-	}
 
 	BOILSTREAM_LOG("RegisterUser: CSRF token obtained");
 
@@ -1239,26 +1230,10 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	// Check if response is empty
 	if (signup_response.empty()) {
-		throw IOException(
-		    "Signup response is empty - server may not be responding or HTTPS certificate validation failed");
+		throw IOException("Signup response is empty");
 	}
 
-	// Parse signup response
-	boilstream::JsonArena signup_resp_doc_arena;
-	auto signup_resp_doc = signup_resp_doc_arena.Read(signup_response.c_str(), signup_response.size(), 0);
-	if (!signup_resp_doc) {
-		// Show first 500 chars of response for debugging
-		throw IOException("Failed to parse signup response");
-	}
-	auto signup_resp_root = duckdb_yyjson::yyjson_doc_get_root(signup_resp_doc);
-	auto success_val = duckdb_yyjson::yyjson_obj_get(signup_resp_root, "success");
-	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
-
-	if (!success) {
-		duckdb_yyjson::yyjson_doc_free(signup_resp_doc);
-		throw IOException("Signup failed");
-	}
-	duckdb_yyjson::yyjson_doc_free(signup_resp_doc);
+	BoilstreamAuthResponse(signup_response).RequireSuccess();
 
 	BOILSTREAM_LOG("RegisterUser: Signup successful");
 
@@ -1291,51 +1266,11 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		BoilstreamRethrowSafe("Login failed", e);
 	}
 
-	// Parse login response to get session_id
-	boilstream::JsonArena login_resp_doc_arena;
-	auto login_resp_doc = login_resp_doc_arena.Read(login_response.c_str(), login_response.size(), 0);
-	if (!login_resp_doc) {
-		throw IOException("Failed to parse login response");
-	}
-	auto login_resp_root = duckdb_yyjson::yyjson_doc_get_root(login_resp_doc);
-	auto login_success_val = duckdb_yyjson::yyjson_obj_get(login_resp_root, "success");
-	bool login_success = login_success_val && duckdb_yyjson::yyjson_get_bool(login_success_val);
-
-	if (!login_success) {
-		duckdb_yyjson::yyjson_doc_free(login_resp_doc);
-		throw IOException("Login failed");
-	}
-
-	duckdb_yyjson::yyjson_doc_free(login_resp_doc);
-
-	// Extract session token from Set-Cookie header (not from JSON body)
+	BoilstreamAuthResponse(login_response).RequireSuccess();
 	auto set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
 	boilstream::WipeOnExit wipe_set_cookie_header(set_cookie_header);
-	if (set_cookie_header.empty()) {
-		throw IOException("Login response missing Set-Cookie header");
-	}
-
-	// Parse session token from Set-Cookie header
-	// Format: "session={token}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age={seconds}; Secure"
-	string session_token;
+	string session_token = BoilstreamSessionCookie(set_cookie_header);
 	boilstream::WipeOnExit wipe_session_token(session_token);
-	size_t session_pos = set_cookie_header.find("session=");
-	if (session_pos == string::npos) {
-		throw IOException("Set-Cookie header missing session cookie");
-	}
-
-	size_t value_start = session_pos + 8; // Length of "session="
-	size_t value_end = set_cookie_header.find(';', value_start);
-	if (value_end == string::npos) {
-		value_end = set_cookie_header.length();
-	}
-
-	session_token = set_cookie_header.substr(value_start, value_end - value_start);
-	if (session_token.empty()) {
-		throw IOException("Extracted session token is empty from Set-Cookie header");
-	}
-
-	BOILSTREAM_LOG("RegisterUser: Session token extracted from Set-Cookie header");
 
 	BOILSTREAM_LOG("RegisterUser: Login successful, session_id obtained");
 
@@ -1363,25 +1298,8 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		BoilstreamRethrowSafe("TOTP enrollment failed", e);
 	}
 
-	// Parse TOTP enrollment response
-	boilstream::JsonArena totp_resp_doc_arena;
-	auto totp_resp_doc = totp_resp_doc_arena.Read(totp_response.c_str(), totp_response.size(), 0);
-	if (!totp_resp_doc) {
-		throw IOException("Failed to parse TOTP enrollment response");
-	}
-	auto totp_resp_root = duckdb_yyjson::yyjson_doc_get_root(totp_resp_doc);
-	auto secret_val = duckdb_yyjson::yyjson_obj_get(totp_resp_root, "secret");
-	if (!secret_val || !duckdb_yyjson::yyjson_is_str(secret_val)) {
-		duckdb_yyjson::yyjson_doc_free(totp_resp_doc);
-		throw IOException("TOTP enrollment response missing secret");
-	}
-	string totp_secret = SafeYyjsonGetStr(secret_val);
+	string totp_secret = BoilstreamAuthResponse(totp_response).Text("secret");
 	boilstream::WipeOnExit wipe_totp_secret(totp_secret);
-	duckdb_yyjson::yyjson_doc_free(totp_resp_doc);
-
-	if (totp_secret.empty()) {
-		throw IOException("TOTP secret is empty");
-	}
 
 	BOILSTREAM_LOG("RegisterUser: TOTP secret obtained");
 
@@ -1404,6 +1322,19 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 	BOILSTREAM_LOG("RegisterUser: Registration state stored successfully");
 
 	return RegistrationQrResult(context, *storage, registration.generation, totp_uri);
+}
+
+static string CompleteMfaRegistration(ClientContext &context, RestApiSecretStorage &storage, uint64_t generation,
+                                      const string &response) {
+	// Keep recovery codes in wiping runtime data, never generated SQL literals.
+	auto output = BoilstreamAuthResponse(response).RecoveryCodes();
+	if (output->rows.empty()) {
+		storage.CompleteRegistration(context, generation);
+		return "SELECT 'MFA enrollment complete - no backup codes provided' as status;";
+	}
+	const auto id = storage.CompleteRegistration(context, generation, std::move(output));
+	return "SELECT value AS backup_code FROM boilstream_auth_result(" + std::to_string(id) +
+	       "::UBIGINT) ORDER BY ordinal;";
 }
 
 //! PRAGMA function to verify MFA enrollment and complete registration
@@ -1484,49 +1415,7 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 		    "MFA verification failed: Server returned empty response (likely invalid session or expired token)");
 	}
 
-	// Parse verification response
-	boilstream::JsonArena verify_resp_doc_arena;
-	auto verify_resp_doc = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>(
-	    verify_resp_doc_arena.Read(verify_response.c_str(), verify_response.size(), 0), duckdb_yyjson::yyjson_doc_free);
-	if (!verify_resp_doc) {
-		throw IOException("Failed to parse verification response");
-	}
-	auto verify_resp_root = duckdb_yyjson::yyjson_doc_get_root(verify_resp_doc.get());
-	auto success_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "success");
-	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
-
-	if (!success) {
-		throw IOException("MFA verification failed");
-	}
-
-	// Keep recovery codes in runtime data, never in generated SQL or plan literals.
-	auto output = make_uniq<BoilstreamRegistrationOutput>();
-	auto backup_codes_val = duckdb_yyjson::yyjson_obj_get(verify_resp_root, "backup_codes");
-	if (backup_codes_val && !duckdb_yyjson::yyjson_is_arr(backup_codes_val)) {
-		throw IOException("Invalid recovery-code response");
-	}
-	if (backup_codes_val) {
-		const auto count = duckdb_yyjson::yyjson_arr_size(backup_codes_val);
-		if (count > 128) {
-			throw IOException("Invalid recovery-code count");
-		}
-		for (size_t i = 0; i < count; ++i) {
-			auto value = duckdb_yyjson::yyjson_arr_get(backup_codes_val, i);
-			if (!duckdb_yyjson::yyjson_is_str(value) || duckdb_yyjson::yyjson_get_len(value) == 0 ||
-			    duckdb_yyjson::yyjson_get_len(value) > 8192) {
-				throw IOException("Invalid recovery-code value");
-			}
-			output->rows.push_back(
-			    {string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value)), false});
-		}
-	}
-	if (output->rows.empty()) {
-		storage->CompleteRegistration(context, registration.generation);
-		return "SELECT 'MFA enrollment complete - no backup codes provided' as status;";
-	}
-	const auto id = storage->CompleteRegistration(context, registration.generation, std::move(output));
-	return "SELECT value AS backup_code FROM boilstream_auth_result(" + std::to_string(id) +
-	       "::UBIGINT) ORDER BY ordinal;";
+	return CompleteMfaRegistration(context, *storage, registration.generation, verify_response);
 }
 
 //! PRAGMA function to login with email/password + MFA code
@@ -1607,23 +1496,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		BoilstreamRethrowSafe("Failed to fetch CSRF token", e);
 	}
 
-	boilstream::JsonArena csrf_doc_arena;
-	auto csrf_doc = csrf_doc_arena.Read(csrf_response.c_str(), csrf_response.size(), 0);
-	if (!csrf_doc) {
-		throw IOException("Failed to parse CSRF response");
-	}
-	auto csrf_root = duckdb_yyjson::yyjson_doc_get_root(csrf_doc);
-	auto csrf_token_val = duckdb_yyjson::yyjson_obj_get(csrf_root, "csrf_token");
-	if (!csrf_token_val) {
-		duckdb_yyjson::yyjson_doc_free(csrf_doc);
-		throw IOException("CSRF response missing csrf_token field");
-	}
-	string csrf_token = SafeYyjsonGetStr(csrf_token_val);
+	string csrf_token = BoilstreamAuthResponse(csrf_response).Text("csrf_token");
 	boilstream::WipeOnExit wipe_csrf_token(csrf_token);
-	duckdb_yyjson::yyjson_doc_free(csrf_doc);
-	if (csrf_token.empty()) {
-		throw IOException("CSRF token is empty");
-	}
 
 	BOILSTREAM_LOG("Login: CSRF token obtained");
 
@@ -1655,43 +1529,11 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		BoilstreamRethrowSafe("Login request failed", e);
 	}
 
-	// Check if login was successful by looking for Set-Cookie header
-	// If the server returned 405, we need to check the response
-	if (login_response.empty()) {
-		throw IOException("Login failed: Server returned 405 (Method Not Allowed). The endpoint /auth/api/login might "
-		                  "not support this login method.");
-	}
-
-	// Extract session token from Set-Cookie header
-	string set_cookie_header;
+	BoilstreamAuthResponse(login_response).RequireSuccess();
+	auto set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
 	boilstream::WipeOnExit wipe_set_cookie_header(set_cookie_header);
-	try {
-		set_cookie_header = login_response_headers.GetHeaderValue("set-cookie");
-	} catch (...) {
-		// No Set-Cookie header - login probably failed
-		throw IOException("Login failed: No session cookie returned");
-	}
-	if (set_cookie_header.empty()) {
-		throw IOException("Login response missing Set-Cookie header");
-	}
-
-	// Parse session token from Set-Cookie header
-	// Format: "session={token}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age={seconds}; Secure"
-	string session_token;
+	string session_token = BoilstreamSessionCookie(set_cookie_header);
 	boilstream::WipeOnExit wipe_session_token(session_token);
-	size_t session_pos = set_cookie_header.find("session=");
-	if (session_pos == string::npos) {
-		throw IOException("Set-Cookie header missing session cookie");
-	}
-
-	size_t value_start = session_pos + 8; // Length of "session="
-	size_t value_end = set_cookie_header.find(';', value_start);
-	if (value_end == string::npos) {
-		value_end = set_cookie_header.length();
-	}
-
-	session_token = set_cookie_header.substr(value_start, value_end - value_start);
-	BOILSTREAM_LOG("Login: Session token obtained from login");
 
 	// Step 3: POST /auth/api/mfa/verify/totp with session cookie
 	string mfa_url = base_url + "/auth/api/mfa/verify/totp";
@@ -1719,21 +1561,7 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		BoilstreamRethrowSafe("MFA authentication failed", e);
 	}
 
-	// Parse MFA response to verify success
-	boilstream::JsonArena mfa_resp_doc_arena;
-	auto mfa_resp_doc = mfa_resp_doc_arena.Read(mfa_response.c_str(), mfa_response.size(), 0);
-	if (!mfa_resp_doc) {
-		throw IOException("Failed to parse MFA response");
-	}
-	auto mfa_resp_root = duckdb_yyjson::yyjson_doc_get_root(mfa_resp_doc);
-	auto success_val = duckdb_yyjson::yyjson_obj_get(mfa_resp_root, "success");
-	bool success = success_val && duckdb_yyjson::yyjson_get_bool(success_val);
-
-	if (!success) {
-		duckdb_yyjson::yyjson_doc_free(mfa_resp_doc);
-		throw IOException("MFA authentication failed");
-	}
-	duckdb_yyjson::yyjson_doc_free(mfa_resp_doc);
+	BoilstreamAuthResponse(mfa_response).RequireSuccess();
 
 	BOILSTREAM_LOG("Login: MFA verification successful, now vending bootstrap token");
 
@@ -1753,25 +1581,8 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		BoilstreamRethrowSafe("Bootstrap token request failed", e);
 	}
 
-	// Parse bootstrap token response
-	boilstream::JsonArena bootstrap_resp_doc_arena;
-	auto bootstrap_resp_doc = bootstrap_resp_doc_arena.Read(bootstrap_response.c_str(), bootstrap_response.size(), 0);
-	if (!bootstrap_resp_doc) {
-		throw IOException("Failed to parse bootstrap token response");
-	}
-	auto bootstrap_resp_root = duckdb_yyjson::yyjson_doc_get_root(bootstrap_resp_doc);
-	auto bootstrap_token_val = duckdb_yyjson::yyjson_obj_get(bootstrap_resp_root, "bootstrap_token");
-	if (!bootstrap_token_val) {
-		duckdb_yyjson::yyjson_doc_free(bootstrap_resp_doc);
-		throw IOException("Bootstrap token response missing bootstrap_token field");
-	}
-	string bootstrap_token = SafeYyjsonGetStr(bootstrap_token_val);
+	string bootstrap_token = BoilstreamAuthResponse(bootstrap_response).Text("bootstrap_token");
 	boilstream::WipeOnExit wipe_bootstrap_token(bootstrap_token);
-	duckdb_yyjson::yyjson_doc_free(bootstrap_resp_doc);
-
-	if (bootstrap_token.empty()) {
-		throw IOException("Bootstrap token is empty");
-	}
 
 	BOILSTREAM_LOG("Login: Bootstrap token obtained, now performing OPAQUE exchange");
 

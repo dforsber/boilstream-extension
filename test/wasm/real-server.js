@@ -38,6 +38,16 @@ async function runBrowser() {
   const context = await browser.newContext();
   await context.exposeFunction('armProtocolFault', () => { assert(!fault); fault = true; });
   await context.exposeFunction('protocolRequestCount', () => counts.request);
+  await context.exposeFunction('fixtureTotp', async (uri, used = []) => {
+    assert(typeof uri === 'string' && uri.length <= 1024);
+    assert(Array.isArray(used) && used.length <= 16 && used.every(code => /^\d{6}$/.test(code)));
+    console.log(JSON.stringify({ control: 'totp', uri, used }));
+    const reply = await lines.next();
+    assert(!reply.done && reply.value.length <= 8192, 'Missing TOTP fixture reply');
+    const result = JSON.parse(reply.value);
+    assert(/^\d{6}$/.test(result.code) && /^\d{6}$/.test(result.wrong));
+    return result;
+  });
   await context.exposeFunction('revokeFixtureIdentity', async () => {
     // Only the private parent can change fixture identity state. No test control
     // route or credential is exposed over HTTP or added to the production server.
@@ -57,7 +67,7 @@ async function runBrowser() {
       if (request.method() === 'OPTIONS') return await route.fulfill({ status: 204, headers: cors });
       assert.equal(request.method(), 'POST');
       const body = request.postDataBuffer();
-      assert(body && ![fixture.password, fixture.siblingPassword].some(password => body.includes(password)), 'Credential exposed on plaintext wire');
+      assert(body && ![fixture.password, fixture.siblingPassword, fixture.registrationPassword].some(password => body.includes(password)), 'Credential exposed on plaintext wire');
       const handshake = target.pathname.endsWith('/handshake');
       assert(body.toString().startsWith(handshake ? 'BH2.c.' : 'BS2.'), 'Unprotected application request');
       counts[handshake ? 'handshake' : 'request']++;

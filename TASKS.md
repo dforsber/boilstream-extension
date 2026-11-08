@@ -1,5 +1,52 @@
 # Application protocol client integration
 
+## APPSEC2-REGISTRATION — Authenticated parsing and loaded browser enrollment
+
+Owner: codex-root,2026-11-08. Full coordinated release goal remains active.
+No subagents, main merge or publication.
+
+- Extracted pure authenticated-body parsers used by real registration, email login,
+  MFA and bootstrap handling. Require JSON objects/true success, exact unique field
+  names, bounded nonempty text without control bytes, and exact session cookies.
+  Parsed JSON and recovery outputs retain their wiping owners. No parsing function
+  grants authority; the encrypted protocol still verifies every incoming body.
+- Registration does not auto-install textplot. It returns the setup key/instruction/
+  URI when the optional renderer is absent; a preloaded renderer retains QR output.
+  Keys/recovery codes remain one-use connection-owned rows, never SQL literals.
+- Replaced RegistrationHttp's obsolete signed-header server with eight production
+  parser/result cases and private real-server positives. Invalid recovery replies
+  retain enrollment for retry; tests follow actual begin/enroll/verify transitions.
+  Removed the now-unused Python response-signing fixture. SessionMemoryOnly now
+  verifies two distinct failed fresh handshakes, unchanged owned resume credentials
+  and zero filesystem access. This is negative resume coverage, not a success claim.
+- Public native CTest PASS24/24 (21.33s), ../logs/registration-native-suite-tests.log.
+  Full five-TU/ten-command strict clang-tidy22 PASS, registration-tidy.log;
+  format-check PASS, registration-format-check.log. JS syntax checks PASS.
+- Loaded real-server gate PASS5/5,0 ignored (72.22s), private log
+  ../logs/registration-expanded-gate.log. Both EH and pthread browsers perform
+  concurrent email signup, cached enrollment, account replacement, failed signup
+  clearing the old identity, wrong-code retry, ten distinct recovery codes,
+  consumed enrollment refusal, TOTP replay429, fresh-step email login and tenant
+  isolation. Native bootstrap/CRUD, live revocation and tampered mutation tests
+  also pass after rebuilding the changed production client.
+- Private stdin control generates TOTP codes from actual returned URIs. No HTTP
+  control endpoint, fixed production credential or public private-key material.
+  Browser tests strip security response headers over plain HTTP; unrelated email
+  tenant remains authenticated after bootstrap tenant revocation.
+- Incremental reviews (not final release signoff): security—verified bodies only,
+  exact cookie/field matching and wiping ownership; test quality—real browser
+  success plus negative parser tests and DB enrollment assertions; compatibility—
+  actual2.0 EH/pthread/native builds, manual setup without external downloads,
+  community build/sign/publish entrypoints unchanged.
+- GitHub e8baa81 WASM PASS. Native22/24 failed only the two suites repaired here.
+  Distribution ARM64 failed downloading upstream CMake with HTTP504 before build;
+  retried failed jobs, still running. No all-green claim.
+
+Remaining: loaded native email/MFA, successful resume/credential rotation, managed
+catalog/live remote Quack coverage, obsolete production wire cleanup, C++ dependency
+review, release enforcement/gates, remote CI and three final reviews. No release
+readiness claim. Disks23GiB internal/1.2TiB external,8/50GiB reserve guards active.
+
 ## APPSEC2-DIAGNOSTICS — Encrypted failure coverage and incremental Quack builds
 
 Owner: codex-root, 2026-11-08. Continues the full encrypted client/server release
