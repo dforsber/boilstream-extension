@@ -217,20 +217,10 @@ TEST_CASE("BoilstreamConnectionState handles empty values safely", "[input_valid
 		REQUIRE(state.session_key.empty());
 		REQUIRE(state.refresh_token.empty());
 		REQUIRE(state.region.empty());
-		REQUIRE(state.client_sequence == 0);
 	}
 
 	SECTION("IsSessionTokenValid returns false for empty state") {
 		REQUIRE_FALSE(state.IsSessionTokenValid());
-	}
-
-	SECTION("GetSessionSnapshot returns valid snapshot even with empty state") {
-		auto snapshot = state.GetSessionSnapshot();
-		REQUIRE(snapshot.access_token.empty());
-		REQUIRE(snapshot.session_key.empty());
-		REQUIRE(snapshot.region.empty());
-		// Note: sequence increments on each call
-		REQUIRE(snapshot.has_session_key == false);
 	}
 
 	SECTION("ClearSession is safe to call on empty state") {
@@ -394,7 +384,7 @@ TEST_CASE("BoilstreamConnectionState concurrent access is safe", "[input_validat
 			for (int i = 0; i < OPS_PER_THREAD; i++) {
 				switch (i % 5) {
 				case 0:
-					state.GetSessionSnapshot();
+					state.GetBootstrapTokenHash();
 					break;
 				case 1:
 					state.IsSessionTokenValid();

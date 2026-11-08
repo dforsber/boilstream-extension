@@ -305,16 +305,15 @@ link_duckdb_static(boilstream_connection_state_test)
 # Link Rust dependencies (needed for DuckDB static lib)
 link_rust_dependencies(boilstream_connection_state_test)
 
-# Historical target name; tests the actual session class natively, not WASM
-# execution.
+# Native tests of actual logout, generation and cache retirement behavior.
 find_package(Threads REQUIRED)
-add_executable(wasm_lock_ordering_test test_wasm_lock_ordering.cpp)
+add_executable(session_lifecycle_test test_session_lifecycle.cpp)
 target_include_directories(
-  wasm_lock_ordering_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-                                  ${DUCKDB_SOURCE_DIR}/src/include)
-target_link_libraries(wasm_lock_ordering_test
+  session_lifecycle_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
+                                 ${DUCKDB_SOURCE_DIR}/src/include)
+target_link_libraries(session_lifecycle_test
                       PRIVATE ${DUCKDB_LIBS} Catch2::Catch2 Threads::Threads)
-link_rust_dependencies(wasm_lock_ordering_test)
+link_rust_dependencies(session_lifecycle_test)
 
 # Session routing test executable (per-connection session isolation)
 add_executable(
@@ -387,9 +386,9 @@ add_test(NAME BoilstreamCatalogVersionTests
          COMMAND boilstream_catalog_version_test)
 add_test(NAME BoilstreamConnectionStateTests
          COMMAND boilstream_connection_state_test)
-add_test(NAME WasmLockOrderingTests COMMAND wasm_lock_ordering_test)
+add_test(NAME SessionLifecycleTests COMMAND session_lifecycle_test)
 # A subprocess deadline also catches blocked future/thread destruction.
-set_tests_properties(WasmLockOrderingTests PROPERTIES TIMEOUT 30)
+set_tests_properties(SessionLifecycleTests PROPERTIES TIMEOUT 30)
 add_test(NAME InputValidationTests COMMAND input_validation_test)
 # The CTest lane is deliberately non-interactive: it proves that the exact
 # loadable artifact works in stock DuckDB. Server/OPAQUE cases require
@@ -654,7 +653,7 @@ foreach(target IN LISTS boilstream_test_targets)
   get_target_property(test_sources ${target} SOURCES)
   if("${test_sources}" MATCHES "boilstream_secret_storage\\.cpp"
      OR target STREQUAL "boilstream_connection_state_test"
-     OR target STREQUAL "wasm_lock_ordering_test")
+     OR target STREQUAL "session_lifecycle_test")
     target_sources(${target} PRIVATE ../../src/boilstream_protocol.cpp)
     target_include_directories(
       ${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)

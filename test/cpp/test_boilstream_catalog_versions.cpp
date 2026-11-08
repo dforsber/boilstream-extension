@@ -186,7 +186,6 @@ TEST_CASE("Catalog polling without an authenticated session performs no HTTP", "
 	BoilstreamCatalogVersionTestAccess::CheckCatalogVersions(*fixture.storage, fixture.conn_state);
 	REQUIRE(http->requests.empty());
 	REQUIRE(fixture.conn_state.catalog_versions.empty());
-	REQUIRE(fixture.conn_state.client_sequence == 0);
 }
 
 //===----------------------------------------------------------------------===//

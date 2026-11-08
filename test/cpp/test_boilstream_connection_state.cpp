@@ -80,16 +80,6 @@ public:
 		lock_guard<mutex> lock(state.session_lock);
 		return state.region;
 	}
-
-	static uint64_t GetSequence(BoilstreamConnectionState &state) {
-		lock_guard<mutex> lock(state.session_lock);
-		return state.client_sequence;
-	}
-
-	static void IncrementSequence(BoilstreamConnectionState &state) {
-		lock_guard<mutex> lock(state.session_lock);
-		state.client_sequence++;
-	}
 };
 
 //===----------------------------------------------------------------------===//
@@ -126,7 +116,6 @@ TEST_CASE("Connection State Creation", "[boilstream][connection]") {
 		REQUIRE(BoilstreamConnectionStateTestAccess::GetAccessToken(state).empty());
 		REQUIRE(BoilstreamConnectionStateTestAccess::GetSessionKey(state).empty());
 		REQUIRE(BoilstreamConnectionStateTestAccess::GetRegion(state).empty());
-		REQUIRE(BoilstreamConnectionStateTestAccess::GetSequence(state) == 0);
 		REQUIRE_FALSE(state.IsSessionTokenValid());
 	}
 }
@@ -174,25 +163,6 @@ TEST_CASE("Connection State Isolation", "[boilstream][connection]") {
 
 		REQUIRE(BoilstreamConnectionStateTestAccess::GetSessionKey(state1) == key1);
 		REQUIRE(BoilstreamConnectionStateTestAccess::GetSessionKey(state2) == key2);
-	}
-
-	SECTION("Sequence counters are independent per connection") {
-		Connection con1(db);
-		Connection con2(db);
-
-		auto &state1 = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con1.context);
-		auto &state2 = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con2.context);
-
-		// Increment connection 1's sequence multiple times
-		BoilstreamConnectionStateTestAccess::IncrementSequence(state1);
-		BoilstreamConnectionStateTestAccess::IncrementSequence(state1);
-		BoilstreamConnectionStateTestAccess::IncrementSequence(state1);
-
-		// Increment connection 2's sequence once
-		BoilstreamConnectionStateTestAccess::IncrementSequence(state2);
-
-		REQUIRE(BoilstreamConnectionStateTestAccess::GetSequence(state1) == 3);
-		REQUIRE(BoilstreamConnectionStateTestAccess::GetSequence(state2) == 1);
 	}
 
 	SECTION("Clearing one connection state does not affect another") {
@@ -274,80 +244,6 @@ TEST_CASE("Secret Expiration Isolation", "[boilstream][connection]") {
 }
 
 //===----------------------------------------------------------------------===//
-// Test: Session Snapshot Thread Safety
-//===----------------------------------------------------------------------===//
-TEST_CASE("Session Snapshot Thread Safety", "[boilstream][connection][threading]") {
-	DuckDB db(nullptr);
-	Connection con(db);
-
-	auto &state = BoilstreamConnectionStateTestAccess::GetOrCreateState(*con.context);
-
-	// Set up session state
-	BoilstreamConnectionStateTestAccess::SetAccessToken(
-	    state, "test-token-64chars-0123456789abcdef0123456789abcdef0123456789ab");
-	duckdb::vector<uint8_t> key(32, 0x42);
-	BoilstreamConnectionStateTestAccess::SetSessionKey(state, key);
-	BoilstreamConnectionStateTestAccess::SetRegion(state, "us-east-1");
-
-	SECTION("GetSessionSnapshot atomically reads and increments sequence") {
-		uint64_t initial_seq = BoilstreamConnectionStateTestAccess::GetSequence(state);
-
-		auto snapshot = state.GetSessionSnapshot();
-
-		// Snapshot should have the sequence at time of call
-		REQUIRE(snapshot.sequence == initial_seq);
-
-		// Sequence should have been incremented
-		REQUIRE(BoilstreamConnectionStateTestAccess::GetSequence(state) == initial_seq + 1);
-	}
-
-	SECTION("Concurrent GetSessionSnapshot calls get unique sequences") {
-		const int NUM_THREADS = 10;
-		const int CALLS_PER_THREAD = 100;
-
-		std::vector<std::thread> threads;
-		std::vector<std::vector<uint64_t>> sequences(NUM_THREADS);
-		std::atomic<bool> start_flag {false};
-
-		for (int i = 0; i < NUM_THREADS; i++) {
-			threads.emplace_back([&, i]() {
-				// Wait for start signal
-				while (!start_flag.load()) {
-					std::this_thread::yield();
-				}
-
-				for (int j = 0; j < CALLS_PER_THREAD; j++) {
-					auto snapshot = state.GetSessionSnapshot();
-					sequences[i].push_back(snapshot.sequence);
-				}
-			});
-		}
-
-		// Start all threads simultaneously
-		start_flag.store(true);
-
-		for (auto &t : threads) {
-			t.join();
-		}
-
-		// Collect all sequences
-		std::vector<uint64_t> all_sequences;
-		for (const auto &seq_vec : sequences) {
-			all_sequences.insert(all_sequences.end(), seq_vec.begin(), seq_vec.end());
-		}
-
-		// Sort and check for duplicates
-		std::sort(all_sequences.begin(), all_sequences.end());
-		for (size_t i = 1; i < all_sequences.size(); i++) {
-			REQUIRE(all_sequences[i] != all_sequences[i - 1]);
-		}
-
-		// Verify total count
-		REQUIRE(all_sequences.size() == NUM_THREADS * CALLS_PER_THREAD);
-	}
-}
-
-//===----------------------------------------------------------------------===//
 // Test: Multiple Connections Concurrent Access
 //===----------------------------------------------------------------------===//
 TEST_CASE("Multiple Connections Concurrent Access", "[boilstream][connection][threading]") {
@@ -374,9 +270,6 @@ TEST_CASE("Multiple Connections Concurrent Access", "[boilstream][connection][th
 					string token = "token-conn-" + std::to_string(i) + "-op-" + std::to_string(j);
 					BoilstreamConnectionStateTestAccess::SetAccessToken(state, token);
 
-					// Get snapshot (increments sequence)
-					auto snapshot = state.GetSessionSnapshot();
-
 					// Store expiration
 					auto exp = std::chrono::system_clock::now() + std::chrono::minutes(j);
 					state.StoreExpiration("secret-" + std::to_string(j), exp);
@@ -400,8 +293,7 @@ TEST_CASE("Multiple Connections Concurrent Access", "[boilstream][connection][th
 			string expected_token = "token-conn-" + std::to_string(i) + "-op-" + std::to_string(OPS_PER_CONNECTION - 1);
 			REQUIRE(BoilstreamConnectionStateTestAccess::GetAccessToken(state) == expected_token);
 
-			// Sequence should be exactly OPS_PER_CONNECTION (one GetSessionSnapshot per op)
-			REQUIRE(BoilstreamConnectionStateTestAccess::GetSequence(state) == OPS_PER_CONNECTION);
+			REQUIRE(state.GetSecretExpiration("secret-99") > std::chrono::system_clock::now());
 		}
 	}
 }

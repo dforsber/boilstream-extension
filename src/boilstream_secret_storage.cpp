@@ -39,53 +39,6 @@
 #include <iomanip>
 #include <optional>
 
-// Platform-specific secure memory zeroization
-// Prevents compiler from optimizing away memory clearing operations
-#if defined(_WIN32)
-#define NOMINMAX // Prevent Windows from defining min/max macros that conflict with std::min/std::max
-#include <windows.h>
-#undef CreateDirectory // Undefine Windows macro that conflicts with DuckDB FileSystem::CreateDirectory
-#define SECURE_ZERO_MEMORY(ptr, size) SecureZeroMemory(ptr, size)
-#elif defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasm32__)
-// WASM: Use volatile loop (portable, works in browser environment)
-// Note: WASM has limited security guarantees due to sandboxing, but we still
-// zero memory to prevent leakage within the WASM instance
-#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
-	do {                                                                                                               \
-		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
-		size_t n = (size);                                                                                             \
-		while (n--)                                                                                                    \
-			*p++ = 0;                                                                                                  \
-	} while (0)
-#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
-#if __GLIBC_PREREQ(2, 25)
-// explicit_bzero available in glibc 2.25+
-#define SECURE_ZERO_MEMORY(ptr, size) explicit_bzero(ptr, size)
-#else
-// Fallback for older glibc
-#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
-	do {                                                                                                               \
-		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
-		size_t n = (size);                                                                                             \
-		while (n--)                                                                                                    \
-			*p++ = 0;                                                                                                  \
-	} while (0)
-#endif
-#elif defined(__OpenBSD__) || defined(__FreeBSD__)
-// BSD systems have explicit_bzero
-#define SECURE_ZERO_MEMORY(ptr, size) explicit_bzero(ptr, size)
-#else
-// Portable fallback using volatile to prevent compiler optimization
-// Works on most platforms including WASM, macOS, Linux, etc.
-#define SECURE_ZERO_MEMORY(ptr, size)                                                                                  \
-	do {                                                                                                               \
-		volatile unsigned char *p = (volatile unsigned char *)(ptr);                                                   \
-		size_t n = (size);                                                                                             \
-		while (n--)                                                                                                    \
-			*p++ = 0;                                                                                                  \
-	} while (0)
-#endif
-
 #include "boilstream_diagnostics.hpp"
 #define BOILSTREAM_LOG(event) duckdb::BoilstreamLogEvent("" event)
 
@@ -586,9 +539,6 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 			throw IOException("Failed to derive refresh token");
 		}
 		conn_state.refresh_token.assign(derived_key, derived_key + 32);
-
-		// Reset sequence counter (starts at 0 for new session)
-		conn_state.client_sequence = 0;
 
 		// Store region from server response
 		conn_state.region = new_region;

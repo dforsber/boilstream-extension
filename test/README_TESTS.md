@@ -6,7 +6,7 @@ under `test/cpp/` build as standalone executables against the same DuckDB build.
 
 The [WASM lane](wasm/README.md) runs a pinned DuckDB **v2.0.0** in real Chromium
 workers for both `wasm_eh` and `wasm_threads`. It also runs the compatible shared
-SQL corpus. `wasm_lock_ordering_test` below is a native executable and does not
+SQL corpus. `session_lifecycle_test` below is a native executable and does not
 replace browser testing. Rust WASM FFI vectors run separately against the same
 archive linked into each extension.
 
@@ -60,12 +60,12 @@ The harness never substitutes another build tree or a separate server library.
 | `boilstream_test` | `[security]` | Token format validation, session state, connection user mapping, bootstrap hash, thread safety (`[.]`, hidden). |
 | `boilstream_crypto_test` | `[crypto]` | Production Rust C ABI SHA-256 and OPAQUE refresh-credential known-answer vectors, binary input, invalid pointers and unchanged output on failure. |
 | `boilstream_catalog_version_test` | `[catalog_versions]` | Catalog version polling route, rate limiting, per-connection tracking. |
-| `boilstream_connection_state_test` | `[connection]` | Per-connection state isolation, expiration sentinels, snapshot thread safety. |
+| `boilstream_connection_state_test` | `[connection]` | Per-connection state isolation, expiration sentinels and concurrent owner-local updates. |
 | `session_routing_test` | `[session-routing]` | Connection-id to session routing, re-bootstrap, concurrency. |
 | `input_validation_test` | `[input_validation]` | Malformed JSON, size limits, SQL injection in values, error-message hygiene. |
 | `quack_attach_red_test` | `[quack]` | Managed catalog credential vending, user secret precedence, RFC 3339 expiry. |
 | `registration_ffi_test` | `[registration]` | Rust FFI registration validation and TOTP URI. |
-| `wasm_lock_ordering_test` | `[wasm]` | Actual connection-state locking and reentrancy, executed natively. |
+| `session_lifecycle_test` | `[session]` | Concurrent logout, exact authentication-generation invalidation, owner isolation and retired-cache rejection, executed natively. |
 
 ### Integration lane (enabled above and in CI)
 

@@ -64,22 +64,8 @@ public:
 	//! Catalog version info from server
 	using CatalogVersionInfo = boilstream::CatalogVersionInfo;
 
-	//! Session state snapshot for thread-safe access
-	struct SessionSnapshot {
-		SessionSnapshot &operator=(const SessionSnapshot &) = delete;
-		string access_token;
-		vector<uint8_t> session_key;
-		string region;
-		uint64_t sequence;
-		bool has_session_key;
-		~SessionSnapshot() {
-			boilstream::Wipe(access_token);
-			boilstream::Wipe(session_key);
-		}
-	};
-
 	explicit BoilstreamConnectionState(string endpoint = "")
-	    : client_sequence(0), is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
+	    : is_exchanging(false), token_expires_at(std::chrono::system_clock::time_point::min()),
 	      last_version_check(std::chrono::system_clock::time_point::min()),
 	      authentication_endpoint(std::move(endpoint)) {
 	}
@@ -102,9 +88,6 @@ public:
 
 	//! OPAQUE refresh token (32 bytes, in-memory only, for this connection's resumption)
 	vector<uint8_t> refresh_token;
-
-	//! Lock-step sequence counter (increments per request)
-	uint64_t client_sequence;
 
 	//! Region identifier from login response (e.g., "us-east-1")
 	string region;
@@ -187,23 +170,6 @@ public:
 	// Session Management Methods
 	//========================================================================
 
-	//! Get thread-safe snapshot of session state (atomically reads and increments sequence)
-	SessionSnapshot GetSessionSnapshot() {
-		SessionSnapshot snapshot;
-		{
-			lock_guard<mutex> lock(session_lock);
-			snapshot.access_token = access_token;
-			snapshot.session_key = session_key;
-			snapshot.region = region;
-			snapshot.sequence = client_sequence;
-			snapshot.has_session_key = !session_key.empty();
-
-			// CRITICAL: Increment sequence counter after reading
-			client_sequence++;
-		}
-		return snapshot;
-	}
-
 	//! Check if session token is valid (not expired, with 30min buffer)
 	bool IsSessionTokenValid() {
 		lock_guard<mutex> lock(session_lock);
@@ -264,7 +230,6 @@ public:
 			session_key.clear();
 			SecureZeroVector(refresh_token);
 			refresh_token.clear();
-			client_sequence = 0;
 			region.clear();
 			token_expires_at = std::chrono::system_clock::time_point::min();
 			is_exchanging = false;
