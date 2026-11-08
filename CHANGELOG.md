@@ -5,29 +5,69 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.3] - Unreleased
+## [Unreleased]
+
+This is a breaking client/server integration candidate. A compatible BoilStream
+server deployment, coordinated qualification and release version selection are
+required before publication. It is not the previously proposed client-only patch.
+
+### Security
+
+- Authenticate the installation with a configured X25519 public key before sending
+  bootstrap tokens, passwords or OPAQUE messages. Authentication and remote-secret
+  requests and replies use encrypted application bodies; HTTP response security
+  headers and TLS confidentiality are not required for protocol protection.
+- Reject missing/wrong pins, ambiguous login responses and invalid or expired
+  server lifetimes. There is no default installation key or legacy wire fallback.
+- Retire connection-owned credentials and caches on logout, replacement and
+  teardown. Retained cache handles cannot recover or publish retired credentials.
+  Login and refresh material remain in memory; restart requires login again.
+- Failed or unverified replies close the channel without automatic retry. A lost
+  reply may leave a committed mutation; callers must handle that unknown outcome.
+
+### Added
+
+- `PRAGMA boilstream_server_key(authority, public_key_hex)` configures the trusted
+  installation key separately on each connection, before login. Obtain the key
+  independently from trusted installation configuration.
+- `PRAGMA boilstream_resume_session` explicitly renews a live in-memory session on
+  a fresh pinned channel. It rotates the one-use refresh credential without
+  extending the original session lifetime.
 
 ### Changed
 
 - The public extension is client-only: remote login, registration, MFA, bootstrap,
-  secret storage and Quack client attachment remain available on DuckDB 2.0.
-- Removed native hosting callbacks and embedded local-session APIs from the client
-  distribution. Existing client SQL commands and remote protocols are retained.
-  Applications embedding the removed hosting APIs must migrate to a private
-  server adapter before adopting this version.
-- Native and WASM tests assert that server authentication functions are absent
-  while the client API remains registered. Community build entrypoints are unchanged.
+  secret storage and Quack client attachment remain available on the qualified
+  DuckDB **v2.0.0** native, WASM EH and pthread baseline.
+- Existing login SQL operations require the configured installation pin and the
+  matching encrypted server protocol. The old header-signing protocol is removed;
+  older client/server combinations are not supported by this candidate.
+- Removed native hosting callbacks, embedded local-session APIs, legacy
+  `boilstream.tenant_id` routing, `multitenant=true` URL rewriting and display-name
+  prefix stripping. Server hosting uses private adapters rather than this client.
+- Removed retired signing/decryption exports and unused standalone JavaScript
+  OPAQUE wrappers. DuckDB native and WASM retain the production Rust C ABI.
+- Replaced obsolete backend examples and security instructions with current
+  client-only guidance. See [configuration](docs/application-protocol-client.md)
+  and [security requirements](SECURITY_SPECIFICATION.md), including host limits.
+- DuckDB community build/sign/publish entrypoints remain unchanged. No private
+  server code or installation secret is required to build the client.
 
-- Removed legacy `boilstream.tenant_id` routing, `multitenant=true` URL rewriting,
-  and display-name prefix stripping. Connection-owned authentication and managed
-  catalog wire credentials remain intact.
-- Native security CI installs matching HTTPFS/Quack artifacts and fails on any
-  SQL dependency skip; Rust audit treats warnings as failures.
-- Added a local OPAQUE protocol fixture and native positive control. Browser
-  authentication qualification exposes a DuckDB-WASM 2.0 host blocker: POST
-  drops response headers required for signature verification. The default
-  browser regression checks rejection without publishing a session; this is
-  not successful authentication coverage. See `test/wasm/WASM_TEST_STATUS.md`.
+### Tests
+
+- Autonomous private-server fixtures exercise actual native, WASM EH and pthread
+  clients over plaintext loopback with security response headers removed:
+  enrollment/MFA, password/bootstrap login, tenant isolation, revocation, renewal,
+  tampered replies and unknown mutation outcomes.
+- Production transport tests cover envelope replay, duplicate races and cancellation
+  after admission; loaded-client tests also reject enrollment TOTP reuse. Public
+  negative tests are not counted as successful authentication coverage.
+- Public browser tests require matching HTTPFS/Quack artifacts and reject missing
+  pins or forged server proofs. Native SQL tests fail on dependency skips.
+- C ABI vectors run against the actual EH/pthread archives. Parser, credential
+  cleanup, concurrent lifecycle and retired-cache regressions use production code.
+- Rust audits treat vulnerabilities and warnings as failures. Server dependency,
+  managed-backend and full-product release qualification remains separate.
 
 ## [0.8.2] - 2026-11-07
 
