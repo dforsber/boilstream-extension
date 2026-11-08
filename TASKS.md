@@ -89,3 +89,34 @@ contains environment and reserve-controller invocation. Do not use subagents.
   verified application failures cannot be constructed by the HTTP transport; actual
   native failure then passing rerun demonstrates the catalog503 regression oracle.
   These are incremental reviews, not the required final three release reviews.
+
+2026-11-08 build/harness checkpoint (continues the same goal):
+- Both full WASM variants and EH incremental repair build PASS. Their build
+  controllers are terminal; no live WASM build remains. Production C ABI tests:
+  34 EH assertions,35 pthread assertions PASS, including actual worker execution.
+  Logs ../logs/ffi-wasm-eh.log and ffi-wasm-threads.log. Pinned Rust1.94.1
+  wasm32-unknown-unknown check PASS after installing the missing target; existing
+  wasm-bindgen dead-state/unused warnings remain visible, not suppressed.
+- C++ harness build PASS. Found that selecting exact archive paths alone allowed
+  stale native static/shared objects when only a loadable extension was rebuilt.
+  Every test executable now depends on the selected native tree's ordinary
+  incremental CMake build. Native artifacts are declared byproducts so Ninja
+  relinks against updates. No fingerprint records, clean rebuild, alternate
+  archive substitution or community release-build changes. Log cpp-refresh-build.log
+  shows current static extension sources rebuilt before the test relinks; the next
+  focused build reused Cargo in0.13s and compiled only the two changed test sources.
+- Full CTest:16/24 suites PASS,8 FAIL (../logs/cpp-tests.log). Two pure registration
+  ownership/output suites were missing configured pins; fixtures now provision
+  public test keys without network I/O, and a new case confirms a fresh connection
+  cannot inherit another connection's pin. Both affected suites now PASS
+  (../logs/cpp-registration-tests.log); do not rerun unchanged passing suites.
+- Six remaining failures: BoilstreamCatalogVersionTests, SessionMemoryOnly,
+  AuthDiagnostics_debug, AuthDiagnostics_release, RegistrationHttp and
+  RequiredResponseSignature. These still assume old header/signature transport
+  or fixtures; replace their protocol setup/oracles with meaningful body-protocol
+  coverage, preserving policy/lifecycle/diagnostic assertions. Do not skip them.
+- Private candidate b15a64d36 pushed clean, selecting public production client701e8fc.
+  Its16 transport/OPAQUE cases, strict Clippy and26-lockfile audit PASS. Loaded
+  actual native test and real-router revocation test PASS as recorded above.
+- Disk free23GiB internal,1.2TiB external. All commands in this checkpoint terminal.
+  No full browser/release-green claim; remaining work and final reviews unchanged.

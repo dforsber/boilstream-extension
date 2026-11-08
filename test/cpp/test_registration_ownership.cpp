@@ -1,6 +1,7 @@
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 #include "boilstream_secret_storage.hpp"
+#include "boilstream_protocol.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -25,6 +26,7 @@ static void Clear(RestApiSecretStorage &s, ClientContext &) {
 }
 #else
 static void Store(RestApiSecretStorage &s, ClientContext &c, const string &token) {
+	BoilstreamProtocol::Configure(c, "https://same.invalid", "0900000000000000000000000000000000000000000000000000000000000000");
 	auto a = s.BeginRegistration(c, "https://same.invalid", "same@example.com");
 	s.StoreRegistrationState(c, a.generation, token, "otpauth://synthetic");
 	s.EndRegistrationOperation(c, a.generation);
@@ -50,6 +52,15 @@ struct Fixture {
 	DuckDB db {nullptr, &cfg};
 	RestApiSecretStorage storage {*db.instance, ""};
 	Connection a {db}, b {db};
+	Fixture() {
+		// Lifecycle tests provision public pins only; no server or authenticated
+		// session is substituted by these pending-enrollment fixtures.
+		for (auto context : {a.context.get(), b.context.get()}) {
+			for (const auto &authority : {"https://same.invalid", "https://other.invalid"}) {
+				BoilstreamProtocol::Configure(*context, authority, "0900000000000000000000000000000000000000000000000000000000000000");
+			}
+		}
+	}
 };
 template <class F>
 static void Reject(F fn) {
@@ -88,6 +99,13 @@ int main() {
 			std::cout << "CASE " << name << " FAIL\n";
 		}
 	};
+	test("pins_are_required_and_connection_owned", [] {
+		Fixture f;
+		Connection unconfigured(f.db);
+		Reject([&] {
+			f.storage.BeginRegistration(*unconfigured.context, "https://same.invalid", "same@example.com");
+		});
+	});
 	test("owner_can_read_pending_registration", [] {
 		Fixture f;
 		Store(f.storage, *f.a.context, "synthetic-a");

@@ -60,6 +60,8 @@ struct Fixture {
 		Require(storage);
 	}
 	BoilstreamRegistrationSnapshot Begin(Connection &c) {
+		// Public test pin enables pending-enrollment ownership testing without I/O.
+		BoilstreamProtocol::Configure(*c.context, "https://same.invalid", "0900000000000000000000000000000000000000000000000000000000000000");
 		auto state = storage->BeginRegistration(*c.context, "https://same.invalid", "same@example.com");
 		if (state.totp_uri.empty())
 			storage->StoreRegistrationState(*c.context, state.generation, "synthetic-cookie",

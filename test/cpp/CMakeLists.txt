@@ -725,8 +725,22 @@ endforeach()
 # Connection state now owns the real protocol channel rather than header-only
 # signing counters. Compile its adapter in every test that compiles storage or
 # directly exercises the connection state; never substitute a stale archive.
+# The host is a separate CMake tree. File paths alone do not teach this tree how
+# to refresh its static/shared libraries after an extension source change. Run
+# its ordinary incremental build before compiling/linking any test. BYPRODUCTS
+# makes Ninja re-evaluate the link inputs after that build, including Rust.
+add_custom_target(
+  boilstream_native_test_dependencies
+  COMMAND ${CMAKE_COMMAND} --build "${EXTENSION_BUILD_DIR}" --parallel 2
+  BYPRODUCTS ${DUCKDB_LIBS} "${BOILSTREAM_AUTH_TEST_LIBRARY}" "${RUST_LIB_PATH}"
+  USES_TERMINAL
+  VERBATIM)
 get_property(boilstream_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS boilstream_test_targets)
+  get_target_property(test_type ${target} TYPE)
+  if(test_type STREQUAL "EXECUTABLE")
+    add_dependencies(${target} boilstream_native_test_dependencies)
+  endif()
   get_target_property(test_sources ${target} SOURCES)
   if("${test_sources}" MATCHES "boilstream_secret_storage\\.cpp" OR
      target STREQUAL "boilstream_connection_state_test" OR
