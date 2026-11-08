@@ -1,6 +1,7 @@
 #pragma once
 #include "boilstream_json.hpp"
 #include "boilstream_registration_state.hpp"
+#include <chrono>
 #include <cstring>
 #include <memory>
 
@@ -33,7 +34,9 @@ public:
 	}
 	void RequireSuccess() const {
 		auto value = Field("success");
-		if (!duckdb_yyjson::yyjson_is_bool(value) || !duckdb_yyjson::yyjson_get_bool(value)) {
+		auto error = Field("error");
+		if (!duckdb_yyjson::yyjson_is_bool(value) || !duckdb_yyjson::yyjson_get_bool(value) ||
+		    (error && !duckdb_yyjson::yyjson_is_null(error))) {
 			throw IOException("Authentication operation was not successful");
 		}
 	}
@@ -53,6 +56,35 @@ public:
 		auto value = Field(name);
 		ValidateText(value, limit);
 		return string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value));
+	}
+	string OpaqueAccessToken() const {
+		auto token = Text("access_token", 64);
+		boilstream::WipeOnExit wipe_token(token);
+		if (token.size() != 64 || token.find_first_not_of("0123456789abcdef") != string::npos) {
+			throw IOException("Invalid authentication access token");
+		}
+		return string(token);
+	}
+	// The server contract uses Unix seconds. Reject missing, ambiguous, expired
+	// or unrepresentable values instead of inventing a local session lifetime.
+	std::chrono::system_clock::time_point SessionExpiry(std::chrono::system_clock::time_point now) const {
+		using std::chrono::duration_cast;
+		using std::chrono::seconds;
+		using std::chrono::system_clock;
+		auto value = Field("expires_at");
+		if (!duckdb_yyjson::yyjson_is_uint(value)) {
+			throw IOException("Invalid authentication expiry");
+		}
+		const auto count = duckdb_yyjson::yyjson_get_uint(value);
+		const auto max_seconds = duration_cast<seconds>(system_clock::duration::max()).count();
+		if (count == 0 || count > static_cast<uint64_t>(max_seconds)) {
+			throw IOException("Invalid authentication expiry");
+		}
+		const auto expiry = system_clock::time_point(duration_cast<system_clock::duration>(seconds(count)));
+		if (expiry <= now) {
+			throw IOException("Authentication response has expired");
+		}
+		return expiry;
 	}
 	unique_ptr<BoilstreamRegistrationOutput> RecoveryCodes() const {
 		RequireSuccess();

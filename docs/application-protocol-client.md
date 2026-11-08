@@ -33,6 +33,15 @@ cannot restore an invalidated or closed connection. Existing generation checks
 protect identity publication.
 Pin changes apply to new logins, not silently to active flows.
 
+OPAQUE login requires an explicit successful, unambiguous response at both steps.
+The start response must contain a nonempty credential response and state ID. The
+finish response must contain a 64-character lowercase hexadecimal access token,
+a nonempty region, and a future, representable Unix-seconds expiry. Missing,
+duplicate, mistyped or expired fields fail authentication; the client never
+invents a session lifetime. The new session remains private until validation and
+connection-generation checks finish, so failed login or renewal cannot overwrite
+an existing connection's identity.
+
 This is a breaking integration candidate, not a release-ready patch. Native and
 DuckDB 2.0 browser/pthread end-to-end qualification, harness updates and release
 gates remain in TASKS.md. The SPA and direct server-side DuckDB integration are

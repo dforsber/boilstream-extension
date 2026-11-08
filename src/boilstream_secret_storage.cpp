@@ -1,3 +1,4 @@
+#include "boilstream_auth_response.hpp"
 #include "boilstream_security.hpp"
 #include "boilstream_json.hpp"
 #include "boilstream_credential_stream.hpp"
@@ -477,6 +478,7 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 
 	// Convert hash to lowercase hex string (64 characters)
 	string user_id;
+	boilstream::WipeOnExit wipe_user_id(user_id);
 	user_id.reserve(64);
 	const char *hex_chars = "0123456789abcdef";
 	for (size_t i = 0; i < 32; i++) {
@@ -515,58 +517,23 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 		BoilstreamRethrowSafe("OPAQUE login failed (server request)", e);
 	}
 
-	// Parse server response
-	boilstream::JsonArena response_doc_arena;
-	auto response_doc = response_doc_arena.Read(response.c_str(), response.size(), 0);
-	if (!response_doc) {
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: Invalid JSON response from server");
-	}
-
-	auto response_root = yyjson_doc_get_root(response_doc);
-	auto credential_response_val = yyjson_obj_get(response_root, "credential_response");
-	if (!credential_response_val || !yyjson_is_str(credential_response_val)) {
-		yyjson_doc_free(response_doc);
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: No credential_response in server response");
-	}
-
-	string credential_response_base64 = SafeGetStr(credential_response_val);
-	if (credential_response_base64.empty()) {
-		yyjson_doc_free(response_doc);
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: credential_response is empty");
-	}
-
-	// Extract state_id if present (required by server for stateful OPAQUE)
-	string state_id = SafeGetStr(yyjson_obj_get(response_root, "state_id"));
-	if (state_id.empty()) {
-		BOILSTREAM_LOG("PerformOpaqueLogin: WARNING - state_id not found in server response");
-	}
-
-	yyjson_doc_free(response_doc);
+	// The verified body must still satisfy the OPAQUE application schema.
+	BoilstreamAuthResponse start_response(response);
+	start_response.RequireSuccess();
+	string credential_response_base64 = start_response.Text("credential_response", 64ULL * 1024);
+	boilstream::WipeOnExit wipe_credential_response(credential_response_base64);
+	string state_id = start_response.Text("state_id");
+	boilstream::WipeOnExit wipe_state_id(state_id);
 
 	// Step 3: Client finishes login
 	auto login_finish = OpaqueClientWrapper::LoginFinish(owned_login_state.release(), // consumed by this call
 	                                                     credential_response_base64);
 	BOILSTREAM_LOG("PerformOpaqueLogin: credential finalization generated");
 
-	// Decode session_key and export_key from base64
+	// Keep the new key private until the server confirms authentication. The
+	// installation-pinned channel already protects the finalization exchange.
 	auto session_key_decoded = Blob::FromBase64(string_t(login_finish.session_key_base64));
 	boilstream::WipeOnExit wipe_session_key_decoded(session_key_decoded);
-	auto export_key_decoded = Blob::FromBase64(string_t(login_finish.export_key_base64));
-	boilstream::WipeOnExit wipe_export_key_decoded(export_key_decoded);
-
-	// Store session_key early so HttpPost can use it for response decryption
-	// The server sends encrypted responses during login-finish
-	// We're still in the is_exchanging=true state, so other operations are blocked
-	{
-		lock_guard<mutex> lock(conn_state.session_lock);
-		conn_state.session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
-	}
 
 	// Step 4: Send CredentialFinalization to server
 	string finalize_url = url + "/auth/api/opaque-login-finish";
@@ -576,14 +543,7 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 	auto final_obj = yyjson_mut_obj(final_doc);
 	yyjson_mut_doc_set_root(final_doc, final_obj);
 
-	// Add state_id if it was provided by server (required for stateful OPAQUE)
-
-	if (!state_id.empty()) {
-		yyjson_mut_obj_add_strncpy(final_doc, final_obj, "state_id", state_id.data(), state_id.size());
-		BOILSTREAM_LOG("PerformOpaqueLogin: Added state_id to finalization request");
-	} else {
-		BOILSTREAM_LOG("PerformOpaqueLogin: ERROR - state_id is EMPTY, not adding to request");
-	}
+	yyjson_mut_obj_add_strncpy(final_doc, final_obj, "state_id", state_id.data(), state_id.size());
 
 	yyjson_mut_obj_add_strcpy(final_doc, final_obj, "credential_finalization",
 	                          login_finish.credential_finalization_base64.c_str());
@@ -607,96 +567,12 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 		BoilstreamRethrowSafe("OPAQUE login failed (finalization)", e);
 	}
 
-	// Parse finalization response (contains access_token and expires_at)
-	boilstream::JsonArena final_response_doc_arena;
-	auto final_response_doc = final_response_doc_arena.Read(final_response.c_str(), final_response.size(), 0);
-	if (!final_response_doc) {
-		lock_guard<mutex> lock(conn_state.session_lock);
-		BoilstreamConnectionState::SecureZeroVector(conn_state.session_key);
-		conn_state.session_key.clear();
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: Invalid finalization response from server (JSON parse error)");
-	}
-
-	auto final_response_root = yyjson_doc_get_root(final_response_doc);
-
-	// Check if response indicates an error (success=false or error field present)
-	auto success_val = yyjson_obj_get(final_response_root, "success");
-	auto error_val = yyjson_obj_get(final_response_root, "error");
-
-	if ((success_val && yyjson_is_bool(success_val) && !yyjson_get_bool(success_val)) ||
-	    (error_val && yyjson_is_str(error_val))) {
-		yyjson_doc_free(final_response_doc);
-		lock_guard<mutex> lock(conn_state.session_lock);
-		BoilstreamConnectionState::SecureZeroVector(conn_state.session_key);
-		conn_state.session_key.clear();
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: server rejected authentication");
-	}
-
-	auto access_token_val = yyjson_obj_get(final_response_root, "access_token");
-	if (!access_token_val || !yyjson_is_str(access_token_val)) {
-		yyjson_doc_free(final_response_doc);
-		lock_guard<mutex> lock(conn_state.session_lock);
-		BoilstreamConnectionState::SecureZeroVector(conn_state.session_key);
-		conn_state.session_key.clear();
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: No access_token in finalization response");
-	}
-
-	string new_access_token = SafeGetStr(access_token_val);
+	BoilstreamAuthResponse finalization(final_response);
+	finalization.RequireSuccess();
+	string new_access_token = finalization.OpaqueAccessToken();
 	boilstream::WipeOnExit wipe_new_access_token(new_access_token);
-
-	// Validate access_token format per SECURITY_SPECIFICATION.md:1309
-	// Must be exactly 64 lowercase hexadecimal characters
-	if (new_access_token.length() != 64) {
-		yyjson_doc_free(final_response_doc);
-		lock_guard<mutex> lock(conn_state.session_lock);
-		BoilstreamConnectionState::SecureZeroVector(conn_state.session_key);
-		conn_state.session_key.clear();
-		conn_state.is_exchanging = false;
-		throw IOException("OPAQUE login failed: Invalid access_token format - must be 64 characters (got " +
-		                  std::to_string(new_access_token.length()) + ")");
-	}
-
-	// Validate all characters are lowercase hexadecimal
-	for (size_t i = 0; i < new_access_token.length(); i++) {
-		char c = new_access_token[i];
-		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-			yyjson_doc_free(final_response_doc);
-			lock_guard<mutex> lock(conn_state.session_lock);
-			BoilstreamConnectionState::SecureZeroVector(conn_state.session_key);
-			conn_state.session_key.clear();
-			conn_state.is_exchanging = false;
-			throw IOException("OPAQUE login failed: Invalid access_token format - must be lowercase hexadecimal");
-		}
-	}
-
-	// Extract expires_at
-	auto expires_val = yyjson_obj_get(final_response_root, "expires_at");
-	std::chrono::system_clock::time_point new_expires_at;
-	if (expires_val && yyjson_is_int(expires_val)) {
-		auto expires_timestamp = yyjson_get_int(expires_val);
-		new_expires_at = std::chrono::system_clock::from_time_t(expires_timestamp);
-	} else if (expires_val && yyjson_is_str(expires_val)) {
-		string expires_str = SafeGetStr(expires_val);
-		if (!expires_str.empty()) {
-			new_expires_at = ParseExpiresAt(expires_str);
-		} else {
-			new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
-		}
-	} else {
-		new_expires_at = std::chrono::system_clock::now() + std::chrono::hours(8);
-	}
-
-	// Extract region (required - server must provide this)
-	string new_region = SafeGetStr(yyjson_obj_get(final_response_root, "region"));
-	if (new_region.empty()) {
-		yyjson_doc_free(final_response_doc);
-		throw IOException("PerformOpaqueLogin: Server response missing required 'region' field");
-	}
-
-	yyjson_doc_free(final_response_doc);
+	const auto new_expires_at = finalization.SessionExpiry(std::chrono::system_clock::now());
+	string new_region = finalization.Text("region");
 
 	// Store session state atomically
 	{
@@ -727,17 +603,8 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 		conn_state.is_exchanging = false;
 	}
 
-	// Server capability permits in-memory resumption, never local persistence.
-	bool resumption_enabled = false;
-	auto header_map = ExtractBoilstreamHeaders(final_response_headers);
-	auto resumption_it = header_map.find("x-boilstream-session-resumption");
-	if (resumption_it != header_map.end()) {
-		string resumption_value = resumption_it->second;
-		std::transform(resumption_value.begin(), resumption_value.end(), resumption_value.begin(), ::tolower);
-		resumption_enabled = (resumption_value == "enabled");
-	}
-
-	return resumption_enabled;
+	// These synthetic headers contain only metadata from the verified body.
+	return final_response_headers.GetHeaderValue("X-Boilstream-Session-Resumption") == "enabled";
 }
 
 // ClientContext retains its database until after registered state destruction,

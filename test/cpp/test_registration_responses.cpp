@@ -59,6 +59,68 @@ int main() {
 			Reject([&] { BoilstreamAuthResponse(prefix + "\"" + string(4097, 'a') + "\"}").Text(field.c_str()); });
 		}
 	});
+	test("success_rejects_conflicting_and_duplicate_error_fields", [] {
+		BoilstreamAuthResponse(R"({"success":true,"error":null})").RequireSuccess();
+		for (const string error : {"false", "0", "[]", "{}", "\"\"", "\"private_marker_A7\""}) {
+			Reject([&] { BoilstreamAuthResponse("{\"success\":true,\"error\":" + error + "}").RequireSuccess(); });
+		}
+		Reject([] { BoilstreamAuthResponse(R"({"success":true,"error":null,"error":null})").RequireSuccess(); });
+	});
+	test("opaque_start_and_region_require_bounded_unambiguous_text", [] {
+		for (const string field : {"credential_response", "state_id", "region"}) {
+			const size_t limit = field == "credential_response" ? 64 * 1024 : 4096;
+			const auto prefix = "{\"" + field + "\":";
+			for (const string value : {"null", "false", "1", "[]", "{}", "\"\"", "\"private_marker_A7\\u0000tail\"",
+			                           "\"private_marker_A7\\n\""}) {
+				Reject([&] { BoilstreamAuthResponse(prefix + value + "}").Text(field.c_str(), limit); });
+			}
+			Reject(
+			    [&] { BoilstreamAuthResponse(prefix + "\"a\",\"" + field + "\":\"b\"}").Text(field.c_str(), limit); });
+			Reject([&] { BoilstreamAuthResponse("{}").Text(field.c_str(), limit); });
+			Require(
+			    BoilstreamAuthResponse(prefix + "\"" + string(limit, 'a') + "\"}").Text(field.c_str(), limit).size() ==
+			    limit);
+			Reject([&] {
+				BoilstreamAuthResponse(prefix + "\"" + string(limit + 1, 'a') + "\"}").Text(field.c_str(), limit);
+			});
+		}
+	});
+	test("opaque_access_token_requires_exact_lowercase_hex", [] {
+		const auto token = string(64, 'a');
+		Require(BoilstreamAuthResponse("{\"access_token\":\"" + token + "\"}").OpaqueAccessToken() == token);
+		Reject([] { BoilstreamAuthResponse("{}").OpaqueAccessToken(); });
+		for (const string value : {"null", "true", "64", "[]", "{}", "\"\"", "\"private_marker_A7\\u0000\""}) {
+			Reject([&] { BoilstreamAuthResponse("{\"access_token\":" + value + "}").OpaqueAccessToken(); });
+		}
+		for (const string value : {string(63, 'a'), string(65, 'a'), string(64, 'A'), string(63, 'a') + "g"}) {
+			Reject([&] { BoilstreamAuthResponse("{\"access_token\":\"" + value + "\"}").OpaqueAccessToken(); });
+		}
+		Reject([&] {
+			BoilstreamAuthResponse("{\"access_token\":\"" + token + "\",\"access_token\":\"" + token + "\"}")
+			    .OpaqueAccessToken();
+		});
+	});
+	test("opaque_expiry_requires_future_representable_unix_seconds", [] {
+		using namespace std::chrono;
+		const auto now = system_clock::time_point(seconds(2000000000));
+		const auto max_seconds = duration_cast<seconds>(system_clock::duration::max()).count();
+		auto expiry = [&](const string &value) {
+			return BoilstreamAuthResponse("{\"expires_at\":" + value + "}").SessionExpiry(now);
+		};
+		Require(expiry("2000000001") == now + seconds(1));
+		// Do not truncate Unix seconds at the signed 32-bit boundary in 2038.
+		Require(expiry("2200000000") == system_clock::time_point(seconds(2200000000LL)));
+		Require(expiry(std::to_string(max_seconds)) == system_clock::time_point(seconds(max_seconds)));
+		Reject([&] { expiry(std::to_string(max_seconds + 1)); });
+		for (const string value :
+		     {"null", "true", "[]", "{}", "\"\"", "\"2200000000\"", "\"private_marker_A7\"", "-1", "0", "1999999999",
+		      "2000000000", "2200000000.0", "18446744073709551615", "18446744073709551616", "9223372036854775807"}) {
+			Reject([&] { expiry(value); });
+		}
+		Reject([&] { BoilstreamAuthResponse("{}").SessionExpiry(now); });
+		Reject(
+		    [&] { BoilstreamAuthResponse(R"({"expires_at":2200000000,"expires_at":2300000000})").SessionExpiry(now); });
+	});
 	test("session_cookie_has_exact_name_and_bounded_cookie_octets", [] {
 		Require(BoilstreamSessionCookie("session=abc-DEF_123; HttpOnly; Path=/auth; Secure") == "abc-DEF_123");
 		Require(BoilstreamSessionCookie("session=abc") == "abc");
