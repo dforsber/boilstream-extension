@@ -100,46 +100,53 @@ fn exchange(password: &[u8], tamper: bool, old_record: bool) {
         peer.message("enroll-v3", registered)
     } else {
         let mut state = ptr::null_mut();
-        let start = opaque_client_registration_start(
-            registered.as_ptr().cast(),
-            registered.len(),
-            &mut state,
-        );
+        let start = unsafe {
+            opaque_client_registration_start(
+                registered.as_ptr().cast(),
+                registered.len(),
+                &mut state,
+            )
+        };
         assert!(matches!(start.error, OpaqueError::Success));
         let response = peer.message("register", bytes(&start.buffer));
-        opaque_free_buffer(start.buffer);
+        unsafe { opaque_free_buffer(start.buffer) };
         let mut upload = empty();
         assert!(matches!(
-            opaque_client_registration_finish(
-                state,
-                response.as_ptr(),
-                response.len(),
-                &mut upload,
-                &mut export
-            ),
+            unsafe {
+                opaque_client_registration_finish(
+                    state,
+                    response.as_ptr(),
+                    response.len(),
+                    &mut upload,
+                    &mut export,
+                )
+            },
             OpaqueError::Success
         ));
         assert_eq!(peer.request("save", bytes(&upload))["saved"], true);
-        opaque_free_buffer(upload);
+        unsafe { opaque_free_buffer(upload) };
         bytes(&export).to_vec()
     };
     let mut login = ptr::null_mut();
-    let start = opaque_client_login_start(password.as_ptr().cast(), password.len(), &mut login);
+    let start =
+        unsafe { opaque_client_login_start(password.as_ptr().cast(), password.len(), &mut login) };
     assert!(matches!(start.error, OpaqueError::Success));
     let mut response = peer.message("login", bytes(&start.buffer));
-    opaque_free_buffer(start.buffer);
+    unsafe { opaque_free_buffer(start.buffer) };
     if tamper {
         *response.last_mut().unwrap() ^= 1;
     }
     let (mut finalization, mut session, mut login_export) = (empty(), empty(), empty());
-    let result = opaque_client_login_finish(
-        login,
-        response.as_ptr(),
-        response.len(),
-        &mut finalization,
-        &mut session,
-        &mut login_export,
-    );
+    let result = unsafe {
+        opaque_client_login_finish(
+            login,
+            response.as_ptr(),
+            response.len(),
+            &mut finalization,
+            &mut session,
+            &mut login_export,
+        )
+    };
     if password != registered || tamper {
         assert!(matches!(result, OpaqueError::ProtocolError));
         for b in [&finalization, &session, &login_export] {
@@ -157,7 +164,7 @@ fn exchange(password: &[u8], tamper: bool, old_record: bool) {
         assert_eq!(session.len, 64);
     }
     for b in [finalization, session, login_export, export] {
-        opaque_free_buffer(b);
+        unsafe { opaque_free_buffer(b) };
     }
 }
 #[test]

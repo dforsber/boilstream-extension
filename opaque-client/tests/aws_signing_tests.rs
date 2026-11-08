@@ -16,20 +16,22 @@ fn test_aws_build_canonical_request_empty_payload() {
     let headers = "x-boilstream-date:20251009T120000Z\n";
     let signed_headers = "x-boilstream-date";
 
-    let result = aws_build_canonical_request(
-        method.as_ptr() as *const std::os::raw::c_char,
-        method.len(),
-        uri.as_ptr() as *const std::os::raw::c_char,
-        uri.len(),
-        query.as_ptr() as *const std::os::raw::c_char,
-        query.len(),
-        headers.as_ptr() as *const std::os::raw::c_char,
-        headers.len(),
-        signed_headers.as_ptr() as *const std::os::raw::c_char,
-        signed_headers.len(),
-        std::ptr::null(),
-        0,
-    );
+    let result = unsafe {
+        aws_build_canonical_request(
+            method.as_ptr() as *const std::os::raw::c_char,
+            method.len(),
+            uri.as_ptr() as *const std::os::raw::c_char,
+            uri.len(),
+            query.as_ptr() as *const std::os::raw::c_char,
+            query.len(),
+            headers.as_ptr() as *const std::os::raw::c_char,
+            headers.len(),
+            signed_headers.as_ptr() as *const std::os::raw::c_char,
+            signed_headers.len(),
+            std::ptr::null(),
+            0,
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::Success as i32);
     assert!(!result.buffer.data.is_null());
@@ -48,7 +50,7 @@ fn test_aws_build_canonical_request_empty_payload() {
     assert!(canonical_request.contains("x-boilstream-date:20251009T120000Z\n"));
 
     // Cleanup
-    opaque_free_buffer(result.buffer);
+    unsafe { opaque_free_buffer(result.buffer) };
 }
 
 #[test]
@@ -61,20 +63,22 @@ fn test_aws_build_canonical_request_with_payload() {
     let signed_headers = "x-boilstream-date;x-boilstream-sequence";
     let payload = b"{\"test\":\"data\"}";
 
-    let result = aws_build_canonical_request(
-        method.as_ptr() as *const std::os::raw::c_char,
-        method.len(),
-        uri.as_ptr() as *const std::os::raw::c_char,
-        uri.len(),
-        query.as_ptr() as *const std::os::raw::c_char,
-        query.len(),
-        headers.as_ptr() as *const std::os::raw::c_char,
-        headers.len(),
-        signed_headers.as_ptr() as *const std::os::raw::c_char,
-        signed_headers.len(),
-        payload.as_ptr(),
-        payload.len(),
-    );
+    let result = unsafe {
+        aws_build_canonical_request(
+            method.as_ptr() as *const std::os::raw::c_char,
+            method.len(),
+            uri.as_ptr() as *const std::os::raw::c_char,
+            uri.len(),
+            query.as_ptr() as *const std::os::raw::c_char,
+            query.len(),
+            headers.as_ptr() as *const std::os::raw::c_char,
+            headers.len(),
+            signed_headers.as_ptr() as *const std::os::raw::c_char,
+            signed_headers.len(),
+            payload.as_ptr(),
+            payload.len(),
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::Success as i32);
     assert!(!result.buffer.data.is_null());
@@ -99,7 +103,7 @@ fn test_aws_build_canonical_request_with_payload() {
         .contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
 
     // Cleanup
-    opaque_free_buffer(result.buffer);
+    unsafe { opaque_free_buffer(result.buffer) };
 }
 
 #[test]
@@ -111,20 +115,22 @@ fn test_aws_build_canonical_request_with_query_params() {
     let headers = "x-boilstream-date:20251009T120000Z\n";
     let signed_headers = "x-boilstream-date";
 
-    let result = aws_build_canonical_request(
-        method.as_ptr() as *const std::os::raw::c_char,
-        method.len(),
-        uri.as_ptr() as *const std::os::raw::c_char,
-        uri.len(),
-        query.as_ptr() as *const std::os::raw::c_char,
-        query.len(),
-        headers.as_ptr() as *const std::os::raw::c_char,
-        headers.len(),
-        signed_headers.as_ptr() as *const std::os::raw::c_char,
-        signed_headers.len(),
-        std::ptr::null(),
-        0,
-    );
+    let result = unsafe {
+        aws_build_canonical_request(
+            method.as_ptr() as *const std::os::raw::c_char,
+            method.len(),
+            uri.as_ptr() as *const std::os::raw::c_char,
+            uri.len(),
+            query.as_ptr() as *const std::os::raw::c_char,
+            query.len(),
+            headers.as_ptr() as *const std::os::raw::c_char,
+            headers.len(),
+            signed_headers.as_ptr() as *const std::os::raw::c_char,
+            signed_headers.len(),
+            std::ptr::null(),
+            0,
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::Success as i32);
 
@@ -139,7 +145,7 @@ fn test_aws_build_canonical_request_with_query_params() {
     assert!(canonical_request.contains("filter=active&limit=10"));
 
     // Cleanup
-    opaque_free_buffer(result.buffer);
+    unsafe { opaque_free_buffer(result.buffer) };
 }
 
 #[test]
@@ -150,23 +156,25 @@ fn test_aws_derive_signing_key() {
     let region = "us-east-1";
     let service = "secrets";
 
-    let result = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date.as_ptr() as *const std::os::raw::c_char,
-        date.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let result = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date.as_ptr() as *const std::os::raw::c_char,
+            date.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::Success as i32);
     assert!(!result.buffer.data.is_null());
     assert_eq!(result.buffer.len, 32); // HMAC-SHA256 produces 32 bytes
 
     // Cleanup
-    opaque_free_buffer(result.buffer);
+    unsafe { opaque_free_buffer(result.buffer) };
 }
 
 #[test]
@@ -177,27 +185,31 @@ fn test_aws_derive_signing_key_deterministic() {
     let region = "us-east-1";
     let service = "secrets";
 
-    let result1 = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date.as_ptr() as *const std::os::raw::c_char,
-        date.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let result1 = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date.as_ptr() as *const std::os::raw::c_char,
+            date.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
 
-    let result2 = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date.as_ptr() as *const std::os::raw::c_char,
-        date.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let result2 = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date.as_ptr() as *const std::os::raw::c_char,
+            date.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
 
     assert_eq!(result1.error as i32, OpaqueError::Success as i32);
     assert_eq!(result2.error as i32, OpaqueError::Success as i32);
@@ -208,8 +220,8 @@ fn test_aws_derive_signing_key_deterministic() {
     assert_eq!(key1, key2);
 
     // Cleanup
-    opaque_free_buffer(result1.buffer);
-    opaque_free_buffer(result2.buffer);
+    unsafe { opaque_free_buffer(result1.buffer) };
+    unsafe { opaque_free_buffer(result2.buffer) };
 }
 
 #[test]
@@ -221,27 +233,31 @@ fn test_aws_derive_signing_key_different_dates() {
     let region = "us-east-1";
     let service = "secrets";
 
-    let result1 = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date1.as_ptr() as *const std::os::raw::c_char,
-        date1.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let result1 = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date1.as_ptr() as *const std::os::raw::c_char,
+            date1.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
 
-    let result2 = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date2.as_ptr() as *const std::os::raw::c_char,
-        date2.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let result2 = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date2.as_ptr() as *const std::os::raw::c_char,
+            date2.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
 
     assert_eq!(result1.error as i32, OpaqueError::Success as i32);
     assert_eq!(result2.error as i32, OpaqueError::Success as i32);
@@ -252,8 +268,8 @@ fn test_aws_derive_signing_key_different_dates() {
     assert_ne!(key1, key2);
 
     // Cleanup
-    opaque_free_buffer(result1.buffer);
-    opaque_free_buffer(result2.buffer);
+    unsafe { opaque_free_buffer(result1.buffer) };
+    unsafe { opaque_free_buffer(result2.buffer) };
 }
 
 #[test]
@@ -262,12 +278,14 @@ fn test_aws_sign_canonical_request() {
     let signing_key = b"test_signing_key_32_bytes_long!";
     let canonical_request = "POST\n/secrets\n\nx-boilstream-date:20251009T120000Z\n\nx-boilstream-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-    let result = aws_sign_canonical_request(
-        signing_key.as_ptr(),
-        signing_key.len(),
-        canonical_request.as_ptr() as *const std::os::raw::c_char,
-        canonical_request.len(),
-    );
+    let result = unsafe {
+        aws_sign_canonical_request(
+            signing_key.as_ptr(),
+            signing_key.len(),
+            canonical_request.as_ptr() as *const std::os::raw::c_char,
+            canonical_request.len(),
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::Success as i32);
     assert!(!result.buffer.data.is_null());
@@ -286,7 +304,7 @@ fn test_aws_sign_canonical_request() {
         .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
 
     // Cleanup
-    opaque_free_buffer(result.buffer);
+    unsafe { opaque_free_buffer(result.buffer) };
 }
 
 #[test]
@@ -295,19 +313,23 @@ fn test_aws_sign_canonical_request_deterministic() {
     let signing_key = b"test_signing_key_32_bytes_long!";
     let canonical_request = "GET\n/secrets\n\nx-boilstream-date:20251009T120000Z\n\nx-boilstream-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-    let result1 = aws_sign_canonical_request(
-        signing_key.as_ptr(),
-        signing_key.len(),
-        canonical_request.as_ptr() as *const std::os::raw::c_char,
-        canonical_request.len(),
-    );
+    let result1 = unsafe {
+        aws_sign_canonical_request(
+            signing_key.as_ptr(),
+            signing_key.len(),
+            canonical_request.as_ptr() as *const std::os::raw::c_char,
+            canonical_request.len(),
+        )
+    };
 
-    let result2 = aws_sign_canonical_request(
-        signing_key.as_ptr(),
-        signing_key.len(),
-        canonical_request.as_ptr() as *const std::os::raw::c_char,
-        canonical_request.len(),
-    );
+    let result2 = unsafe {
+        aws_sign_canonical_request(
+            signing_key.as_ptr(),
+            signing_key.len(),
+            canonical_request.as_ptr() as *const std::os::raw::c_char,
+            canonical_request.len(),
+        )
+    };
 
     assert_eq!(result1.error as i32, OpaqueError::Success as i32);
     assert_eq!(result2.error as i32, OpaqueError::Success as i32);
@@ -318,8 +340,8 @@ fn test_aws_sign_canonical_request_deterministic() {
     assert_eq!(sig1, sig2);
 
     // Cleanup
-    opaque_free_buffer(result1.buffer);
-    opaque_free_buffer(result2.buffer);
+    unsafe { opaque_free_buffer(result1.buffer) };
+    unsafe { opaque_free_buffer(result2.buffer) };
 }
 
 #[test]
@@ -331,16 +353,18 @@ fn test_aws_full_signing_flow() {
     let service = "secrets";
 
     // Step 1: Derive signing key
-    let key_result = aws_derive_signing_key(
-        base_key.as_ptr(),
-        base_key.len(),
-        date.as_ptr() as *const std::os::raw::c_char,
-        date.len(),
-        region.as_ptr() as *const std::os::raw::c_char,
-        region.len(),
-        service.as_ptr() as *const std::os::raw::c_char,
-        service.len(),
-    );
+    let key_result = unsafe {
+        aws_derive_signing_key(
+            base_key.as_ptr(),
+            base_key.len(),
+            date.as_ptr() as *const std::os::raw::c_char,
+            date.len(),
+            region.as_ptr() as *const std::os::raw::c_char,
+            region.len(),
+            service.as_ptr() as *const std::os::raw::c_char,
+            service.len(),
+        )
+    };
     assert_eq!(key_result.error as i32, OpaqueError::Success as i32);
 
     // Step 2: Build canonical request
@@ -351,29 +375,33 @@ fn test_aws_full_signing_flow() {
     let signed_headers = "x-boilstream-date";
     let payload = b"{\"name\":\"test\"}";
 
-    let canonical_result = aws_build_canonical_request(
-        method.as_ptr() as *const std::os::raw::c_char,
-        method.len(),
-        uri.as_ptr() as *const std::os::raw::c_char,
-        uri.len(),
-        query.as_ptr() as *const std::os::raw::c_char,
-        query.len(),
-        headers.as_ptr() as *const std::os::raw::c_char,
-        headers.len(),
-        signed_headers.as_ptr() as *const std::os::raw::c_char,
-        signed_headers.len(),
-        payload.as_ptr(),
-        payload.len(),
-    );
+    let canonical_result = unsafe {
+        aws_build_canonical_request(
+            method.as_ptr() as *const std::os::raw::c_char,
+            method.len(),
+            uri.as_ptr() as *const std::os::raw::c_char,
+            uri.len(),
+            query.as_ptr() as *const std::os::raw::c_char,
+            query.len(),
+            headers.as_ptr() as *const std::os::raw::c_char,
+            headers.len(),
+            signed_headers.as_ptr() as *const std::os::raw::c_char,
+            signed_headers.len(),
+            payload.as_ptr(),
+            payload.len(),
+        )
+    };
     assert_eq!(canonical_result.error as i32, OpaqueError::Success as i32);
 
     // Step 3: Sign the canonical request
-    let sig_result = aws_sign_canonical_request(
-        key_result.buffer.data,
-        key_result.buffer.len,
-        canonical_result.buffer.data as *const std::os::raw::c_char,
-        canonical_result.buffer.len,
-    );
+    let sig_result = unsafe {
+        aws_sign_canonical_request(
+            key_result.buffer.data,
+            key_result.buffer.len,
+            canonical_result.buffer.data as *const std::os::raw::c_char,
+            canonical_result.buffer.len,
+        )
+    };
     assert_eq!(sig_result.error as i32, OpaqueError::Success as i32);
 
     let signature = unsafe {
@@ -388,28 +416,30 @@ fn test_aws_full_signing_flow() {
     assert!(signature.ends_with('=')); // base64 padding
 
     // Cleanup
-    opaque_free_buffer(key_result.buffer);
-    opaque_free_buffer(canonical_result.buffer);
-    opaque_free_buffer(sig_result.buffer);
+    unsafe { opaque_free_buffer(key_result.buffer) };
+    unsafe { opaque_free_buffer(canonical_result.buffer) };
+    unsafe { opaque_free_buffer(sig_result.buffer) };
 }
 
 #[test]
 fn test_null_pointer_handling() {
     // Test that null pointers are handled gracefully
-    let result = aws_build_canonical_request(
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-    );
+    let result = unsafe {
+        aws_build_canonical_request(
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
 
     assert_eq!(result.error as i32, OpaqueError::InvalidInput as i32);
     assert!(result.buffer.data.is_null());

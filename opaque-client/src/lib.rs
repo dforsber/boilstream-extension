@@ -11,34 +11,8 @@ use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
 // Import registration module
-mod registration;
 pub mod application_protocol;
-
-#[cfg(test)]
-mod buffer_tests {
-    use super::*;
-
-    // Miri checks that the allocator layout used by opaque_free_buffer matches
-    // the original allocation, including when the input Vec has spare capacity.
-    #[test]
-    fn ffi_buffer_frees_spare_capacity() {
-        let mut bytes = Vec::with_capacity(128);
-        bytes.extend_from_slice(b"secret");
-        let buffer = OpaqueBuffer::new(bytes);
-        assert_eq!(
-            unsafe { slice::from_raw_parts(buffer.data, buffer.len) },
-            b"secret"
-        );
-        opaque_free_buffer(buffer);
-    }
-
-    #[test]
-    fn ffi_buffer_frees_empty_allocations() {
-        opaque_free_buffer(OpaqueBuffer::new(Vec::with_capacity(128)));
-        opaque_free_buffer(OpaqueBuffer::new(Vec::new()));
-        opaque_free_buffer(OpaqueBuffer::empty());
-    }
-}
+mod registration;
 
 // Platform-specific imports
 use std::os::raw::c_char;
@@ -138,8 +112,13 @@ pub struct LoginState {
 
 /// Initialize OPAQUE client registration (step 1)
 /// Returns RegistrationRequest serialized + state handle
+///
+/// # Safety
+/// `password` must reference `password_len` readable bytes. `state_out` must be
+/// writable and must not alias input. On success, transfer the returned state
+/// exactly once to registration_finish or opaque_free_registration_state.
 #[no_mangle]
-pub extern "C" fn opaque_client_registration_start(
+pub unsafe extern "C" fn opaque_client_registration_start(
     password: *const c_char,
     password_len: usize,
     state_out: *mut *mut RegistrationState,
@@ -175,8 +154,14 @@ pub extern "C" fn opaque_client_registration_start(
 
 /// Finish OPAQUE client registration (step 2)
 /// Takes RegistrationResponse from server, returns RegistrationUpload + export_key
+///
+/// # Safety
+/// `state` must be an exclusively owned live registration state from this library.
+/// Response input must reference its stated readable length; outputs must be
+/// distinct writable OpaqueBuffer slots, not aliasing any input. Once all
+/// pointers pass null validation, this consumes state on success or failure.
 #[no_mangle]
-pub extern "C" fn opaque_client_registration_finish(
+pub unsafe extern "C" fn opaque_client_registration_finish(
     state: *mut RegistrationState,
     registration_response: *const u8,
     registration_response_len: usize,
@@ -233,8 +218,13 @@ pub extern "C" fn opaque_client_registration_finish(
 
 /// Initialize OPAQUE client login (step 1)
 /// Returns CredentialRequest serialized + state handle
+///
+/// # Safety
+/// `password` must reference `password_len` readable bytes. `state_out` must be
+/// writable and must not alias input. On success, transfer the returned state
+/// exactly once to login_finish or opaque_free_login_state.
 #[no_mangle]
-pub extern "C" fn opaque_client_login_start(
+pub unsafe extern "C" fn opaque_client_login_start(
     password: *const c_char,
     password_len: usize,
     state_out: *mut *mut LoginState,
@@ -270,8 +260,14 @@ pub extern "C" fn opaque_client_login_start(
 
 /// Finish OPAQUE client login (step 2)
 /// Takes CredentialResponse from server, returns CredentialFinalization + session_key + export_key
+///
+/// # Safety
+/// `state` must be an exclusively owned live login state from this library.
+/// Response input must reference its stated readable length; outputs must be
+/// distinct writable OpaqueBuffer slots, not aliasing any input. Once all
+/// pointers pass null validation, this consumes state on success or failure.
 #[no_mangle]
-pub extern "C" fn opaque_client_login_finish(
+pub unsafe extern "C" fn opaque_client_login_finish(
     state: *mut LoginState,
     credential_response: *const u8,
     credential_response_len: usize,
@@ -329,8 +325,13 @@ pub extern "C" fn opaque_client_login_finish(
 }
 
 /// Free a buffer allocated by the Rust library
+///
+/// # Safety
+/// A non-null buffer must be an unmodified allocation returned by this library,
+/// exclusively owned and not previously freed. No outstanding references may
+/// be used after this call. Null buffers are accepted.
 #[no_mangle]
-pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
+pub unsafe extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
     if !buffer.data.is_null() {
         unsafe {
             let mut bytes = Box::from_raw(ptr::slice_from_raw_parts_mut(buffer.data, buffer.len));
@@ -342,8 +343,12 @@ pub extern "C" fn opaque_free_buffer(buffer: OpaqueBuffer) {
 }
 
 /// Free a registration state
+///
+/// # Safety
+/// A non-null state must come from registration_start, be exclusively owned,
+/// and not have been consumed by registration_finish or previously freed.
 #[no_mangle]
-pub extern "C" fn opaque_free_registration_state(state: *mut RegistrationState) {
+pub unsafe extern "C" fn opaque_free_registration_state(state: *mut RegistrationState) {
     if !state.is_null() {
         unsafe {
             let _ = Box::from_raw(state);
@@ -353,8 +358,12 @@ pub extern "C" fn opaque_free_registration_state(state: *mut RegistrationState) 
 }
 
 /// Free a login state
+///
+/// # Safety
+/// A non-null state must come from login_start, be exclusively owned,
+/// and not have been consumed by login_finish or previously freed.
 #[no_mangle]
-pub extern "C" fn opaque_free_login_state(state: *mut LoginState) {
+pub unsafe extern "C" fn opaque_free_login_state(state: *mut LoginState) {
     if !state.is_null() {
         unsafe {
             let _ = Box::from_raw(state);
@@ -369,8 +378,12 @@ pub extern "C" fn opaque_free_login_state(state: *mut LoginState) {
 
 /// Build AWS SigV4-style canonical request
 /// Returns canonical request string that needs to be signed
+///
+/// # Safety
+/// Every non-null input pointer must reference its corresponding stated length
+/// of readable bytes for this call. Returned buffers must be freed exactly once.
 #[no_mangle]
-pub extern "C" fn aws_build_canonical_request(
+pub unsafe extern "C" fn aws_build_canonical_request(
     method: *const c_char,
     method_len: usize,
     canonical_uri: *const c_char,
@@ -462,8 +475,12 @@ pub extern "C" fn aws_build_canonical_request(
 
 /// Derive AWS-style signing key (date-scoped)
 /// Returns the final signing key for HMAC
+///
+/// # Safety
+/// Every input pointer must reference its corresponding stated length of
+/// readable bytes for this call. Returned buffers must be freed exactly once.
 #[no_mangle]
-pub extern "C" fn aws_derive_signing_key(
+pub unsafe extern "C" fn aws_derive_signing_key(
     base_signing_key: *const u8,
     base_signing_key_len: usize,
     date: *const c_char,
@@ -531,8 +548,12 @@ pub extern "C" fn aws_derive_signing_key(
 
 /// Sign canonical request with HMAC-SHA256
 /// Returns base64-encoded signature
+///
+/// # Safety
+/// Every input pointer must reference its corresponding stated length of
+/// readable bytes for this call. Returned buffers must be freed exactly once.
 #[no_mangle]
-pub extern "C" fn aws_sign_canonical_request(
+pub unsafe extern "C" fn aws_sign_canonical_request(
     signing_key: *const u8,
     signing_key_len: usize,
     canonical_request: *const c_char,
@@ -864,6 +885,10 @@ pub unsafe extern "C" fn opaque_client_hmac_sha256(
 ///
 /// # Returns
 /// 0 on success, non-zero on error
+///
+/// # Safety
+/// `session_key` must reference `session_key_len` readable bytes. `output`
+/// must reference 32 writable bytes disjoint from the input region.
 #[no_mangle]
 pub unsafe extern "C" fn opaque_client_derive_integrity_key(
     session_key: *const u8,
@@ -899,6 +924,10 @@ pub unsafe extern "C" fn opaque_client_derive_integrity_key(
 ///
 /// # Returns
 /// 0 on success, non-zero on error
+///
+/// # Safety
+/// `session_key` must reference `session_key_len` readable bytes. `output`
+/// must reference 32 writable bytes disjoint from the input region.
 #[no_mangle]
 pub unsafe extern "C" fn opaque_client_derive_encryption_key(
     session_key: *const u8,
@@ -934,6 +963,10 @@ pub unsafe extern "C" fn opaque_client_derive_encryption_key(
 ///
 /// # Returns
 /// 0 on success, non-zero on error
+///
+/// # Safety
+/// `session_key` must reference `session_key_len` readable bytes. `output`
+/// must reference 32 writable bytes disjoint from the input region.
 #[no_mangle]
 pub unsafe extern "C" fn opaque_client_derive_signing_key(
     session_key: *const u8,
@@ -969,6 +1002,10 @@ pub unsafe extern "C" fn opaque_client_derive_signing_key(
 ///
 /// # Returns
 /// 0 on success, non-zero on error
+///
+/// # Safety
+/// `session_key` must reference `session_key_len` readable bytes. `output`
+/// must reference 32 writable bytes disjoint from the input region.
 #[no_mangle]
 pub unsafe extern "C" fn opaque_client_derive_refresh_token(
     session_key: *const u8,
@@ -1013,6 +1050,10 @@ pub unsafe extern "C" fn opaque_client_derive_refresh_token(
 ///
 /// # Returns
 /// Length of plaintext on success, -1 on error (including auth tag verification failure)
+///
+/// # Safety
+/// Inputs must reference their stated readable lengths. `plaintext_out` must
+/// reference `plaintext_out_len` writable bytes, disjoint from all input regions.
 #[no_mangle]
 pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
     ciphertext_with_tag: *const u8,
@@ -1088,6 +1129,9 @@ pub unsafe extern "C" fn opaque_client_aes_gcm_decrypt(
 ///
 /// # Returns
 /// 0 on success, -1 if email is invalid
+///
+/// # Safety
+/// A non-null `email` must reference a readable NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn registration_validate_email(email: *const c_char) -> i32 {
     if email.is_null() {
@@ -1114,6 +1158,9 @@ pub unsafe extern "C" fn registration_validate_email(email: *const c_char) -> i3
 ///
 /// # Returns
 /// 0 on success, -1 if password is too weak (< 12 characters)
+///
+/// # Safety
+/// A non-null `password` must reference `password_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn registration_validate_password(
     password: *const u8,
@@ -1146,6 +1193,10 @@ pub unsafe extern "C" fn registration_validate_password(
 ///
 /// # Returns
 /// Length of URI written to buffer on success, -1 on error (buffer too small or invalid input)
+///
+/// # Safety
+/// Non-null string inputs must reference readable NUL-terminated strings.
+/// `uri_buffer` must reference `uri_buffer_len` writable bytes disjoint from inputs.
 #[no_mangle]
 pub unsafe extern "C" fn registration_build_totp_uri(
     email: *const c_char,
@@ -1196,4 +1247,30 @@ pub unsafe extern "C" fn registration_build_totp_uri(
     *(uri_buffer.add(uri_bytes.len()) as *mut u8) = 0;
 
     uri_bytes.len() as isize
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    // Miri checks that the allocator layout used by opaque_free_buffer matches
+    // the original allocation, including when the input Vec has spare capacity.
+    #[test]
+    fn ffi_buffer_frees_spare_capacity() {
+        let mut bytes = Vec::with_capacity(128);
+        bytes.extend_from_slice(b"secret");
+        let buffer = OpaqueBuffer::new(bytes);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(buffer.data, buffer.len) },
+            b"secret"
+        );
+        unsafe { opaque_free_buffer(buffer) };
+    }
+
+    #[test]
+    fn ffi_buffer_frees_empty_allocations() {
+        unsafe { opaque_free_buffer(OpaqueBuffer::new(Vec::with_capacity(128))) };
+        unsafe { opaque_free_buffer(OpaqueBuffer::new(Vec::new())) };
+        unsafe { opaque_free_buffer(OpaqueBuffer::empty()) };
+    }
 }

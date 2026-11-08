@@ -2190,6 +2190,13 @@ string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConne
 	}
 	try {
 		return conn_state.protocol->Exchange(db, "GET", url, "");
+	} catch (const BoilstreamApplicationError &e) {
+		// A verified application failure consumed this sequence normally. Keep
+		// the channel for later explicit requests; never retry the failed call.
+		if (e.InvalidatesIdentity()) {
+			conn_state.ClearSession();
+		}
+		throw;
 	} catch (...) {
 		conn_state.ClearSession();
 		throw;
@@ -2216,6 +2223,13 @@ string RestApiSecretStorage::HttpPostWithState(const string &url, const string &
 	}
 	try {
 		return conn_state.protocol->Exchange(db, "POST", url, body, "", out_headers);
+	} catch (const BoilstreamApplicationError &e) {
+		// A verified application failure consumed this sequence normally. Keep
+		// the channel for later explicit requests; never retry the failed call.
+		if (e.InvalidatesIdentity()) {
+			conn_state.ClearSession();
+		}
+		throw;
 	} catch (...) {
 		conn_state.ClearSession();
 		throw;
@@ -2232,6 +2246,13 @@ void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionSta
 	}
 	try {
 		conn_state.protocol->Exchange(db, "DELETE", url, "");
+	} catch (const BoilstreamApplicationError &e) {
+		// A verified application failure consumed this sequence normally. Keep
+		// the channel for later explicit requests; never retry the failed call.
+		if (e.InvalidatesIdentity()) {
+			conn_state.ClearSession();
+		}
+		throw;
 	} catch (...) {
 		conn_state.ClearSession();
 		throw;

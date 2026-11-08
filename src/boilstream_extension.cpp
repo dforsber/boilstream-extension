@@ -975,8 +975,14 @@ static string SetRestApiEndpoint(ClientContext &context, const FunctionParameter
 		// Continue - not critical for login success
 	}
 
+	// Optional bootstrap fetches must not turn an invalidated login into a
+	// success result (or format the cleared timestamp sentinel).
+	auto authenticated_session = storage->GetSessionForContext(context);
+	if (!authenticated_session || !authenticated_session->IsSessionTokenValid()) {
+		throw IOException("Session invalidated during bootstrap; authenticate again");
+	}
 	// Get expiration timestamp and format it
-	auto expires_at = storage->GetTokenExpiresAt(context);
+	auto expires_at = authenticated_session->GetTokenExpiresAt();
 	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 	std::tm tm_utc;
 #ifdef _WIN32
@@ -1858,8 +1864,14 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		// Continue - not critical for login success
 	}
 
+	// Optional bootstrap fetches must not turn an invalidated login into a
+	// success result (or format the cleared timestamp sentinel).
+	auto authenticated_session = storage->GetSessionForContext(context);
+	if (!authenticated_session || !authenticated_session->IsSessionTokenValid()) {
+		throw IOException("Session invalidated during bootstrap; authenticate again");
+	}
 	// Get expiration timestamp and format it
-	auto expires_at = storage->GetTokenExpiresAt(context);
+	auto expires_at = authenticated_session->GetTokenExpiresAt();
 	auto expires_time_t = std::chrono::system_clock::to_time_t(expires_at);
 	std::tm tm_utc;
 #ifdef _WIN32

@@ -241,6 +241,51 @@ void test_malformed_responses(void) {
     }
 }
 
+// Exercises the exact client archive's WASM clock/entropy and opaque-handle
+// lifecycle. Successful peer exchanges are covered by the private integration
+// harness; this public test needs no server implementation or private keys.
+void test_application_protocol(void) {
+    TEST("Pinned application protocol refuses credentials before server proof");
+    const uint8_t authority[] = "http://127.0.0.1:4200";
+    const uint8_t public_key[32] = {9}; // X25519 base point, public test input.
+    const uint8_t invalid_key[32] = {0};
+    const uint8_t request[] = "{\"method\":\"POST\",\"target\":\"/auth/api/opaque-login-start\",\"body\":\"synthetic-credential\",\"cookie\":null,\"idempotency_key\":null}";
+    ApplicationProtocol *first = NULL, *second = NULL;
+    OpaqueResult bad = bs_protocol_start(authority, sizeof(authority) - 1, invalid_key, &first);
+    ASSERT(bad.error != OPAQUE_SUCCESS && !first && !bad.buffer.data,
+           "Invalid installation key publishes no handle or handshake");
+    opaque_free_buffer(bad.buffer);
+    OpaqueResult a = bs_protocol_start(authority, sizeof(authority) - 1, public_key, &first);
+    OpaqueResult b = bs_protocol_start(authority, sizeof(authority) - 1, public_key, &second);
+    ASSERT(a.error == OPAQUE_SUCCESS && b.error == OPAQUE_SUCCESS && first && second,
+           "Pinned handshakes start with platform entropy and clock");
+    ASSERT(a.buffer.len == 70 && b.buffer.len == 70 && a.buffer.data && b.buffer.data &&
+           memcmp(a.buffer.data, "BH2.c.", 6) == 0 && memcmp(b.buffer.data, "BH2.c.", 6) == 0,
+           "Handshake uses bounded body-only wire format");
+    ASSERT(a.buffer.data && b.buffer.data && a.buffer.len == b.buffer.len &&
+           memcmp(a.buffer.data, b.buffer.data, a.buffer.len) != 0,
+           "Independent handshakes use fresh randomness");
+    opaque_free_buffer(a.buffer);
+    opaque_free_buffer(b.buffer);
+    OpaqueResult sealed = bs_protocol_seal(first, request, sizeof(request) - 1);
+    ASSERT(sealed.error != OPAQUE_SUCCESS && !sealed.buffer.data,
+           "Credentials cannot be sealed before authenticated server proof");
+    opaque_free_buffer(sealed.buffer);
+    const uint8_t forged[] = "{\"success\":true}";
+    ASSERT(bs_protocol_accept(second, forged, sizeof(forged) - 1) != OPAQUE_SUCCESS,
+           "Forged plaintext handshake is rejected");
+    sealed = bs_protocol_seal(second, request, sizeof(request) - 1);
+    ASSERT(sealed.error != OPAQUE_SUCCESS && !sealed.buffer.data,
+           "Failed handshake permanently closes the handle");
+    opaque_free_buffer(sealed.buffer);
+    OpaqueResult opened = bs_protocol_open(second, forged, sizeof(forged) - 1);
+    ASSERT(opened.error != OPAQUE_SUCCESS && !opened.buffer.data,
+           "Forged response cannot publish plaintext after failure");
+    opaque_free_buffer(opened.buffer);
+    bs_protocol_free(first);
+    bs_protocol_free(second);
+}
+
 int main() {
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  OPAQUE Client WASM FFI Test Suite                        ║\n");
@@ -258,6 +303,7 @@ int main() {
     test_determinism();
     test_signing_vector();
     test_malformed_responses();
+    test_application_protocol();
 
     // Print summary
     printf("\n╔════════════════════════════════════════════════════════════╗\n");

@@ -12,4 +12,6 @@ esac
 expected="$(field emscriptenVersion)"
 actual="$(emcc --version | sed -n '1s/.*) \([0-9][0-9.]*\).*/\1/p')"
 [[ "$actual" == "$expected" ]] || { echo "Expected Emscripten $expected; got $actual" >&2; exit 1; }
-rustup toolchain install "$toolchain" --profile minimal "${extra[@]}"
+# Provision the pinned compiler, without updating the caller's rustup installation.
+# Cargo caches may live separately from rustup (including on an external disk).
+rustup toolchain install "$toolchain" --profile minimal --no-self-update "${extra[@]}"

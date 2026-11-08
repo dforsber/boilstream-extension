@@ -217,7 +217,7 @@ string BoilstreamProtocol::Exchange(DatabaseInstance &db, const string &method, 
 	}
 	auto code = yyjson_get_uint(status);
 	if (code < 200 || code >= 300) {
-		BoilstreamThrowHttpStatus("Verified application request refused", code);
+		throw BoilstreamApplicationError(static_cast<int>(code));
 	}
 	return string(yyjson_get_str(payload), yyjson_get_len(payload));
 }

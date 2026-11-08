@@ -30,13 +30,13 @@ Evidence so far:
   pass. New FFI invalid configuration/ownership tests included. Warning-fatal
   Cargo audit of the updated102-package client lockfile and48-package protocol lockfile passes.
 - Syntax checking all3 changed C++ translation units against baseline headers passes.
-- Full standalone native build running with standard community make release,
+- Full standalone native build PASS with standard community make release,
   DuckDB d54cbbe3df17e8e5ce68312f483b4155836112aa and extension-ci-tools
   ae971e03c1840a1c6c2d81b91d1ec851f297f720 in independent source worktrees.
-  Controller14324/group14442; log ../logs/native-build.log. Do not restart unless
-  process/session observation proves it terminal. Functions session61694.
-- Strict Clippy of the whole old opaque-client exposes pre-existing unsafe public
-  FFI signatures and missing safety documentation; not suppressed or claimed green.
+  Controller14324/group14442 exited0; log ../logs/native-build.log.
+- Strict Clippy of the complete opaque-client now PASS. Raw-pointer and allocator
+  ownership APIs are explicitly unsafe for Rust callers with Safety contracts;
+  C ABI is unchanged. All37 Rust client tests pass after callsite updates.
 
 Remaining:
 1. Finish native build, resolve integration defects, test actual protocol C ABI
@@ -63,3 +63,29 @@ floors8GiB internal and50GiB external. No unrelated cleanup or process terminati
 
 Initial free24GiB internal, about1.2TiB external. The worktree parent run-local.sh
 contains environment and reserve-controller invocation. Do not use subagents.
+
+2026-11-08 follow-up evidence:
+- Loaded native DuckDB2.0 + public extension + compatible httpfs against the actual
+  private LandingServer/OPAQUE/UsersStore over plaintext loopback PASS. Autonomous
+  fixture tests missing/wrong installation pins, bootstrap login, secret create/list/
+  delete, tenant isolation and consumed-bootstrap rejection. Private source/log:
+  src/auth/application_protocol_tests.rs and ../logs/loaded-native.log in server candidate.
+- That test caught a production bug: a verified optional catalog503 erased the
+  authenticated session, then bootstrap formatted its cleared expiry. Fixed with a
+  verifier-only typed application error.401/403 and transport/crypto failures clear
+  identity; other verified refusals retain sequence state without retrying. Both login
+  entry points reject a session invalidated during optional initial fetches.
+- Exact production WASM EH Rust archive:34 C ABI assertions PASS, including new
+  protocol clock/entropy/randomization, pre-proof credential refusal and poisoning
+  after forged handshake/response. No private key or server implementation added.
+- Full WASM EH build PASS; incremental rebuild includes the application-error repair.
+  Pthread community make running (session14279, ../logs/wasm-threads-build.log).
+  EH incremental session81365, ../logs/wasm-eh-incremental.log. Inspect terminal state
+  before reusing either. Loaded browser coverage remains unfinished.
+- WASM setup now provisions the pinned compiler with --no-self-update: rustup must
+  not try to update itself in a separately configured Cargo cache. Native strict
+  Clippy/test logs: ../logs/ffi-clippy.log and ../logs/ffi-tests.log.
+- Scope review: pointer ownership contracts match actual consuming/free operations;
+  verified application failures cannot be constructed by the HTTP transport; actual
+  native failure then passing rerun demonstrates the catalog503 regression oracle.
+  These are incremental reviews, not the required final three release reviews.

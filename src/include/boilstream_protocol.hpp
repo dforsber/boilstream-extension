@@ -8,6 +8,23 @@
 namespace duckdb {
 class ClientContext;
 class DatabaseInstance;
+// Only the protocol verifier can construct this error. Ordinary HTTP failures
+// cannot masquerade as an authenticated application refusal.
+class BoilstreamApplicationError : public IOException {
+public:
+	bool InvalidatesIdentity() const {
+		return status == 401 || status == 403;
+	}
+
+private:
+	friend class BoilstreamProtocol;
+	explicit BoilstreamApplicationError(int status)
+	    : IOException(unordered_map<string, string> {{"status_code", std::to_string(status)}},
+	                  "Verified application request refused: HTTP %d", status),
+	      status(status) {
+	}
+	int status;
+};
 // One instance belongs to one logical authentication flow/connection. Its lock
 // covers sequence allocation, HTTP and verification; copying keys is impossible.
 class BoilstreamProtocol {
