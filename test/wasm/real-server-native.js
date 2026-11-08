@@ -70,6 +70,8 @@ async function run() {
     fixtureTotp: (uri, used = []) => controls('totp', { uri, used }),
     armProtocolFault: async () => assert.equal((await controls('arm-fault')).armed, true),
     protocolRequestCount: async () => (await controls('request-count')).count,
+    protocolHandshakeCount: async () => (await controls('handshake-count')).count,
+    verifyResumptionState: async () => assert.equal((await controls('verify-resumption')).verified, true),
     revokeFixtureIdentity: async () => assert.equal((await controls('revoke')).revoked, true)
   });
   for (const connection of connections.reverse()) await connection.close();

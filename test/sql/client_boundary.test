@@ -10,9 +10,9 @@ SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('boilstream_quac
 0
 
 query I
-SELECT count(DISTINCT function_name) FROM duckdb_functions() WHERE function_name IN ('boilstream_login', 'boilstream_register_user', 'boilstream_verify_mfa', 'boilstream_bootstrap_session', 'boilstream_secrets', 'boilstream_ducklakes');
+SELECT count(DISTINCT function_name) FROM duckdb_functions() WHERE function_name IN ('boilstream_login', 'boilstream_register_user', 'boilstream_verify_mfa', 'boilstream_bootstrap_session', 'boilstream_resume_session', 'boilstream_secrets', 'boilstream_ducklakes');
 ----
-6
+7
 
 statement error
 SELECT boilstream_quack_authn('s1', 'token', 'token');
@@ -39,3 +39,9 @@ statement error
 SET "boilstream.tenant_id" = '42';
 ----
 unrecognized configuration parameter
+
+# A fresh connection has no credential to resume; this must not contact a server.
+statement error
+PRAGMA boilstream_resume_session;
+----
+authenticated connection

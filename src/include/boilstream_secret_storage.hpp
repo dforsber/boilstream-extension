@@ -111,7 +111,7 @@ public:
 
 	//! Common helper for OPAQUE login flow (used by both login and resume)
 	//! Only receives unpublished state; returns whether the server supports in-memory resumption
-	bool PerformOpaqueLoginCommon(const string &password, bool is_resume, BoilstreamConnectionState &pending);
+	bool PerformOpaqueLoginCommon(const string &password, BoilstreamConnectionState &pending);
 
 	//! Set user context for a connection
 	void SetUserContextForConnection(idx_t connection_id, const string &user_id);

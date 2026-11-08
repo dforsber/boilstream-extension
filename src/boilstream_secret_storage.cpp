@@ -451,8 +451,7 @@ void RestApiSecretStorage::ValidateTokenFormat(const string &token, const string
 	}
 }
 
-bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, bool is_resume,
-                                                    BoilstreamConnectionState &conn_state) {
+bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, BoilstreamConnectionState &conn_state) {
 	// This state is private until the complete exchange succeeds. It cannot
 	// overwrite an active session's key, sequence, endpoint or exchange flag.
 	conn_state.is_exchanging = true;
@@ -803,7 +802,7 @@ void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const stri
 	auto pending = make_shared_ptr<BoilstreamConnectionState>(endpoint);
 	pending->protocol = BoilstreamProtocol::Create(context, endpoint);
 	pending->bootstrap_token_hash = token_hash;
-	auto supports_resumption = PerformOpaqueLoginCommon(password, false, *pending);
+	auto supports_resumption = PerformOpaqueLoginCommon(password, *pending);
 	PublishSession(context, std::move(pending), previous, generation, supports_resumption);
 }
 
@@ -837,7 +836,7 @@ void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
 	} password_guard {password};
 	// A failed exchange leaves the published session intact. The pending state
 	// owns the same authority and identity; it cannot borrow another connection.
-	auto supports_resumption = PerformOpaqueLoginCommon(password, true, *pending);
+	auto supports_resumption = PerformOpaqueLoginCommon(password, *pending);
 	PublishSession(context, std::move(pending), previous, generation, supports_resumption);
 }
 

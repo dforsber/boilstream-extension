@@ -809,6 +809,21 @@ static string AttachManagedDucklake(ClientContext &context, const FunctionParame
 }
 
 //! PRAGMA function to set the REST API endpoint URL
+// Explicit renewal never retries an application operation or changes its outcome.
+// It can use only this connection's live, in-memory resumption credential.
+static string ResumeSession(ClientContext &context, const FunctionParameters &) {
+	auto storage = GetStorageFromContext(context);
+	if (!storage || !storage->GetSessionForContext(context)) {
+		throw IOException("Session resumption requires an authenticated connection; log in again");
+	}
+	try {
+		storage->PerformOpaqueResume(context);
+	} catch (const std::exception &error) {
+		BoilstreamRethrowSafe("Session resumption failed", error);
+	}
+	return "SELECT 'Session resumed' AS status;";
+}
+
 static string SetRestApiEndpoint(ClientContext &context, const FunctionParameters &params) {
 	BOILSTREAM_LOG("Step 1: Function called");
 
@@ -1727,11 +1742,14 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	    "  'CREATE DUCKLAKE ''name'' [''description''], ATTACH DUCKLAKE ''<uuid>'' AS alias, BOILSTREAM HELP.',\n";
 	result_sql +=
 	    "  'If a statement form reports a syntax error: SET active_grammar_extensions = [''boilstream''];',\n";
-	result_sql += "  'Sessions expire after ~24h. Run SELECT * FROM duckdb_secrets() to refresh.',\n";
+	result_sql += "  'Session lifetime is set by the server. Renewal never extends its original expiry.',\n";
 	result_sql += "  '═══════════════════════════════════════════════════════════════════',\n";
 	result_sql += "  '',\n";
+	result_sql += "  'PRAGMA boilstream_server_key(authority, public_key_hex)',\n";
+	result_sql += "  '  - Configure the trusted installation public key on this connection before login.',\n";
+	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_register_user(url_with_email, password)',\n";
-	result_sql += "  '  - Register new user with email/password. Returns TOTP secret and QR code.',\n";
+	result_sql += "  '  - Register with email/password. Returns TOTP setup key and URI; QR if textplot is loaded.',\n";
 	result_sql += "  '  - TIP: Use .maxrows 50 or .mode csv to see the full QR code.',\n";
 	result_sql += "  '  - NOTE: Does not work if server uses SAML SSO (centralized user management).',\n";
 	result_sql += "  '  - SECURE ALTERNATIVE: Use Web Auth GUI for registration instead.',\n";
@@ -1753,6 +1771,10 @@ static string Help(ClientContext &context, const FunctionParameters &params) {
 	result_sql += "  '  - Login with bootstrap token. Establishes OPAQUE session.',\n";
 	result_sql += "  '  - Fetches catalog metadata; attachment is explicit by catalog UUID.',\n";
 	result_sql += "  '  PRAGMA boilstream_bootstrap_session(''https://localhost/secrets/:token'');',\n";
+	result_sql += "  '',\n";
+	result_sql += "  'PRAGMA boilstream_resume_session',\n";
+	result_sql += "  '  - Rotate this live connection using its in-memory refresh credential and original pin.',\n";
+	result_sql += "  '  - Does not extend expiry, restore revoked access or retry an application operation.',\n";
 	result_sql += "  '',\n";
 	result_sql += "  'PRAGMA boilstream_create_ducklake(name, [description], [s3_bucket_name])',\n";
 	result_sql += "  '  - Create a new ducklake. Requires active session.',\n";
@@ -1876,6 +1898,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    PragmaFunction::PragmaCall("boilstream_bootstrap_session", SetRestApiEndpoint, endpoint_params);
 	loader.RegisterFunction(rest_endpoint);
 	BOILSTREAM_LOG("LoadInternal: boilstream_bootstrap_session PRAGMA registered");
+	loader.RegisterFunction(PragmaFunction::PragmaStatement("boilstream_resume_session", ResumeSession));
 
 	// Register PRAGMA function to create ducklakes (with optional description)
 	// Note: We use varargs to make the description parameter optional

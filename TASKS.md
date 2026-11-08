@@ -1,5 +1,51 @@
 # Application protocol client integration
 
+## APPSEC2-RESUMPTION — Explicit renewal verified across all clients
+
+Owner: codex-root, 2026-11-08. This checkpoint is verified; the full coordinated
+release remains active. No main merge, release or final release signoff.
+
+Added PRAGMA boilstream_resume_session for a live connection. It uses the original
+trusted pin and a fresh encrypted channel; configured pin changes apply only to
+new logins. Removed an unused login-helper mode argument and corrected help text
+about session lifetime and manual MFA setup. No Rust dependency or wire change.
+
+The shared native/EH/pthread scenario requires two real renewals, exact request and
+handshake counts, retained tenant data, no TTL extension, anonymous refusal and
+refusal after actual server revocation. Private tests exposed revoked refresh reuse
+and a concurrent revocation race; the server candidate now rejects both. Real
+router and storage tests verify rollback and refusal during the OPAQUE exchange.
+
+Evidence:
+- Private coordinated gate PASS6/6,0 ignored,97.30s, including actual loaded native,
+  EH and pthread authentication with security response headers removed on plaintext
+  loopback. The same scenario retains registration/MFA/login, replay, tenancy,
+  tampered reply/no retry and unknown mutation outcome assertions.
+- Public native CTest24/24, full production clang-tidy, format, harness15/15 and
+  five native SQL files/66 assertions with zero skips PASS. Initial missing optional
+  fixtures were provisioned from existing HTTPFS/Quack artifacts; skip guard retained.
+- Both public WASM regression variants PASS: EH71 plus74 Quack checks, pthread72
+  plus75 Quack checks. Native logs resumption-native-tests.log, resumption-tidy.log;
+  browser log resumption-public-wasm.log under ../logs. No passing suites replaced
+  by a narrow renewal-only claim.
+
+Three inline checkpoint reviews (same author; final release reviews remain):
+1. Security: original pin, fresh encrypted channel, bounded in-memory refresh state;
+   anonymous/revoked renewal refuses without restoring invalidated identity.
+2. Lifecycle: existing generation checks govern publication; failed exchange leaves
+   the previous session unchanged. One-use refresh and unknown outcomes do not
+   trigger automatic retries. Renewal cannot extend the original server expiry.
+3. Compatibility/test quality: shared assertions exercise actual native/EH/pthread
+   artifacts and independent server-state checks. Public build/sign/publish remains
+   the DuckDB community process; server implementation and private keys stay private.
+
+Release blockers remain: audit and qualify an updated private native dependency
+build; live managed catalog/Quack and credential vending; obsolete wire cleanup;
+C++ dependency review; private release enforcement; remote CI and final reviews.
+Latest pushed public native security/WASM jobs pass; ARM64 distribution fails before
+compilation on upstream vcpkg download504, including its retry. No advisory bypass,
+platform exclusion or changed community publishing workflow. Disk guards retained.
+
 ## APPSEC2-NATIVE-AUTH — One real-client scenario across native/EH/pthreads
 
 Owner: codex-root,2026-11-08. Full coordinated release remains active. No subagents,

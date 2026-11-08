@@ -26,7 +26,11 @@ Each logical authentication flow owns its channel. Requests serialize from
 sequence allocation through response verification. HTTP redirects/retries are
 disabled. An invalid/lost reply closes the channel and reports an unknown outcome:
 a mutation may have committed. Do not blindly repeat it. Explicit resumption
-creates a fresh channel. Existing generation checks protect identity publication.
+creates a fresh channel through `PRAGMA boilstream_resume_session;` on the same
+connection. It rotates the one-use refresh credential without extending the
+original session lifetime. It requires a live, unexpired in-memory session; it
+cannot restore an invalidated or closed connection. Existing generation checks
+protect identity publication.
 Pin changes apply to new logins, not silently to active flows.
 
 This is a breaking integration candidate, not a release-ready patch. Native and

@@ -4,6 +4,7 @@ export async function runAuthenticatedScenario(fixture, connect, c, controls) {
   const check = (ok, message) => { if (!ok) throw new Error(message); };
   const quote = value => `'${value.replaceAll("'", "''")}'`;
   const login = (c, password = fixture.password) => c.query(`PRAGMA boilstream_bootstrap_session(${quote(`${fixture.authority}/secrets/:${password}`)})`);
+  const resume = c => c.query('PRAGMA boilstream_resume_session');
   const pin = (c, key) => c.query(`PRAGMA boilstream_server_key(${quote(fixture.authority)}, ${quote(key)})`);
   const refuse = async (action, label, expected) => {
     let error; try { await action(); } catch (e) { error = e; }
@@ -56,9 +57,23 @@ export async function runAuthenticatedScenario(fixture, connect, c, controls) {
   check((await names()).length === 0, 'Another tenant secret was returned before creation');
   await c.query("CREATE PERSISTENT SECRET browser_fixture IN boilstream (TYPE quack, TOKEN 'synthetic-secret', SCOPE 'quack:127.0.0.1:1')");
   check(JSON.stringify(await names()) === JSON.stringify(['browser_fixture']), 'Created secret was missing or tenant isolation failed');
+  // Rotate twice: reusing the first one-use refresh token would fail on the
+  // second renewal. A configured pin change cannot silently repin a live flow.
+  for (const key of [fixture.pin, fixture.wrongPin]) {
+    await pin(c, key);
+    const beforeResume = await controls.protocolRequestCount();
+    const beforeHandshake = await controls.protocolHandshakeCount();
+    check((await resume(c)).toArray()[0].status === 'Session resumed', 'Renewal was not acknowledged');
+    check(await controls.protocolRequestCount() === beforeResume + 2, 'Renewal must perform one new OPAQUE exchange');
+    check(await controls.protocolHandshakeCount() === beforeHandshake + 1, 'Renewal reused an old channel');
+    check(JSON.stringify(await names()) === JSON.stringify(['browser_fixture']), 'Renewal lost its tenant or data');
+  }
+  await controls.verifyResumptionState();
+  await pin(c, fixture.pin);
   await c.query('DROP PERSISTENT SECRET browser_fixture FROM boilstream');
   check((await names()).length === 0, 'Deleted secret was still returned');
   const other = await connect();
+  await refuse(() => resume(other), 'Unauthenticated resumption', /authenticated connection/);
   await refuse(() => other.query('SELECT * FROM boilstream_secrets()'), 'Unauthenticated connection');
   await pin(other, fixture.pin);
   await refuse(() => login(other), 'Reused bootstrap');
@@ -78,10 +93,11 @@ export async function runAuthenticatedScenario(fixture, connect, c, controls) {
   check(JSON.stringify(afterFailure) === JSON.stringify(['tampered_fixture']),
     'Unknown mutation outcome was not observable from the healthy sibling');
   await controls.revokeFixtureIdentity();
+  await refuse(() => resume(other), 'Revoked resumption', /HTTP 401/);
   await refuse(() => other.query('SELECT * FROM boilstream_secrets()'), 'Revoked identity', /HTTP 401/);
   const afterRevocation = await controls.protocolRequestCount();
   await refuse(() => other.query('SELECT * FROM boilstream_secrets()'), 'Retired revoked identity');
   check(await controls.protocolRequestCount() === afterRevocation, 'Revoked identity reused its channel');
   check((await b.query('SELECT name FROM boilstream_secrets()')).toArray()[0].name === 'email_owned', 'Revoking another tenant retired the email session');
-  return { registration: true, mfa: true, emailLogin: true, authenticated: true, quackCompatibility: true, crud: true, isolated: true, tamperRejected: true, unknownOutcomeVerified: true, revocationRejected: true };
+  return { resumption: true, registration: true, mfa: true, emailLogin: true, authenticated: true, quackCompatibility: true, crud: true, isolated: true, tamperRejected: true, unknownOutcomeVerified: true, revocationRejected: true };
 }

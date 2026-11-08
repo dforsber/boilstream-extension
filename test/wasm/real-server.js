@@ -38,6 +38,13 @@ async function runBrowser() {
   const context = await browser.newContext();
   await context.exposeFunction('armProtocolFault', () => { assert(!fault); fault = true; });
   await context.exposeFunction('protocolRequestCount', () => counts.request);
+  await context.exposeFunction('protocolHandshakeCount', () => counts.handshake);
+  await context.exposeFunction('verifyResumptionState', async () => {
+    console.log(JSON.stringify({ control: 'verify-resumption' }));
+    const reply = await lines.next();
+    assert(!reply.done && reply.value.length <= 8192, 'Missing renewal verification reply');
+    assert.equal(JSON.parse(reply.value).verified, true);
+  });
   await context.exposeFunction('fixtureTotp', async (uri, used = []) => {
     assert(typeof uri === 'string' && uri.length <= 1024);
     assert(Array.isArray(used) && used.length <= 16 && used.every(code => /^\d{6}$/.test(code)));
