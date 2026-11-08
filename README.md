@@ -3,7 +3,7 @@
 This client extension connects stock DuckDB to BoilStream for authentication,
 remote secret storage and managed Quack attachments.
 
-The integration candidate uses a configured installation public key to authenticate
+Version 0.9.0 uses a configured installation public key to authenticate
 an encrypted application channel before sending credentials. OPAQUE login runs
 inside that channel. Application authentication and confidentiality do not depend
 on HTTP response headers or TLS confidentiality. See the
@@ -16,9 +16,12 @@ The qualified native and browser baseline is **DuckDB v2.0.0**, including both W
 EH and pthread variants. DuckDB 1.x is unsupported; later hosts require separate
 qualification. Native builds use the matching `duckdb` submodule.
 
-This branch is a breaking client/server integration candidate. It has not been
-published as a community extension release. Coordinated server qualification and
-release approval remain required.
+Version 0.9.0 is a breaking protocol release. Upgrade the server to a compatible
+protocol deployment and configure its trusted installation key before upgrading
+clients. Older client/server protocol combinations are not supported.
+
+Community installation availability follows the DuckDB descriptor update and
+central deployment; a GitHub release alone does not update the community repository.
 
 ## Login lifetime
 
@@ -53,8 +56,8 @@ PRAGMA boilstream_bootstrap_session('https://api.example.com/secrets/:<bootstrap
 SELECT * FROM duckdb_secrets();
 ```
 
-Use the candidate artifact matching the selected host. Published community
-versions may use a different protocol. The authority passed to `boilstream_server_key`
+Use the 0.9.0 artifact matching the selected host. Check the installed version:
+older community artifacts use a different protocol. The authority passed to `boilstream_server_key`
 has no trailing slash or path; the bootstrap URL contains the endpoint and token.
 Missing or incorrect pins prevent credential transmission.
 

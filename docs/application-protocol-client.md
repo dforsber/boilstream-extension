@@ -1,4 +1,4 @@
-# Pinned application protocol client candidate
+# Pinned application protocol client — 0.9.0
 
 Before login, configure the installation's independently obtained X25519 public
 key on the same DuckDB connection:
@@ -42,9 +42,8 @@ invents a session lifetime. The new session remains private until validation and
 connection-generation checks finish, so failed login or renewal cannot overwrite
 an existing connection's identity.
 
-This is a breaking integration candidate, not a release-ready patch. Native and
-DuckDB 2.0 browser/pthread tests are described in the [test guide](../test/README_TESTS.md).
-Coordinated server dependency and full-product qualification are still required
-before release. The SPA and direct server-side DuckDB integration are
-unchanged. Server implementation/peer tests remain private. Public builds need
+Version 0.9.0 replaces the previous wire protocol and requires a compatible server.
+Native and DuckDB 2.0 browser/pthread tests are described in the
+[test guide](../test/README_TESTS.md). The SPA and direct server-side DuckDB
+integration are unchanged. Server implementation/peer tests remain private. Public builds need
 only client sources and locked public dependencies.

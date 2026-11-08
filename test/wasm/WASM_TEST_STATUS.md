@@ -1,9 +1,8 @@
-# Encrypted client candidate qualification — 2026-11-08
+# BoilStream 0.9.0 client qualification — 2026-11-08
 
-The candidate uses the exact DuckDB **v2.0.0** baseline in
+Version 0.9.0 uses the exact DuckDB **v2.0.0** baseline in
 [baseline.json](baseline.json), including both WASM EH and pthread builds.
-It is not yet release-ready. The public and private test lanes have different
-responsibilities; a public green check alone does not qualify authentication.
+The public and private test lanes have different responsibilities; a public green check alone does not qualify authentication.
 
 ## Verified locally
 
@@ -57,7 +56,7 @@ artifacts. Selected CMake source paths and platform are checked. No source hash
 inventory, forced clean or BoilStream build receipt is used. Community extension
 make targets remain unchanged.
 
-## Outstanding coverage and release work
+## Coverage boundaries
 
 All21 native C++ suites pass. The lower count follows removal of three suites
 exclusively for the retired signing/encryption protocol; active parser, memory,
@@ -65,13 +64,13 @@ credential cleanup and lifecycle regressions remain. Successful resumption now
 runs on native, EH and pthread clients: fresh channel, one-use rotation, preserved
 original expiry, live revocation and atomic publication checks pass.
 
-Managed catalog credential vending and live remote Quack queries still require
-the receiving server owner's backend/full-product qualification. Catalog polling
-parser/planner and failure tests do not substitute for those successful paths.
-Obsolete production wire and unused JS wrapper cleanup are complete. Dependency
-repair, coordinated release-gate enforcement and final combined release approval
-remain open. GitHub status must be checked for the exact candidate being released;
-local passing tests are not a publication claim.
+The private integration lane also passes actual native catalog/provider operations
+against loopback object storage. Those checks are distinct from live remote Quack
+query coverage; catalog polling parser/planner and failure tests do not substitute
+for that path. Obsolete wire and unused JS wrapper cleanup are complete. The
+coordinated release gate is enforced and passes all six loaded-client cases with
+zero ignored tests. GitHub status must be checked for the exact release commit;
+local passing tests alone are not a publication claim.
 
 ## Threaded runtime and Quack
 

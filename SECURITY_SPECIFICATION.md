@@ -1,7 +1,7 @@
 # Client security requirements
 
-This document describes the encrypted application-protocol integration candidate
-implemented by this repository. It replaces the retired header-signing design.
+This document describes the encrypted application protocol
+implemented by version 0.9.0. It replaces the retired header-signing design.
 It is not a claim of release readiness, an independent security audit, or a server
 implementation guide. The server implementation and coordinated peer tests remain
 in the private server repository.

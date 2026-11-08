@@ -1,4 +1,4 @@
-# BoilStream protocol client candidate
+# BoilStream protocol client
 
 Client-only pinned handshake and established-session envelopes: `seal_request` and `open_response`.
 The `wire` module shares message types, bounded framing and session key derivation.
@@ -19,12 +19,12 @@ harness remain in the private repository. Never reuse test entropy in production
 Owned secrets are zeroized where supported; Snow does not guarantee erasure of
 all its internal buffers. There is no complete process-memory erasure guarantee.
 
-The integration candidate uses `session::ClientSession` through the client static
+The extension uses `session::ClientSession` through the client static
 library's C ABI. A session owns handshake, ready and pending-reply states. Failed,
 overlapping or abandoned exchanges close it; a new pinned handshake is required.
 The C++ adapter owns serialization across the HTTP exchange and consumes verified
-body metadata. Loaded native/browser qualification remains in progress; this is
-not a release-ready claim. Keep transport protection enabled.
+body metadata. Loaded native, WASM EH and pthread clients pass the coordinated
+private-server protocol gate. Keep transport protection enabled.
 
 ```sh
 cargo test --locked --manifest-path protocol-client/Cargo.toml

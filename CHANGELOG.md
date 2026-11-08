@@ -5,11 +5,11 @@ All notable changes to the Boilstream DuckDB Extension will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-11-08
 
-This is a breaking client/server integration candidate. A compatible BoilStream
-server deployment, coordinated qualification and release version selection are
-required before publication. It is not the previously proposed client-only patch.
+Breaking client/server protocol release for DuckDB v2.0.0. Requires a compatible
+BoilStream server and an independently configured installation public key.
+Clients and servers using the old header-signing protocol cannot interoperate.
 
 ### Security
 
@@ -41,7 +41,7 @@ required before publication. It is not the previously proposed client-only patch
   DuckDB **v2.0.0** native, WASM EH and pthread baseline.
 - Existing login SQL operations require the configured installation pin and the
   matching encrypted server protocol. The old header-signing protocol is removed;
-  older client/server combinations are not supported by this candidate.
+  older client/server combinations are not supported by 0.9.0.
 - Removed native hosting callbacks, embedded local-session APIs, legacy
   `boilstream.tenant_id` routing, `multitenant=true` URL rewriting and display-name
   prefix stripping. Server hosting uses private adapters rather than this client.
@@ -66,8 +66,8 @@ required before publication. It is not the previously proposed client-only patch
   pins or forged server proofs. Native SQL tests fail on dependency skips.
 - C ABI vectors run against the actual EH/pthread archives. Parser, credential
   cleanup, concurrent lifecycle and retired-cache regressions use production code.
-- Rust audits treat vulnerabilities and warnings as failures. Server dependency,
-  managed-backend and full-product release qualification remains separate.
+- Rust audits treat vulnerabilities and warnings as failures. Server dependency
+  and native platform checks remain distinct from client protocol tests.
 
 ## [0.8.2] - 2026-11-07
 
@@ -173,7 +173,7 @@ required before publication. It is not the previously proposed client-only patch
 
 ### Added
 
-- Native hosting compatibility improvements (hosting APIs removed in 0.8.3).
+- Native hosting compatibility improvements (hosting APIs removed in 0.9.0).
 
 ### Style
 
