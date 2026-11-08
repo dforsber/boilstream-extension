@@ -3,22 +3,20 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { baseline, quackArtifactPath } from './server.js';
-import { quackBuildInputs, verifyQuackBuild } from './quack-build.js';
+import { assertThreadedQuack } from './quack-build.js';
 for (const variant of (process.env.WASM_VARIANTS?.split(',') || baseline.variants)) {
   assert(baseline.variants.includes(variant), 'Unknown compatibility platform');
   const expected = baseline.quackArtifacts[variant];
   const path = quackArtifactPath(variant);
   if (expected.sourceBuild) {
-    let bytes, manifest;
-    try {
-      bytes = await readFile(path);
-      manifest = JSON.parse(await readFile(dirname(path) + '/quack.build.json', 'utf8'));
-    } catch (error) {
-      if (error.code === 'ENOENT') throw new Error('Missing threaded Quack build; run scripts/build-quack-wasm.sh');
-      throw error;
-    }
-    verifyQuackBuild(bytes, manifest, await quackBuildInputs(baseline));
+    // Refresh through the actual build system before every loaded-client run.
+    // stdout is reserved for the private driver's control messages.
+    execFileSync('bash', [fileURLToPath(new URL('../../scripts/build-quack-wasm.sh', import.meta.url))],
+      { stdio: ['ignore', 2, 2] });
+    assertThreadedQuack(await readFile(path));
     continue;
   }
   let bytes;

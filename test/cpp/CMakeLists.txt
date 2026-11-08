@@ -573,7 +573,7 @@ set_property(
   PROPERTY ENVIRONMENT "QUERY_FARM_TELEMETRY_OPT_OUT=1")
 
 # Compile the actual authentication SQL entrypoints and storage implementation.
-# Runtime uses synthetic loopback HTTP; never needs real credentials.
+# Runtime injects adversarial HTTP at the real client transport boundary.
 foreach(mode IN ITEMS debug release)
   add_executable(
     auth_diagnostics_${mode}_test
@@ -601,11 +601,7 @@ foreach(mode IN ITEMS debug release)
     target_compile_definitions(auth_diagnostics_${mode}_test
                                PRIVATE BOILSTREAM_DEBUG)
   endif()
-  add_test(
-    NAME AuthDiagnostics_${mode}
-    COMMAND
-      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_auth_diagnostics.py
-      $<TARGET_FILE:auth_diagnostics_${mode}_test>)
+  add_test(NAME AuthDiagnostics_${mode} COMMAND auth_diagnostics_${mode}_test)
   set_tests_properties(
     AuthDiagnostics_${mode} PROPERTIES TIMEOUT 40 ENVIRONMENT
                                        "QUERY_FARM_TELEMETRY_OPT_OUT=1")

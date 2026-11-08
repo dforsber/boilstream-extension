@@ -1,22 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-
-export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-export async function quackBuildInputs(baseline) {
-  return {
-    source: baseline.quackArtifacts.wasm_threads.sourceBuild,
-    duckdbRevision: baseline.duckdbRevision,
-    engineVersion: baseline.engineVersion,
-    emscriptenVersion: baseline.emscriptenVersion,
-    recipe: sha256(await readFile(new URL('../../scripts/build-quack-wasm.sh', import.meta.url))),
-    cmake: sha256(await readFile(new URL('../../scripts/quack-wasm.cmake', import.meta.url))),
-    recorder: sha256(await readFile(new URL('../../scripts/record-quack-build.mjs', import.meta.url))),
-    verifier: sha256(await readFile(new URL('./quack-build.js', import.meta.url))),
-    sharedMemory: true,
-  };
-}
-
 // Read the actual memory import type. A wasm_threads filename/footer is insufficient.
 export function memoryImports(bytes) {
   let offset = 0;
@@ -56,9 +38,4 @@ export function assertThreadedQuack(bytes) {
     'Threaded Quack must import shared memory; rebuild with USE_WASM_THREADS=ON');
   assert(WebAssembly.Module.exports(new WebAssembly.Module(bytes)).some(e => e.name === 'quack_duckdb_cpp_init' && e.kind === 'function'),
     'Missing real Quack entrypoint');
-}
-export function verifyQuackBuild(bytes, manifest, expectedInputs) {
-  assert.deepEqual(manifest.inputs, expectedInputs, 'Quack build inputs changed; rebuild with scripts/build-quack-wasm.sh');
-  assert.equal(sha256(bytes), manifest.sha256, 'Quack artifact differs from its build receipt');
-  assertThreadedQuack(bytes);
 }

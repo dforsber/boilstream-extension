@@ -1,5 +1,41 @@
 # Application protocol client integration
 
+## APPSEC2-DIAGNOSTICS — Encrypted failure coverage and incremental Quack builds
+
+Owner: codex-root, 2026-11-08. Continues the full encrypted client/server release
+objective; no subagents, merge, publication or release signoff.
+
+- AuthDiagnostics debug/release now exercise the actual encrypted handshake
+  boundary with adversarial HTTP status/body/headers and exact request counts.
+  Real SQL login/register errors and JSON error output must omit private markers;
+  trusted structured status and concurrent exception/credential erasure checks
+  remain. Both CTest modes PASS (../logs/diagnostic-migration-tests.log).
+- Removed the unused legacy diagnostics Python server. Malformed authenticated
+  application bodies still need parser/real-server coverage; handshake refusal
+  is explicitly not counted as proof of those later stages.
+- Quack build refresh now uses persistent OpenSSL Make and CMake/Ninja trees.
+  Both browser drivers refresh the threaded dependency before loading it; failed
+  builds stop the harness. Removed source inventories, receipts and forced cleans.
+  Pinned archive/upstream artifact SHA verification, SDK/Git selection, actual
+  shared-memory import and exported entrypoint checks remain. The community
+  extension build/sign/publish entry points remain unchanged.
+- Harness unit tests PASS14/14; threaded browser PASS74 checks with the rebuilt
+  dependency (../logs/quack-incremental-browser.log). Incremental installation
+  efficiency is verified by a warm Ninja 'no work to do' result. Private
+  coordinated router/registration/native/EH/pthread gate PASS5/5 (229.88s),
+ 0 ignored; all keys and server implementation stayed private.
+- GitHub's asset API returned the exact pinned OpenSSL archive in a local download
+  check. Added that API as a fallback for release-redirect HTTP504 failures;
+  the existing pinned SHA256 is mandatory for either download path.
+- GitHub6df7549: Rust audit/client protocol PASS; native20/24 (the four known
+  legacy suites); WASM failed fetching OpenSSL with HTTP504; ARM64 distribution
+  failed downloading CMake. No claim that all remote CI is green.
+
+Remaining: SessionMemoryOnly and RegistrationHttp migrations; authenticated
+malformed-body, loaded registration/MFA, resume/account replacement and managed
+catalog/live remote Quack coverage; old wire cleanup, C++ dependency review,
+release enforcement/gates, three final reviews and clean coordinated promotion.
+
 Owner: root; branch `codex/client-protocol-v2-integration`, based on the tested
 client-only protocol candidate62ca20d. Active goal: finish production client
 integration, validate native DuckDB and baseline2.0 WASM including pthreads against

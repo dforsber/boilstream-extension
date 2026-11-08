@@ -51,8 +51,10 @@ make targets remain unchanged.
 
 ## Outstanding coverage and release work
 
-Four legacy C++ suites still need migration from header-based transport:
-SessionMemoryOnly, RegistrationHttp, AuthDiagnostics_debug and AuthDiagnostics_release.
+Two legacy C++ suites still need migration from header-based transport:
+SessionMemoryOnly and RegistrationHttp. AuthDiagnostics debug/release now pass
+against the actual encrypted transport failure boundary. Malformed authenticated
+application bodies still need parser/actual-server coverage.
 Catalog polling now has pure parser/planner tests and real channel rejection;
 the application boundary suite covers forged transport replies without legacy signatures. Browser
 email/password/MFA, resumption, account replacement, managed catalog credential

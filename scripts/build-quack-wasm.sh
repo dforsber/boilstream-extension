@@ -28,7 +28,12 @@ fi
 openssl_version="$(source_field opensslVersion)"
 archive="$repo/build/openssl-$openssl_version.tar.gz"
 if [[ ! -f "$archive" ]]; then
-  curl --fail --location --retry 3 "$(source_field opensslURL)" -o "$archive.tmp"
+  if ! curl --fail --location --connect-timeout 15 --max-time 120 --retry 3 "$(source_field opensslURL)" -o "$archive.tmp"; then
+    # GitHub's release redirect can fail independently of the asset API. Both
+    # paths must return the same pinned archive; neither bypasses SHA verification.
+    curl --fail --location --connect-timeout 15 --max-time 120 --retry 3 \
+      -H 'Accept: application/octet-stream' "$(source_field opensslAssetURL)" -o "$archive.tmp"
+  fi
   mv "$archive.tmp" "$archive"
 fi
 python3 - "$archive" "$(source_field opensslSHA256)" <<'PY'
@@ -37,27 +42,31 @@ from pathlib import Path
 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2]:
     raise SystemExit('OpenSSL archive differs from pinned SHA256')
 PY
-# Fresh source and objects on every invocation: archive mtimes must never let
-# modified/stale objects survive and receive a receipt for different inputs.
-staging="$(mktemp -d "$repo/build/quack-openssl.XXXXXX")"
-trap 'rm -rf "$staging"' EXIT
-node scripts/record-quack-build.mjs --snapshot "$staging/inputs.json"
-tar -xzf "$archive" -C "$staging"
-# Compile the immutable Git snapshot, never a concurrently editable checkout.
-mkdir -p "$staging/quack-source"
-git -C "$source_dir" archive "$revision" | tar -xf - -C "$staging/quack-source"
-source_dir="$staging/quack-source"
-openssl_build="$staging/output"
-openssl_install="$staging/install"
-quack_build="$staging/quack-build"
+# Ordinary persistent build trees. OpenSSL's generated Makefile and CMake/Ninja
+# track inputs; the harness invokes this builder before loading its output.
+openssl_source="$repo/build/openssl-$openssl_version"
+if [[ ! -d "$openssl_source" ]]; then
+  tar -xzf "$archive" -C "$repo/build"
+fi
+openssl_build="$repo/build/openssl-$openssl_version-wasm_threads-$(field emscriptenVersion)"
+openssl_install="$openssl_build/install"
+quack_build="$repo/build/quack-wasm_threads"
 mkdir -p "$openssl_build"
 (
   cd "$openssl_build"
-  CC=emcc AR=emar RANLIB=emranlib "$staging/openssl-$openssl_version/Configure" \
-    linux-generic32 --cross-compile-prefix= no-shared no-asm no-tests no-module \
-    no-engine no-dso no-ui-console --prefix="$openssl_install" --libdir=lib -pthread -fPIC
+  # Configure rewrites generated headers, so only rerun it when this recipe
+  # changes or the tree is new. OpenSSL Make tracks its own source dependencies.
+  if [[ ! -f Makefile || "$repo/scripts/build-quack-wasm.sh" -nt configdata.pm ]]; then
+    CC=emcc AR=emar RANLIB=emranlib "$openssl_source/Configure" \
+      linux-generic32 --cross-compile-prefix= no-shared no-asm no-tests no-module \
+      no-engine no-dso no-ui-console --prefix="$openssl_install" --libdir=lib -pthread -fPIC
+  fi
   make -j"${CMAKE_BUILD_PARALLEL_LEVEL:-4}" build_libs
-  make install_dev
+  # Upstream install_dev copies every header unconditionally. Stage it, then
+  # install only changed contents so Ninja can retain unaffected Quack objects.
+  make install_dev DESTDIR="$openssl_build/staging"
+  mkdir -p "$openssl_install"
+  rsync -r --checksum --delete "$openssl_build/staging$openssl_install/" "$openssl_install/"
 )
 emcmake cmake -S duckdb -B "$quack_build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DUSE_WASM_THREADS=ON -DWASM_LOADABLE_EXTENSIONS=1 \
@@ -72,4 +81,13 @@ emcmake cmake -S duckdb -B "$quack_build" -G Ninja \
 cmake --build "$quack_build" --target quack_loadable_extension --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 [[ "$(git -C duckdb rev-parse HEAD)" == "$(field duckdbRevision)" ]] || { echo 'DuckDB revision changed during Quack build' >&2; exit 1; }
 [[ -z "$(git -C duckdb status --porcelain)" ]] || { echo 'DuckDB changed during Quack build' >&2; exit 1; }
-node scripts/record-quack-build.mjs "$quack_build/extension/quack/quack.duckdb_extension.wasm" "$staging/inputs.json"
+node --input-type=module - "$quack_build/extension/quack/quack.duckdb_extension.wasm" "$(field engineVersion)" <<'JS'
+import { readFile, mkdir, copyFile } from 'node:fs/promises';
+import { assertThreadedQuack } from './test/wasm/quack-build.js';
+const source = process.argv[2];
+assertThreadedQuack(await readFile(source));
+const directory = `build/compatibility/${process.argv[3]}/wasm_threads`;
+await mkdir(directory, { recursive: true });
+await copyFile(source, `${directory}/quack.duckdb_extension.wasm`);
+console.log(`Built shared-memory Quack: ${directory}`);
+JS

@@ -71,21 +71,6 @@ public:
 	static void Delete(RestApiSecretStorage &s, const string &url, BoilstreamConnectionState &state) {
 		s.HttpDelete(url, state);
 	}
-	static uint16_t Cipher(RestApiSecretStorage &s, const string &value) {
-		return s.ParseCipherSuite({{"x-boilstream-cipher", value}});
-	}
-	static void Verify(RestApiSecretStorage &s) {
-		s.VerifyResponseSignature(
-		    "synthetic-body", 200,
-		    {{"x-boilstream-response-signature", MARKER}, {"x-boilstream-date", MARKER}, {"set-cookie", MARKER}},
-		    vector<uint8_t>(32, 7));
-	}
-	static bool Sign(RestApiSecretStorage &s) {
-		auto result =
-		    s.SignRequest("POST", "https://example.invalid/" + MARKER, "synthetic-body", 1700000000, 1,
-		                  vector<uint8_t>(32, 7), TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX, MARKER);
-		return !result.signature.empty() && !result.date_time.empty();
-	}
 };
 struct Config : DBConfig {
 	Config() {
@@ -93,9 +78,37 @@ struct Config : DBConfig {
 		options.maximum_threads = 2;
 	}
 };
-int main(int argc, char **argv) {
-	if (argc != 2)
-		return 2;
+static const string AUTHORITY = "https://diagnostic.invalid";
+class DiagnosticHTTP : public HTTPUtil {
+public:
+	int status = 200;
+	bool fail = false;
+	size_t requests = 0;
+	unique_ptr<HTTPParams> InitializeParameters(DatabaseInstance &, const string &) override {
+		return make_uniq<HTTPParams>(*this);
+	}
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &) override {
+		Require(request.url == AUTHORITY + "/auth/api/protocol/v2/handshake");
+		++requests;
+		if (fail)
+			throw IOException(unordered_map<string, string> {{"status_code", "403"}, {"response_body", MARKER}}, "%s",
+			                  MARKER);
+		auto response = make_uniq<HTTPResponse>(static_cast<HTTPStatusCode>(status));
+		response->headers.Insert("Set-Cookie", "session=" + MARKER);
+		response->headers.Insert("X-Boilstream-Response-Signature", TOKEN_PREFIX);
+		request.Cast<PostRequestInfo>().buffer_out = MARKER;
+		return response;
+	}
+};
+static void Channel(BoilstreamConnectionState &state) {
+	std::array<uint8_t, 32> key {};
+	key[0] = 9;
+	state.protocol = make_shared_ptr<BoilstreamProtocol>(AUTHORITY, key);
+	state.access_token = TOKEN_PREFIX;
+	state.session_key.assign(32, 9);
+	state.is_exchanging = true;
+}
+int main() {
 	Config config;
 	DuckDB db(nullptr, &config);
 	Connection connection(db);
@@ -104,6 +117,10 @@ int main(int argc, char **argv) {
 	auto set = connection.Query("SET httpfs_client_implementation='curl'");
 	Require(set && !set->HasError());
 	db.LoadStaticExtension<BoilstreamExtension>();
+	auto http = make_shared_ptr<DiagnosticHTTP>();
+	DBConfig::GetConfig(*db.instance).SetHTTPUtil(http);
+	Require(!connection.Query("PRAGMA boilstream_server_key('" + AUTHORITY + "', '09" + string(62, '0') + "')")
+	             ->HasError());
 	RestApiSecretStorage storage(*db.instance, "");
 	int failures = 0;
 	auto test = [&](const char *name, auto fn) {
@@ -115,36 +132,6 @@ int main(int argc, char **argv) {
 			std::cout << "CASE " << name << " FAIL" << std::endl;
 		}
 	};
-	test("supported_cipher_control", [&] {
-		Require(BoilstreamSessionPublicationTestAccess::Cipher(storage, "0x0001") == 1);
-		Require(BoilstreamSessionPublicationTestAccess::Cipher(storage, "0x0002") == 2);
-	});
-	test("malformed_cipher_diagnostic_does_not_echo_header", [&] {
-		auto r = Capture([&] { BoilstreamSessionPublicationTestAccess::Cipher(storage, MARKER); });
-		Require(r.failed);
-		Private(r);
-	});
-	test("cipher_parser_rejects_trailing_text", [&] {
-		auto r = Capture([&] { BoilstreamSessionPublicationTestAccess::Cipher(storage, "0x0001" + MARKER); });
-		Require(r.failed);
-		Private(r);
-	});
-	test("cipher_parser_rejects_truncated_high_bits", [&] {
-		auto r = Capture([&] { BoilstreamSessionPublicationTestAccess::Cipher(storage, "0x10001"); });
-		Require(r.failed);
-		Private(r);
-	});
-	test("response_verification_does_not_log_headers", [&] {
-		auto r = Capture([&] { BoilstreamSessionPublicationTestAccess::Verify(storage); });
-		Require(r.failed);
-		Private(r);
-	});
-	test("request_signing_keeps_credentials_and_url_private", [&] {
-		bool signed_request = false;
-		auto r = Capture([&] { signed_request = BoilstreamSessionPublicationTestAccess::Sign(storage); });
-		Require(signed_request && !r.failed);
-		Private(r);
-	});
 	test("structured_http_error_preserves_only_status", [&] {
 		auto r = Capture([&] {
 			unordered_map<string, string> info {
@@ -186,110 +173,68 @@ int main(int argc, char **argv) {
 		Require(r.failed && r.error.find("Authentication request failed") != string::npos);
 		Private(r);
 	});
-	test("cipher_boundary_matrix", [&] {
-		for (const auto &v :
-		     vector<string> {"", "0x", "0x1", "0X0001", "0x0000", "0x0003", "0xffff", "0x000g", "0x 001", "0x+001",
-		                     string("0x00\0"
-		                            "1",
-		                            6)}) {
-			auto r = Capture([&] { BoilstreamSessionPublicationTestAccess::Cipher(storage, v); });
-			Require(r.failed);
-			Private(r);
-		}
-	});
-	test("successful_http_body_is_returned_but_not_logged", [&] {
-		BoilstreamConnectionState pending;
-		pending.is_exchanging = true;
-		string body;
-		auto r =
-		    Capture([&] { body = storage.HttpPostWithState(string(argv[1]) + "/200/" + MARKER, MARKER, pending); });
-		Require(!r.failed && body.find(MARKER) != string::npos);
-		Private(r);
-	});
-	for (const auto &scenario :
-	     vector<string> {"csrf-invalid", "csrf-missing", "csrf-http", "login-http", "login-cookie",
-	                     "login-malformed-cookie", "mfa-invalid", "mfa-rejected", "bootstrap-invalid"}) {
-		test(("sql_login_" + scenario + "_private").c_str(), [&] {
-			bool rejected = false;
-			auto r = Capture([&] {
-				auto result = connection.Query("PRAGMA boilstream_login('" + string(argv[1]) + "/" + scenario + "/" +
-				                               MARKER + "@example.com','" + MARKER + "','123456')");
-				Require(result && result->HasError());
-				rejected = true;
-				throw std::runtime_error(result->GetError());
-			});
-			Require(r.failed && rejected);
-			Private(r);
-			const std::map<string, string> expected {
-			    {"csrf-invalid", "Failed to parse CSRF response"},
-			    {"csrf-missing", "CSRF response missing csrf_token"},
-			    {"csrf-http", "HTTP 403"},
-			    {"login-http", "HTTP 403"},
-			    {"login-cookie", "No session cookie returned"},
-			    {"login-malformed-cookie", "Set-Cookie header missing session cookie"},
-			    {"mfa-invalid", "Failed to parse MFA response"},
-			    {"mfa-rejected", "MFA authentication failed"},
-			    {"bootstrap-invalid", "Failed to parse bootstrap token response"}};
-			Require(r.error.find(expected.at(scenario)) != string::npos);
-		});
-	}
 
-	test("sql_login_json_status_private", [&] {
+	for (int status : {200, 400, 403, 429, 501}) {
+		http->status = status;
+		for (const auto &entry : vector<string> {"boilstream_login", "boilstream_register_user"}) {
+			test((entry + "_unverified_" + std::to_string(status) + "_private").c_str(), [&] {
+				auto before = http->requests;
+				bool rejected = false;
+				auto r = Capture([&] {
+					auto sql = "PRAGMA " + entry + "('" + AUTHORITY + "/" + MARKER + "@example.com','" + MARKER + "'" +
+					           (entry == "boilstream_login" ? ",'123456')" : ")");
+					auto result = connection.Query(sql);
+					Require(result && result->HasError());
+					rejected = true;
+					throw std::runtime_error(result->GetError());
+				});
+				Require(rejected && r.failed && http->requests == before + 1);
+				Require(r.error.find("Application protocol exchange failed") != string::npos ||
+				        r.error.find("Failed to fetch CSRF token") != string::npos);
+				Private(r);
+			});
+		}
+	}
+	test("sql_json_error_drops_untrusted_status_and_payload", [&] {
 		Require(!connection.Query("SET errors_as_json=true")->HasError());
-		auto result = connection.Query("PRAGMA boilstream_login('" + string(argv[1]) + "/csrf-http/" + MARKER +
-		                               "@example.com','" + MARKER + "','123456')");
-		auto reset = connection.Query("SET errors_as_json=false");
-		Require(reset && !reset->HasError());
-		Require(result && result->HasError());
+		http->fail = true;
+		auto before = http->requests;
+		auto result = connection.Query("PRAGMA boilstream_login('" + AUTHORITY + "/" + MARKER + "@example.com','" +
+		                               MARKER + "','123456')");
+		http->fail = false;
+		Require(!connection.Query("SET errors_as_json=false")->HasError());
+		Require(result && result->HasError() && http->requests == before + 1);
 		Captured captured;
 		captured.error = result->GetError();
 		Private(captured);
-		Require(captured.error.find("HTTP 403") != string::npos);
 		Require(captured.error.find("exception_type") != string::npos);
 		Require(captured.error.find("error_location") == string::npos);
+		Require(captured.error.find("status_code") == string::npos);
 	});
-	for (auto status : {400, 429, 501}) {
-		const auto name = "http_post_" + std::to_string(status) + "_keeps_body_private";
-		test(name.c_str(), [&] {
-			BoilstreamConnectionState pending;
-			pending.is_exchanging = true;
-			auto r = Capture([&] {
-				storage.HttpPostWithState(string(argv[1]) + "/" + std::to_string(status) + "/" + MARKER, MARKER,
-				                          pending);
-			});
-			Require(r.failed && r.error.find(std::to_string(status)) != string::npos);
-			Private(r);
+	for (const auto &method : vector<string> {"GET", "POST", "DELETE"}) {
+		test((method + "_failure_releases_recursion_guard").c_str(), [&] {
+			http->fail = true;
+			auto before = http->requests;
+			for (int attempt = 0; attempt < 2; ++attempt) {
+				BoilstreamConnectionState pending;
+				Channel(pending);
+				auto r = Capture([&] {
+					if (method == "GET")
+						storage.HttpGetWithState(AUTHORITY + "/secrets/" + MARKER, pending);
+					else if (method == "DELETE")
+						BoilstreamSessionPublicationTestAccess::Delete(storage, AUTHORITY + "/secrets/" + MARKER,
+						                                               pending);
+					else
+						storage.HttpPostWithState(AUTHORITY + "/auth/email/login", MARKER, pending);
+				});
+				Require(r.failed && r.error.find("Application protocol exchange failed") != string::npos);
+				Require(pending.access_token.empty() && pending.session_key.empty());
+				Private(r);
+			}
+			Require(http->requests == before + 2);
+			http->fail = false;
 		});
 	}
-
-	test("http_get_error_clears_recursion_guard", [&] {
-		BoilstreamConnectionState pending;
-		pending.session_key.assign(32, 9);
-		pending.region = MARKER;
-		pending.access_token = TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX;
-		pending.token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(1);
-		string body;
-		auto r = Capture([&] { body = storage.HttpGetWithState(string(argv[1]) + "/403/" + MARKER, pending); });
-		Require(!r.failed && body.empty());
-		Private(r);
-		r = Capture([&] { body = storage.HttpGetWithState(string(argv[1]) + "/200/" + MARKER, pending); });
-		Require(!r.failed && body.find(MARKER) != string::npos);
-		Private(r);
-	});
-	test("http_delete_error_keeps_status_and_clears_recursion_guard", [&] {
-		BoilstreamConnectionState pending;
-		pending.session_key.assign(32, 9);
-		pending.region = MARKER;
-		pending.access_token = TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX + TOKEN_PREFIX;
-		pending.token_expires_at = std::chrono::system_clock::now() + std::chrono::hours(1);
-		for (int attempt = 0; attempt < 2; ++attempt) {
-			auto r = Capture([&] {
-				BoilstreamSessionPublicationTestAccess::Delete(storage, string(argv[1]) + "/403/" + MARKER, pending);
-			});
-			Require(r.failed && r.error.find("403") != string::npos);
-			Private(r);
-		}
-	});
 
 	test("concurrent_errors_keep_their_own_status", [&] {
 		std::atomic<bool> correct {true};
@@ -318,25 +263,6 @@ int main(int argc, char **argv) {
 		Require(!r.failed && correct);
 		Private(r);
 	});
-	for (const auto &scenario : vector<string> {"csrf-invalid", "csrf-http", "signup-rejected"}) {
-		test(("sql_registration_" + scenario + "_private").c_str(), [&] {
-			bool rejected = false;
-			auto r = Capture([&] {
-				auto result = connection.Query("PRAGMA boilstream_register_user('" + string(argv[1]) + "/register-" +
-				                               scenario + "/" + MARKER + "@example.com','" + MARKER + "')");
-				Require(result && result->HasError());
-				rejected = true;
-				throw std::runtime_error(result->GetError());
-			});
-			Require(rejected && r.failed);
-			Private(r);
-			const std::map<string, string> expected {{"csrf-invalid", "Failed to parse CSRF response"},
-			                                         {"csrf-http", "HTTP 403"},
-			                                         {"signup-rejected", "Signup failed"}};
-			Require(r.error.find(expected.at(scenario)) != string::npos);
-		});
-	}
-
 	test("secret_base64_errors_do_not_echo_secret", [&] {
 		auto r = Capture([&] {
 			BoilstreamSessionPublicationTestAccess::Decode(storage, SecretManager::Get(*db.instance),

@@ -85,14 +85,17 @@ bounded append and exceptional secret erasure. Native tests have subprocess dead
 
 The stock baseline also runs `AuthDiagnostics_debug`, `AuthDiagnostics_release`,
 `RegistrationOwnership`, `RegistrationOutput`, `RegistrationHttp` and
-`RequiredResponseSignature`. Their loopback fixtures exercise production handlers
-and reject secret leaks, wrong owners, stale results and forged HTTP replies.
+`RequiredApplicationProtocol`. Diagnostics and application-boundary cases inject
+untrusted replies into the actual transport; ownership/output cases exercise real
+ClientContexts. `RegistrationHttp` and `SessionMemoryOnly` still require migration
+from the old signed-header protocol and are not release qualification evidence.
 
 ## Not covered without a server
 
-Loopback fixtures cover registration/MFA, HTTP errors, signed responses and failed
-resume. Full server-backed token exchange, credential rotation and remote catalog
-queries still belong to product/staging gates. Browser authentication has its own
+The private real-server gate covers successful encrypted authentication on native
+and both WASM runtimes. Registration/MFA, resume, credential rotation and remote
+catalog coverage must also be qualified there; public adversarial fixtures only
+prove rejection, not successful server interoperability. Browser authentication has its own
 remaining boundaries documented in `wasm/WASM_TEST_STATUS.md`.
 
 ## Adding tests

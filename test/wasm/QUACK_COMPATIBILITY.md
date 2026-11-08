@@ -22,25 +22,25 @@ WASM_VARIANTS=wasm_threads npm test --prefix test/wasm
 
 The dependency builder uses unmodified Quack revision
 `f96420ed46aee9c42064bdb99ddfd1230d6c0086`, the existing pinned DuckDB host, and
-OpenSSL 3.5.9 with a verified source archive SHA256. **Every invocation creates a
-fresh temporary source/build/install tree for OpenSSL and a fresh CMake build tree
-for Quack.** Neither stale objects nor a previous SDK's libraries are reused.
-A failed build exits nonzero and cannot produce a new receipt. DuckDB source and
-its installed libraries are not modified.
+OpenSSL 3.5.9 with a verified source archive SHA256. Release-redirect download
+failures fall back to the pinned GitHub asset API; both paths require that same
+checksum. Persistent OpenSSL Make and
+Quack CMake/Ninja trees are updated before the harness loads the dependency.
+The source revisions and Emscripten version must match the pinned baseline.
+OpenSSL build directories are separate for each version and SDK. Failed builds
+stop testing; no existing artifact is accepted as a substitute.
 
-The completed module and `quack.build.json` receipt are placed under
-`build/compatibility/v2.0.0/wasm_threads/`. Before running a browser, the harness
-checks the source/SDK/recipe identity, artifact SHA256, actual shared-memory import,
-and exported Quack entrypoint. Replacing the artifact or changing the build inputs
-requires a rebuild. The receipt records a local build; it is not an upstream
-signature or independent attestation.
+The completed module is placed under `build/compatibility/v2.0.0/wasm_threads/`.
+The harness checks its actual shared-memory import and exported Quack entrypoint.
+Downloaded release archives and the upstream EH artifact retain their checksum
+verification. Local source hash inventories and build receipts are not required.
 
 `npm test` has one mandatory compatibility path: Quack must autoload, own its
 secret type, create/drop a client secret, and leave the regression suite working.
 There is no accepted-incompatibility fallback. `test:compatibility` remains an
 alias for the same strict browser runner. The unavailable-optional-dependency
 regression is tested separately. The CI workflow uploads the rebuilt dependency
-and its receipt alongside BoilStream.
+alongside BoilStream.
 
 ## Distribution boundary
 
@@ -59,11 +59,7 @@ to BoilStream's native library dependencies. No existing release tag is moved.
 
 ## BoilStream build freshness
 
-The qualification helper also removes its own generated variant build directory
-before compiling BoilStream, preventing reuse across SDK changes. Both builders snapshot their inputs before compiling and refuse a receipt if those inputs change during the build. Quack compiles an immutable Git archive in its temporary tree. Cargo is invoked
-on every WASM make build so it tracks all Rust modules, including future ones.
-Before browser execution, `boilstream.build.json` must match the current sources,
-Cargo lock/configuration, recipes, baseline, submodule revisions and artifact hash.
-A missing receipt, stale source snapshot or replaced artifact fails before launch.
-These qualification receipts are uploaded with the CI artifacts; central community
-builds still use the normal make targets and do not require browser receipts.
+The qualification helper runs ordinary CMake/Cargo incremental builds before
+loading BoilStream. CMake source/platform selection is checked and Cargo tracks
+Rust source and lockfile changes. Neither builder forces clean builds or produces
+source fingerprints. Central community builds retain their normal make targets.

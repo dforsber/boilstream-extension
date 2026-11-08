@@ -113,10 +113,13 @@ test('threaded Quack checks the actual shared-memory import, not the filename', 
   assert.deepEqual(memoryImports(module(false)), [{ module: 'env', field: 'memory', shared: false }]);
   assert.throws(() => memoryImports(module(true).subarray(0, 16)), /Truncated/);
 });
-test('Quack receipts reject changed source inputs and replaced artifacts', async () => {
-  const { verifyQuackBuild, sha256 } = await import('./quack-build.js');
-  const bytes = Buffer.from('synthetic artifact');
-  const inputs = { revision: 'pinned-source' };
-  assert.throws(() => verifyQuackBuild(bytes, { inputs: { revision: 'different' }, sha256: sha256(bytes) }, inputs), /inputs changed/);
-  assert.throws(() => verifyQuackBuild(bytes, { inputs, sha256: 'wrong' }, inputs), /differs from its build receipt/);
+test('threaded Quack rejects non-shared modules and missing entrypoints', async () => {
+  const { assertThreadedQuack } = await import('./quack-build.js');
+  const module = shared => new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    2, 16, 1, 3, 101, 110, 118, 6, 109, 101, 109, 111, 114, 121,
+    2, shared ? 3 : 1, 0, 1,
+  ]);
+  assert.throws(() => assertThreadedQuack(module(false)), /must import shared memory/);
+  assert.throws(() => assertThreadedQuack(module(true)), /Missing real Quack entrypoint/);
 });

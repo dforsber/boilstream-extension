@@ -47,9 +47,6 @@ jobs:
         working-directory: test/wasm
       - run: npx playwright install --with-deps chromium
         working-directory: test/wasm
-      - name: Build compatible shared-memory Quack from pinned source
-        if: matrix.variant == 'wasm_threads'
-        run: bash scripts/build-quack-wasm.sh
       - run: ./build-wasm-fixed.sh '${{ matrix.variant }}'
       - run: bash opaque-client/test-wasm/test-ffi.sh
         env:
@@ -66,5 +63,4 @@ jobs:
           path: |
             build/${{ matrix.variant }}/extension/boilstream/boilstream.duckdb_extension.wasm
             build/compatibility/v2.0.0/${{ matrix.variant }}/quack.duckdb_extension.wasm
-            build/compatibility/v2.0.0/${{ matrix.variant }}/quack.build.json
           if-no-files-found: error

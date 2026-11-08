@@ -11,17 +11,16 @@ library and matching HTTPFS artifact. The mode selects whether `BOILSTREAM_DEBUG
 qualify an entire product Release build.
 
 Run the registered CTest cases with `ctest -R '^AuthDiagnostics_' --output-on-failure`.
-The Python runner starts only a loopback synthetic HTTP server and has a 30-second
-child deadline. It needs no account, password, external service or persistent
-credential file. It asserts request counts as well as native case outcomes.
+The executables inject adversarial responses at the actual HTTP transport boundary,
+assert exact handshake request counts, and need no account or external service.
 
-The cases cover secret markers in logs and errors, structured exception metadata,
-exact status preservation, malformed cipher headers, real SQL login/registration
-failure stages, malformed cookies, successful response delivery, request reuse
-after errors, and simultaneous exception handling. Captured diagnostics are never
-printed. A passing case must reach its intended failure stage; merely throwing is
-insufficient. Full OPAQUE success, browser/WASM behavior, registration ownership
-and mandatory response-signature enforcement remain separate qualification work.
+Cases cover secret markers in logs and errors, structured exception metadata,
+trusted status preservation, untrusted status rejection, real SQL login/registration
+failures, fresh channel attempts after failures, and simultaneous exception handling.
+Captured diagnostics are never printed. Secret serialization and Rust ownership
+checks remain real calls. Positive authentication and malformed *authenticated*
+application response coverage belong to the private real-server gate and parser
+suites; handshake rejection does not prove those later stages were reached.
 
 ## Registration ownership
 
