@@ -12,8 +12,8 @@ responsibilities; a public green check alone does not qualify authentication.
 - Missing/wrong installation pins fail; one-use bootstrap login succeeds with the
   trusted key; consumed bootstrap credentials cannot be reused.
 - Browser secret create/list/delete uses the real compatible Quack secret type.
-  An unrelated tenant's fixture secret is excluded. Independent connections work
-  concurrently without sharing channel ownership.
+  An unrelated tenant's fixture secret is excluded. Multiple connections coexist
+  without sharing channel ownership.
 - A modified encrypted mutation reply is rejected without retry. That channel
   becomes unusable; a healthy sibling sees the single committed mutation and can
   reconcile its unknown outcome. Actual database session revocation produces a
@@ -27,7 +27,7 @@ responsibilities; a public green check alone does not qualify authentication.
   can be retried, completed enrollment cannot be reused, and ten unique recovery
   codes are returned. Replayed TOTP is refused; a fresh code permits email login.
   Email tenant secrets remain isolated and survive another tenant's revocation.
-- Production Rust WASM C ABI checks pass34 EH /35 threaded assertions. Protocol
+- Production Rust WASM C ABI checks pass36 EH /37 threaded assertions. Protocol
   core tests pass28 cases per variant. Native Rust strict Clippy passes.
 
 The missing POST response headers in the pinned host are no longer an
@@ -42,7 +42,7 @@ that missing pins cause no network I/O and forged server proof cannot release an
 application request or publish identity. It does **not** claim successful login.
 
 The private server's `make test-application-protocol-clients` explicitly includes
-all five real-router/registration/native/EH/pthread cases, including tests normally excluded
+all six real-router/registration/native/EH/pthread/resumption cases, including tests normally excluded
 from artifact-free unit runs. Missing artifacts fail. The private release target
 `test-application-protocol-release` first audits dependencies, then runs standalone
 transport tests and the loaded-client gate. It must pass for coordinated release.
@@ -59,15 +59,19 @@ make targets remain unchanged.
 
 ## Outstanding coverage and release work
 
-All24 native C++ suites pass, including migrated memory-only resume and
-registration-response parsing/result ownership. Malformed authenticated JSON,
-exact cookie parsing, control bytes, bounds and duplicate fields have direct
-production parser tests. Successful resumption,
-credential rotation, managed catalog credential vending and live remote Quack
-queries still need actual-server coverage. Catalog polling has pure parser/planner
-tests and real channel rejection; these do not replace successful remote coverage.
-Obsolete production wire cleanup, dependency review, remaining release gates and
-three final reviews remain open. No full GitHub CI-green or publication claim.
+All21 native C++ suites pass. The lower count follows removal of three suites
+exclusively for the retired signing/encryption protocol; active parser, memory,
+credential cleanup and lifecycle regressions remain. Successful resumption now
+runs on native, EH and pthread clients: fresh channel, one-use rotation, preserved
+original expiry, live revocation and atomic publication checks pass.
+
+Managed catalog credential vending and live remote Quack queries still require
+the receiving server owner's backend/full-product qualification. Catalog polling
+parser/planner and failure tests do not substitute for those successful paths.
+Obsolete production wire and unused JS wrapper cleanup are complete. Dependency
+repair, coordinated release-gate enforcement and final combined release approval
+remain open. GitHub status must be checked for the exact candidate being released;
+local passing tests are not a publication claim.
 
 ## Threaded runtime and Quack
 

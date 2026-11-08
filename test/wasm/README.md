@@ -67,7 +67,7 @@ proxy authentication traffic.
 - Both single-threaded and threaded workers, with deadlines and worker cleanup.
 - Server path traversal rejection, byte ranges, and cross-origin isolation headers.
 
-CI also executes 34 base / 35 threaded Rust WASM FFI assertions using the same archive linked into
+CI also executes 36 base / 37 threaded Rust WASM FFI assertions using the same archive linked into
 each extension, including RFC 4231 HMAC and malformed OPAQUE response checks.
 See [`../../opaque-client/test-wasm/README.md`](../../opaque-client/test-wasm/README.md).
 

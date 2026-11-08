@@ -145,3 +145,41 @@ test('native driver refuses source or extension from a different build tree', as
     assert.throws(() => assertNativeSelection({ ...selected, extension: join(root, 'other.duckdb_extension') }), /selected build tree/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// Exercise the real shell entrypoint with a pre-existing archive and a failing
+// compiler. Existence must never let a stale object bypass the required build.
+test('FFI runner refuses a failed build even when an old archive exists', async () => {
+  const { mkdtemp, mkdir, writeFile, copyFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const root = await mkdtemp(join(tmpdir(), 'boilstream-ffi-build-'));
+  try {
+    for (const part of ['opaque-client/test-wasm', 'test/wasm', 'bin',
+      'build/wasm-ffi-rust/wasm32-unknown-emscripten/release'])
+      await mkdir(join(root, part), { recursive: true });
+    await copyFile(new URL('../../opaque-client/test-wasm/test-ffi.sh', import.meta.url),
+      join(root, 'opaque-client/test-wasm/test-ffi.sh'));
+    await writeFile(join(root, 'test/wasm/baseline.json'), JSON.stringify(baseline));
+    await writeFile(join(root, 'build/wasm-ffi-rust/wasm32-unknown-emscripten/release/libopaque_client.a'),
+      'stale-fixture-not-a-library');
+    await writeFile(join(root, 'bin/cargo'), '#!/bin/sh\necho "fixture compiler failure" >&2\nexit 17\n', { mode: 0o755 });
+    await writeFile(join(root, 'bin/emcc'), `#!/bin/sh
+if [ "$1" = --version ]; then
+  echo 'emcc (Emscripten) ${baseline.emscriptenVersion}'
+else
+  echo 'unexpected link after build failure' >&2
+  exit 99
+fi
+`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}` };
+    delete env.BOILSTREAM_RUST_WASM_LIB;
+    delete env.WASM_BUILD_TYPE;
+    const result = spawnSync('bash', [join(root, 'opaque-client/test-wasm/test-ffi.sh')],
+      { env, encoding: 'utf8', timeout: 10_000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 17, result.stderr);
+    assert.match(result.stderr, /fixture compiler failure/);
+    assert.doesNotMatch(result.stderr, /unexpected link/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

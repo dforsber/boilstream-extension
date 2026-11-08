@@ -16,8 +16,12 @@ else
     exit 1
   fi
   rust_toolchain="$(node -e 'console.log(require(process.argv[1]).rustToolchain)' "$repo/test/wasm/baseline.json")"
-  (cd "$repo/opaque-client" && CARGO_BUILD_BUILD_DIR="$output/rust-build" cargo "+$rust_toolchain" build --locked --release --target wasm32-unknown-emscripten --target-dir "$output/rust")
-  rust_library="$output/rust/wasm32-unknown-emscripten/release/libopaque_client.a"
+  # Cargo tracks source/lock changes; retain intermediates across test runs.
+  # Keep output paths explicit so an inherited server/global cache cannot select
+  # the library. Only the small test executable uses a temporary directory.
+  rust_output="$repo/build/wasm-ffi-rust"
+  (cd "$repo/opaque-client" && CARGO_BUILD_BUILD_DIR="$rust_output/build" cargo "+$rust_toolchain" build --locked --release --target wasm32-unknown-emscripten --target-dir "$rust_output")
+  rust_library="$rust_output/wasm32-unknown-emscripten/release/libopaque_client.a"
 fi
 test -s "$rust_library"
 thread_flags=()
