@@ -529,7 +529,7 @@ bool RestApiSecretStorage::PerformOpaqueLoginCommon(const string &password, Boil
 		// Store OPAQUE session_key (convert string to vector<uint8_t>)
 		conn_state.session_key.assign(session_key_decoded.begin(), session_key_decoded.end());
 
-		// Derive refresh_token from session_key using HKDF-Expand per SECURITY_SPECIFICATION.md:158
+		// Derive the refresh credential with the production HKDF-Expand FFI.
 		// Using Rust crypto implementation (works on all platforms including WASM)
 		uint8_t derived_key[32];
 		boilstream::WipeOnExit wipe_derived_key(derived_key);

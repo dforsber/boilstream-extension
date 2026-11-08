@@ -43,7 +43,8 @@ connection-generation checks finish, so failed login or renewal cannot overwrite
 an existing connection's identity.
 
 This is a breaking integration candidate, not a release-ready patch. Native and
-DuckDB 2.0 browser/pthread end-to-end qualification, harness updates and release
-gates remain in TASKS.md. The SPA and direct server-side DuckDB integration are
+DuckDB 2.0 browser/pthread tests are described in the [test guide](../test/README_TESTS.md).
+Coordinated server dependency and full-product qualification are still required
+before release. The SPA and direct server-side DuckDB integration are
 unchanged. Server implementation/peer tests remain private. Public builds need
 only client sources and locked public dependencies.

@@ -1,4 +1,4 @@
-//! Client-only pinned handshake and envelope candidate. Not integrated yet.
+//! Client-only pinned handshake and authenticated envelopes for the DuckDB client.
 //! Bootstrap trust, entropy, time and transport are supplied by the application.
 //! Server protocol processing is deliberately not included, even behind features.
 //!
