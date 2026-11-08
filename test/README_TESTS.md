@@ -58,15 +58,13 @@ The harness never substitutes another build tree or a separate server library.
 | Executable | Tags | Covers |
 |------------|------|--------|
 | `boilstream_test` | `[security]` | Token format validation, session state, connection user mapping, bootstrap hash, thread safety (`[.]`, hidden). |
-| `boilstream_crypto_test` | `[crypto]` | HKDF key derivation, response signature verification, header extraction, secure zeroization, constant-time HMAC compare, canonical response format, refresh-token derivation and storage round-trip. |
-| `boilstream_conformance_test` | `[conformance]` | RFC 4231 / RFC 5869 / SHA-256 vectors, SECURITY_SPECIFICATION.md key derivation, canonical formats, request signing, response verification, AES-256-GCM. |
-| `boilstream_encryption_test` | `[encryption]` | Response decryption and HMAC ordering. |
+| `boilstream_crypto_test` | `[crypto]` | Production Rust C ABI SHA-256 and OPAQUE refresh-credential known-answer vectors, binary input, invalid pointers and unchanged output on failure. |
 | `boilstream_catalog_version_test` | `[catalog_versions]` | Catalog version polling route, rate limiting, per-connection tracking. |
 | `boilstream_connection_state_test` | `[connection]` | Per-connection state isolation, expiration sentinels, snapshot thread safety. |
 | `session_routing_test` | `[session-routing]` | Connection-id to session routing, re-bootstrap, concurrency. |
 | `input_validation_test` | `[input_validation]` | Malformed JSON, size limits, SQL injection in values, error-message hygiene. |
 | `quack_attach_red_test` | `[quack]` | Managed catalog credential vending, user secret precedence, RFC 3339 expiry. |
-| `aws_signing_test`, `registration_ffi_test` | `[aws]`, `[registration]` | Rust FFI: SigV4 signing, registration validation, TOTP URI. |
+| `registration_ffi_test` | `[registration]` | Rust FFI registration validation and TOTP URI. |
 | `wasm_lock_ordering_test` | `[wasm]` | Actual connection-state locking and reentrancy, executed natively. |
 
 ### Integration lane (enabled above and in CI)
@@ -106,3 +104,9 @@ remaining boundaries documented in `wasm/WASM_TEST_STATUS.md`.
   the quack extension is needed). Assert behaviour (results or error text), not just `statement ok`.
 - C++: add a `TEST_CASE` to the matching file, or a new executable in `test/cpp/CMakeLists.txt` linked
   through `link_duckdb_static(<target>)` when it needs DuckDB.
+
+The retired header-signing/cipher-negotiation protocol has no production path or
+FFI exports. Its old tests have been removed; authenticated wire cryptography is
+covered by `protocol-client` and the real native/EH/pthread server gate. Credential
+erasure is covered by `CredentialCleanup`, and response schema validation by
+`RegistrationResponses`. These suites do not claim legacy protocol compatibility.

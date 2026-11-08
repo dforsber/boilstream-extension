@@ -23,9 +23,6 @@ struct yyjson_val;
 }
 
 // Forward declarations for test friend access (outside namespace)
-class BoilstreamCryptoTestAccess;
-class BoilstreamConformanceTestAccess;
-class BoilstreamEncryptionTestAccess;
 class BoilstreamCatalogVersionTestAccess;
 class BoilstreamInputValidationTestAccess;
 class BoilstreamSessionPublicationTestAccess;
@@ -55,9 +52,6 @@ string BuildManagedCatalogAttachSql(const ManagedCatalogCredentialEnvelope &cred
 //! for multi-tenant secret management
 class RestApiSecretStorage : public CatalogSetSecretStorage {
 	// Allow test code to access private methods for testing
-	friend class ::BoilstreamCryptoTestAccess;
-	friend class ::BoilstreamConformanceTestAccess;
-	friend class ::BoilstreamEncryptionTestAccess;
 	friend class ::BoilstreamCatalogVersionTestAccess;
 	friend class ::BoilstreamInputValidationTestAccess;
 	friend class ::BoilstreamSessionPublicationTestAccess;
@@ -256,66 +250,8 @@ private:
 	void WriteSecretWithState(const BaseSecret &secret, OnCreateConflict on_conflict,
 	                          BoilstreamConnectionState &conn_state, optional_ptr<CatalogTransaction> transaction);
 
-	//! Request signing result containing all required headers
-	struct SigningResult {
-		string signature;        // Base64-encoded HMAC signature
-		string date_time;        // ISO8601 timestamp (YYYYMMDDTHHMMSSZ)
-		string credential_scope; // AWS-style credential scope
-	};
-
-	//! Use SessionSnapshot from BoilstreamConnectionState
-	using SessionSnapshot = BoilstreamConnectionState::SessionSnapshot;
-
-	//! Extract all x-boilstream-* headers from HTTP response
-	case_insensitive_map_t<string> ExtractBoilstreamHeaders(const HTTPHeaders &headers);
-
-	//! Build authenticated request headers with signature (uses connection state)
-	HTTPHeaders BuildAuthenticatedHeaders(const string &method, const string &url, const string &body,
-	                                      BoilstreamConnectionState &conn_state,
-	                                      vector<uint8_t> *response_key = nullptr);
-
-	//! Verify authenticated response signature and timestamp
-	void VerifyAuthenticatedResponse(const string &response_body, uint16_t status_code,
-	                                 const HTTPHeaders &response_headers, const vector<uint8_t> &session_key_param);
-
 	//! Extract user context from transaction (user_context_id from ClientData)
 	string ExtractUserContext(optional_ptr<CatalogTransaction> transaction);
-
-	//! Derive signing key from session_key using HKDF-SHA256
-	vector<uint8_t> DeriveSigningKey(const vector<uint8_t> &session_key_param);
-
-	//! Derive encryption key from session_key using HKDF-SHA256
-	vector<uint8_t> DeriveEncryptionKey(const vector<uint8_t> &session_key_param);
-
-	//! Derive integrity key from session_key using HKDF-SHA256 (for response verification)
-	vector<uint8_t> DeriveIntegrityKey(const vector<uint8_t> &session_key_param);
-
-	//! Sign an HTTP request with HMAC-SHA256 (canonical request format)
-	//! Returns signing result with signature, date_time, and credential_scope
-	SigningResult SignRequest(const string &method, const string &url, const string &body, uint64_t timestamp,
-	                          uint64_t sequence, const vector<uint8_t> &session_key_param,
-	                          const string &access_token_param, const string &region_param);
-
-	//! Verify HTTP response signature (HMAC-SHA256 over canonical response format)
-	//! Throws IOException if signature verification fails
-	void VerifyResponseSignature(const string &response_body, uint16_t status_code,
-	                             const case_insensitive_map_t<string> &headers,
-	                             const vector<uint8_t> &session_key_param);
-
-	//! Decrypt encrypted response body (AES-256-GCM or ChaCha20-Poly1305)
-	//! Performs HMAC verification before decryption per SECURITY_SPECIFICATION.md
-	//! Returns plaintext JSON string
-	string DecryptResponse(const string &encrypted_response_body, const vector<uint8_t> &session_key_param,
-	                       uint16_t cipher_suite);
-
-	//! Check if response is encrypted by examining X-Boilstream-Encrypted header
-	//! Returns true if header is present and set to "true"
-	bool IsResponseEncrypted(const case_insensitive_map_t<string> &headers);
-
-	//! Parse cipher suite from X-Boilstream-Cipher header
-	//! Returns cipher suite ID (e.g., 0x0001 for AES-256-GCM)
-	//! Throws IOException if header is missing or invalid
-	uint16_t ParseCipherSuite(const case_insensitive_map_t<string> &headers);
 
 	//! Serialize secret to JSON string
 	string SerializeSecret(const BaseSecret &secret);

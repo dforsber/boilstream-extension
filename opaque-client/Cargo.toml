@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 # staticlib for standalone C FFI builds (native and WASM)
-# lib (rlib) for embedding in a shared rust-bridge staticlib (avoids duplicate Rust std)
+# lib (rlib) for the client crate tests
 # Note: cdylib removed - not supported on musl targets and not needed for our use case
 crate-type = ["staticlib", "lib"]
 
@@ -19,13 +19,12 @@ sha2_opaque = { package = "sha2", version = "0.11" }
 base64 = "0.22"
 sha2 = "0.10.9"
 hmac = "0.12.1"
-hex = "0.4.3"
-# Decryption uses no AES-GCM RNG; avoid its obsolete getrandom 0.2 backend.
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
-hkdf = "0.12"
 zeroize = { version = "1.8", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+hex = "0.4.3"
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

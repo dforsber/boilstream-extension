@@ -242,16 +242,6 @@ if(BOILSTREAM_INTEGRATION_TESTS)
 
 endif()
 
-# AWS Signing test executable (links with Rust library)
-add_executable(aws_signing_test test_aws_signing.cpp)
-
-target_include_directories(
-  aws_signing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include)
-
-# Link with Rust OPAQUE client library
-target_link_libraries(aws_signing_test PRIVATE Catch2::Catch2)
-link_rust_dependencies(aws_signing_test)
-
 # Registration FFI test executable (email/password validation, TOTP URI
 # building)
 add_executable(registration_ffi_test test_boilstream_registration.cpp)
@@ -263,78 +253,11 @@ target_include_directories(
 target_link_libraries(registration_ffi_test PRIVATE Catch2::Catch2)
 link_rust_dependencies(registration_ffi_test)
 
-# Crypto test executable (integrity, HMAC, key derivation)
-add_executable(
-  boilstream_crypto_test
-  test_boilstream_crypto.cpp ../../src/boilstream_secret_storage.cpp
-  ../../src/opaque_wrapper.cpp)
-# Note: mbedtls_wrapper.cpp is already in ${DUCKDB_LIB}, don't compile it again!
-
-target_include_directories(
-  boilstream_crypto_test
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${DUCKDB_SOURCE_DIR}/src/include
-          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-
-# Enable debug logging for OPAQUE authentication flows
-target_compile_definitions(boilstream_crypto_test PRIVATE BOILSTREAM_DEBUG)
-
-# Link extension's DuckDB and mbedTLS libraries
+# Production SHA-256 and refresh-credential C ABI known-answer tests.
+add_executable(boilstream_crypto_test test_boilstream_crypto.cpp)
+target_include_directories(boilstream_crypto_test PRIVATE ../../src/include)
 target_link_libraries(boilstream_crypto_test PRIVATE Catch2::Catch2)
-link_duckdb_static(boilstream_crypto_test)
-
-# Link Rust dependencies
 link_rust_dependencies(boilstream_crypto_test)
-
-# Conformance test executable (RFC 4231, RFC 5869, AWS SigV4 standards
-# validation)
-add_executable(
-  boilstream_conformance_test
-  test_boilstream_conformance.cpp ../../src/boilstream_secret_storage.cpp
-  ../../src/opaque_wrapper.cpp)
-# Note: mbedtls_wrapper.cpp is already in ${DUCKDB_LIB}, don't compile it again!
-
-target_include_directories(
-  boilstream_conformance_test
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${DUCKDB_SOURCE_DIR}/src/include
-          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-
-# Enable debug logging for OPAQUE authentication flows
-target_compile_definitions(boilstream_conformance_test PRIVATE BOILSTREAM_DEBUG)
-
-# Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_conformance_test PRIVATE Catch2::Catch2)
-link_duckdb_static(boilstream_conformance_test)
-
-# Link Rust dependencies
-link_rust_dependencies(boilstream_conformance_test)
-
-# Encryption test executable (response encryption/decryption)
-add_executable(
-  boilstream_encryption_test
-  test_boilstream_encryption.cpp ../../src/boilstream_secret_storage.cpp
-  ../../src/opaque_wrapper.cpp)
-# Note: mbedtls_wrapper.cpp is already in ${DUCKDB_LIB}, don't compile it again!
-
-target_include_directories(
-  boilstream_encryption_test
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/include
-          ${DUCKDB_SOURCE_DIR}/src/include
-          ${DUCKDB_SOURCE_DIR}/third_party/mbedtls/include
-          ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
-
-# Enable debug logging for OPAQUE authentication flows
-target_compile_definitions(boilstream_encryption_test PRIVATE BOILSTREAM_DEBUG)
-
-# Link extension's DuckDB and mbedTLS libraries
-target_link_libraries(boilstream_encryption_test PRIVATE Catch2::Catch2)
-link_duckdb_static(boilstream_encryption_test)
-
-# Link Rust dependencies
-link_rust_dependencies(boilstream_encryption_test)
 
 # Catalog version test executable (rate limiting, version tracking)
 add_executable(
@@ -460,8 +383,6 @@ link_rust_dependencies(quack_attach_red_test)
 enable_testing()
 add_test(NAME BoilstreamSecurityTests COMMAND boilstream_test)
 add_test(NAME BoilstreamCryptoTests COMMAND boilstream_crypto_test)
-add_test(NAME BoilstreamConformanceTests COMMAND boilstream_conformance_test)
-add_test(NAME BoilstreamEncryptionTests COMMAND boilstream_encryption_test)
 add_test(NAME BoilstreamCatalogVersionTests
          COMMAND boilstream_catalog_version_test)
 add_test(NAME BoilstreamConnectionStateTests
@@ -483,7 +404,6 @@ if(BOILSTREAM_INTEGRATION_TESTS)
       "BOILSTREAM_EXTENSION_PATH=${EXTENSION_BUILD_DIR}/extension/boilstream/boilstream.duckdb_extension;BOILSTREAM_HTTPFS_EXTENSION_PATH=${BOILSTREAM_HTTPFS_EXTENSION_PATH};BOILSTREAM_STOCK_EXTENSION_DIRECTORY=${BOILSTREAM_STOCK_EXTENSION_DIRECTORY}"
   )
 endif()
-add_test(NAME AwsSigningTests COMMAND aws_signing_test)
 add_test(NAME RegistrationFFITests COMMAND registration_ffi_test)
 add_test(NAME SessionRoutingTests COMMAND session_routing_test)
 add_test(NAME QuackAttachRedTests COMMAND quack_attach_red_test)

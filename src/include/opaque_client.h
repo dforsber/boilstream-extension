@@ -144,69 +144,11 @@ void opaque_free_registration_state(RegistrationState *state);
  */
 void opaque_free_login_state(LoginState *state);
 
-//===----------------------------------------------------------------------===//
-// AWS SigV4-style Canonical Request Signing
-//===----------------------------------------------------------------------===//
-
-/**
- * Build AWS SigV4-style canonical request
- *
- * @param method HTTP method (e.g., "GET", "POST")
- * @param method_len Length of method string
- * @param canonical_uri URI-encoded path (e.g., "/secrets/my-secret")
- * @param canonical_uri_len Length of canonical_uri
- * @param canonical_query Sorted, URI-encoded query string (e.g., "param1=value1&param2=value2")
- * @param canonical_query_len Length of canonical_query
- * @param canonical_headers Sorted, lowercase headers (e.g., "x-boilstream-date:20251009T120000Z\n")
- * @param canonical_headers_len Length of canonical_headers
- * @param signed_headers Semicolon-separated list of header names (e.g., "x-boilstream-date;x-boilstream-sequence")
- * @param signed_headers_len Length of signed_headers
- * @param payload Request body bytes (can be NULL for empty body)
- * @param payload_len Length of payload in bytes
- * @return OpaqueResult containing canonical request string on success
- *
- * The returned buffer must be freed with opaque_free_buffer.
- */
-// Text fields must be valid UTF-8. A null payload is valid only with zero length.
-OpaqueResult aws_build_canonical_request(const char *method, size_t method_len, const char *canonical_uri,
-                                         size_t canonical_uri_len, const char *canonical_query,
-                                         size_t canonical_query_len, const char *canonical_headers,
-                                         size_t canonical_headers_len, const char *signed_headers,
-                                         size_t signed_headers_len, const uint8_t *payload, size_t payload_len);
-
-/**
- * Derive AWS-style signing key (date-scoped)
- *
- * @param base_signing_key Base signing key derived from session_key via HKDF
- * @param base_signing_key_len Length of base_signing_key (typically 32 bytes)
- * @param date Date string in YYYYMMDD format (e.g., "20251009")
- * @param date_len Length of date string (typically 8)
- * @param region Region identifier (e.g., "us-east-1")
- * @param region_len Length of region string
- * @param service Service name (always "secrets")
- * @param service_len Length of service string
- * @return OpaqueResult containing derived signing key on success
- *
- * The returned buffer must be freed with opaque_free_buffer.
- */
-// Date, region and service must be valid UTF-8; malformed scopes are rejected.
-OpaqueResult aws_derive_signing_key(const uint8_t *base_signing_key, size_t base_signing_key_len, const char *date,
-                                    size_t date_len, const char *region, size_t region_len, const char *service,
-                                    size_t service_len);
-
-/**
- * Sign canonical request with HMAC-SHA256
- *
- * @param signing_key Derived signing key from aws_derive_signing_key
- * @param signing_key_len Length of signing_key (typically 32 bytes)
- * @param canonical_request Canonical request string to sign
- * @param canonical_request_len Length of canonical_request
- * @return OpaqueResult containing base64-encoded signature on success
- *
- * The returned buffer must be freed with opaque_free_buffer.
- */
-OpaqueResult aws_sign_canonical_request(const uint8_t *signing_key, size_t signing_key_len,
-                                        const char *canonical_request, size_t canonical_request_len);
+// SHA-256 and the OPAQUE refresh credential derivation, shared by native/WASM.
+// Non-null inputs must cover their stated lengths. Output must cover 32 bytes
+// and must not overlap the input. Refresh derivation returns nonzero on error.
+void opaque_client_sha256(const uint8_t *input, size_t input_len, uint8_t *output);
+int opaque_client_derive_refresh_token(const uint8_t *session_key, size_t session_key_len, uint8_t *output);
 
 #ifdef __cplusplus
 }

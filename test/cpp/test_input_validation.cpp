@@ -44,25 +44,6 @@ public:
 		storage.CheckCatalogVersions(state);
 	}
 
-	static RestApiSecretStorage::SigningResult SignRequest(RestApiSecretStorage &storage, const std::string &method,
-	                                                       const std::string &url, const std::string &body,
-	                                                       uint64_t timestamp, uint64_t sequence,
-	                                                       const vector<uint8_t> &session_key,
-	                                                       const std::string &access_token, const std::string &region) {
-		return storage.SignRequest(method, url, body, timestamp, sequence, session_key, access_token, region);
-	}
-
-	static std::string DecryptResponse(RestApiSecretStorage &storage, const std::string &encrypted_response_body,
-	                                   const vector<uint8_t> &session_key, uint16_t cipher_suite) {
-		return storage.DecryptResponse(encrypted_response_body, session_key, cipher_suite);
-	}
-
-	static void VerifyResponseSignature(RestApiSecretStorage &storage, const std::string &response_body,
-	                                    uint16_t status_code, const case_insensitive_map_t<std::string> &headers,
-	                                    const vector<uint8_t> &session_key) {
-		storage.VerifyResponseSignature(response_body, status_code, headers, session_key);
-	}
-
 	static unique_ptr<BaseSecret> DeserializeSecret(RestApiSecretStorage &storage, const std::string &json_data,
 	                                                SecretManager &manager) {
 		return storage.DeserializeSecret(json_data, manager);
@@ -139,245 +120,6 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Managed catalog forced expiration 
 	CHECK_FALSE(storage->LookupSecret(scope, "quack", &transaction).HasMatch());
 }
 
-//===----------------------------------------------------------------------===//
-// SECTION 1: Region Validation Tests
-// Ensures no silent fallback to "us-east-1" or other default values
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "SignRequest rejects empty region",
-                 "[input_validation][region][critical]") {
-	SECTION("Empty region string throws error") {
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-		                                                     1234567890, 1, valid_session_key, valid_access_token, ""),
-		    IOException);
-	}
-
-	SECTION("Empty region error message is descriptive") {
-		try {
-			BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-			                                                 1234567890, 1, valid_session_key, valid_access_token, "");
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			REQUIRE(msg.find("region") != std::string::npos);
-			REQUIRE(msg.find("required") != std::string::npos);
-			// Must NOT contain fallback values
-			REQUIRE(msg.find("us-east-1") == std::string::npos);
-		}
-	}
-
-	SECTION("Valid region succeeds") {
-		REQUIRE_NOTHROW(BoilstreamInputValidationTestAccess::SignRequest(
-		    *storage, "GET", "https://api.example.com/secrets", "", 1234567890, 1, valid_session_key,
-		    valid_access_token, "eu-west-1"));
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 2: Access Token Validation Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "SignRequest validates access_token length",
-                 "[input_validation][token][critical]") {
-	SECTION("Empty access_token throws error") {
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-		                                                     1234567890, 1, valid_session_key, "", "us-west-2"),
-		    IOException);
-	}
-
-	SECTION("Short access_token (7 chars) throws error") {
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-		                                                     1234567890, 1, valid_session_key, "1234567", "us-west-2"),
-		    IOException);
-	}
-
-	SECTION("Access token too short error is descriptive") {
-		try {
-			BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-			                                                 1234567890, 1, valid_session_key, "short", "us-west-2");
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			REQUIRE(msg.find("access_token") != std::string::npos);
-			REQUIRE(msg.find("too short") != std::string::npos);
-		}
-	}
-
-	SECTION("Minimum valid access_token (8 chars) succeeds") {
-		REQUIRE_NOTHROW(BoilstreamInputValidationTestAccess::SignRequest(
-		    *storage, "GET", "https://api.example.com/secrets", "", 1234567890, 1, valid_session_key, "12345678",
-		    "us-west-2"));
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 3: DecryptResponse JSON Validation Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "DecryptResponse rejects malformed JSON",
-                 "[input_validation][decrypt][json]") {
-	SECTION("Empty string throws error") {
-		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DecryptResponse(*storage, "", valid_session_key, 0x0001),
-		                  IOException);
-	}
-
-	SECTION("Invalid JSON throws error") {
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, "not json", valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Empty JSON object throws error") {
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, "{}", valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("JSON with null values throws error") {
-		std::string json_with_nulls = R"({
-			"encrypted": true,
-			"nonce": null,
-			"ciphertext": null,
-			"hmac": null
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json_with_nulls, valid_session_key, 0x0001),
-		    IOException);
-	}
-}
-
-TEST_CASE_METHOD(InputValidationTestFixture, "DecryptResponse rejects empty field values",
-                 "[input_validation][decrypt][empty]") {
-	SECTION("Empty nonce throws error") {
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "",
-			"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3Q=",
-			"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Empty ciphertext throws error") {
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "YWJjZGVmZ2hpamts",
-			"ciphertext": "",
-			"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Empty hmac throws error") {
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "YWJjZGVmZ2hpamts",
-			"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3Q=",
-			"hmac": ""
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Error messages are descriptive for empty fields") {
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "",
-			"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3Q=",
-			"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		})";
-		try {
-			BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001);
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			REQUIRE(msg.find("empty") != std::string::npos);
-		}
-	}
-}
-
-TEST_CASE_METHOD(InputValidationTestFixture, "DecryptResponse validates field sizes",
-                 "[input_validation][decrypt][size]") {
-	SECTION("Wrong nonce size (not 12 bytes) throws error") {
-		// Base64 of 8 bytes instead of 12
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "YWJjZGVmZ2g=",
-			"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3Q=",
-			"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Wrong hmac size (not 64 hex chars) throws error") {
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "YWJjZGVmZ2hpamts",
-			"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3Q=",
-			"hmac": "0123456789abcdef"
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-
-	SECTION("Ciphertext too short for AEAD tag throws error") {
-		// Base64 of only 10 bytes (< 16 bytes required for AEAD tag)
-		std::string json = R"({
-			"encrypted": true,
-			"nonce": "YWJjZGVmZ2hpamts",
-			"ciphertext": "YWJjZGVmZ2hpag==",
-			"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		})";
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DecryptResponse(*storage, json, valid_session_key, 0x0001),
-		    IOException);
-	}
-}
-
-TEST_CASE_METHOD(InputValidationTestFixture, "DecryptResponse validates cipher suite",
-                 "[input_validation][decrypt][cipher]") {
-	// Valid JSON structure but unsupported cipher suite
-	std::string valid_structure_json = R"({
-		"encrypted": true,
-		"nonce": "YWJjZGVmZ2hpamts",
-		"ciphertext": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=",
-		"hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	})";
-
-	SECTION("Unsupported cipher suite 0x0000 throws error") {
-		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DecryptResponse(*storage, valid_structure_json,
-		                                                                       valid_session_key, 0x0000),
-		                  IOException);
-	}
-
-	SECTION("Unsupported cipher suite 0x0003 throws error") {
-		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DecryptResponse(*storage, valid_structure_json,
-		                                                                       valid_session_key, 0x0003),
-		                  IOException);
-	}
-
-	SECTION("Unsupported cipher suite 0xFFFF throws error") {
-		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DecryptResponse(*storage, valid_structure_json,
-		                                                                       valid_session_key, 0xFFFF),
-		                  IOException);
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 4: DeserializeSecret JSON Validation Tests
-//===----------------------------------------------------------------------===//
-
 TEST_CASE_METHOD(InputValidationTestFixture, "DeserializeSecret rejects malformed JSON",
                  "[input_validation][deserialize][json]") {
 	Connection conn(*db);
@@ -431,10 +173,6 @@ TEST_CASE_METHOD(InputValidationTestFixture, "DeserializeSecret rejects malforme
 	}
 }
 
-//===----------------------------------------------------------------------===//
-// SECTION 5: ParseExpiresAt Validation Tests
-//===----------------------------------------------------------------------===//
-
 TEST_CASE_METHOD(InputValidationTestFixture, "ParseExpiresAt handles malformed timestamps",
                  "[input_validation][timestamp]") {
 	auto min_time = std::chrono::system_clock::time_point::min();
@@ -470,41 +208,6 @@ TEST_CASE_METHOD(InputValidationTestFixture, "ParseExpiresAt handles malformed t
 		REQUIRE(result > std::chrono::system_clock::now()); // Future date
 	}
 }
-
-//===----------------------------------------------------------------------===//
-// SECTION 6: Session Key Validation Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "SignRequest validates session_key", "[input_validation][session_key]") {
-	SECTION("Empty session_key is handled") {
-		vector<uint8_t> empty_key;
-		// Should either throw or produce a result - must not crash
-		try {
-			auto result = BoilstreamInputValidationTestAccess::SignRequest(
-			    *storage, "GET", "https://api.example.com/secrets", "", 1234567890, 1, empty_key, valid_access_token,
-			    "us-west-2");
-			// If it doesn't throw, that's also acceptable behavior
-		} catch (const std::exception &) {
-			// Throwing is acceptable
-		}
-	}
-
-	SECTION("Short session_key is handled") {
-		vector<uint8_t> short_key = {0x01, 0x02, 0x03}; // Only 3 bytes
-		// Should either throw or produce a result - must not crash
-		try {
-			auto result = BoilstreamInputValidationTestAccess::SignRequest(
-			    *storage, "GET", "https://api.example.com/secrets", "", 1234567890, 1, short_key, valid_access_token,
-			    "us-west-2");
-		} catch (const std::exception &) {
-			// Throwing is acceptable
-		}
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 7: BoilstreamConnectionState Validation Tests
-//===----------------------------------------------------------------------===//
 
 TEST_CASE("BoilstreamConnectionState handles empty values safely", "[input_validation][connection_state]") {
 	BoilstreamConnectionState state;
@@ -588,10 +291,6 @@ TEST_CASE("BoilstreamConnectionState session management", "[input_validation][co
 	}
 }
 
-//===----------------------------------------------------------------------===//
-// SECTION 8: Malicious Input Tests
-//===----------------------------------------------------------------------===//
-
 TEST_CASE_METHOD(InputValidationTestFixture, "Extension handles malicious JSON payloads",
                  "[input_validation][security][malicious]") {
 	Connection conn(*db);
@@ -669,144 +368,13 @@ TEST_CASE_METHOD(InputValidationTestFixture, "Extension handles SQL injection at
 	}
 }
 
-//===----------------------------------------------------------------------===//
-// SECTION 9: Response Signature Validation Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "VerifyResponseSignature validates headers",
-                 "[input_validation][signature][headers]") {
-	case_insensitive_map_t<std::string> headers;
-
-	SECTION("Missing response signature is rejected") {
-	}
-	SECTION("Invalid response signature is rejected") {
-		headers["x-boilstream-response-signature"] = "invalid-signature-format";
-	}
-	SECTION("Request signature cannot replace a response signature") {
-		headers["x-boilstream-signature"] = "YWJjZGVm";
-	}
-	REQUIRE_THROWS_AS(
-	    BoilstreamInputValidationTestAccess::VerifyResponseSignature(*storage, "{}", 200, headers, valid_session_key),
-	    IOException);
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 10: HTTP URL Validation Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "SignRequest handles various URL formats", "[input_validation][url]") {
-	SECTION("Empty URL is handled") {
-		// Empty URL should be handled gracefully
-		try {
-			auto result = BoilstreamInputValidationTestAccess::SignRequest(
-			    *storage, "GET", "", "", 1234567890, 1, valid_session_key, valid_access_token, "us-west-2");
-			// If it succeeds, that's fine
-		} catch (const std::exception &) {
-			// Throwing is also acceptable
-		}
-	}
-
-	SECTION("Malformed URL is handled") {
-		try {
-			auto result = BoilstreamInputValidationTestAccess::SignRequest(
-			    *storage, "GET", "not-a-url", "", 1234567890, 1, valid_session_key, valid_access_token, "us-west-2");
-		} catch (const std::exception &) {
-			// Throwing is acceptable
-		}
-	}
-
-	SECTION("URL with special characters is handled") {
-		try {
-			auto result = BoilstreamInputValidationTestAccess::SignRequest(
-			    *storage, "GET", "https://api.example.com/secrets?name=test%20secret&foo=bar", "", 1234567890, 1,
-			    valid_session_key, valid_access_token, "us-west-2");
-		} catch (const std::exception &) {
-			// Throwing is acceptable
-		}
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 11: Size Limit Validation Tests (DoS protection)
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "Size limits prevent DoS attacks",
+TEST_CASE_METHOD(InputValidationTestFixture, "DeserializeSecret rejects oversized JSON",
                  "[input_validation][security][size_limits]") {
-	SECTION("DecryptResponse rejects oversized response") {
-		// Create a response larger than MAX_ENCRYPTED_RESPONSE_SIZE (10MB)
-		std::string oversized_response(11 * 1024 * 1024, 'a'); // 11MB
-		REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DecryptResponse(*storage, oversized_response,
-		                                                                       valid_session_key, 0x0001),
-		                  IOException);
-	}
-
-	SECTION("DecryptResponse error message includes size info") {
-		std::string oversized_response(11 * 1024 * 1024, 'a');
-		try {
-			BoilstreamInputValidationTestAccess::DecryptResponse(*storage, oversized_response, valid_session_key,
-			                                                     0x0001);
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			REQUIRE(msg.find("too large") != std::string::npos);
-			REQUIRE(msg.find("bytes") != std::string::npos);
-		}
-	}
-
-	SECTION("DeserializeSecret rejects oversized JSON") {
-		Connection conn(*db);
-		auto &secret_manager = db->instance->GetSecretManager();
-
-		// Create JSON larger than MAX_JSON_RESPONSE_SIZE (10MB)
-		std::string oversized_json(11 * 1024 * 1024, ' ');
-		oversized_json = "{\"data\": \"" + oversized_json + "\"}";
-
-		REQUIRE_THROWS_AS(
-		    BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, oversized_json, secret_manager),
-		    IOException);
-	}
-
-	SECTION("Reasonable sizes are accepted") {
-		// Valid-sized encrypted response (should fail on content, not size)
-		std::string valid_size_json = R"({"encrypted": true, "nonce": "YWJj", "ciphertext": "YWJj", "hmac": "abc"})";
-		try {
-			BoilstreamInputValidationTestAccess::DecryptResponse(*storage, valid_size_json, valid_session_key, 0x0001);
-		} catch (const IOException &e) {
-			// Should fail on content validation, not size
-			std::string msg = e.what();
-			REQUIRE(msg.find("too large") == std::string::npos);
-		}
-	}
+	auto &secret_manager = db->instance->GetSecretManager();
+	const std::string oversized_json = "{\"data\":\"" + std::string(11 * 1024 * 1024, ' ') + "\"}";
+	REQUIRE_THROWS_AS(BoilstreamInputValidationTestAccess::DeserializeSecret(*storage, oversized_json, secret_manager),
+	                  IOException);
 }
-
-//===----------------------------------------------------------------------===//
-// SECTION 12: Boundary Value Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "Boundary value tests for numeric fields",
-                 "[input_validation][boundary]") {
-	SECTION("Maximum sequence number is handled") {
-		REQUIRE_NOTHROW(BoilstreamInputValidationTestAccess::SignRequest(
-		    *storage, "GET", "https://api.example.com/secrets", "", 1234567890, UINT64_MAX, valid_session_key,
-		    valid_access_token, "us-west-2"));
-	}
-
-	SECTION("Zero timestamp is handled") {
-		REQUIRE_NOTHROW(
-		    BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "", 0,
-		                                                     1, valid_session_key, valid_access_token, "us-west-2"));
-	}
-
-	SECTION("Maximum timestamp is handled") {
-		REQUIRE_NOTHROW(BoilstreamInputValidationTestAccess::SignRequest(
-		    *storage, "GET", "https://api.example.com/secrets", "", UINT64_MAX, 1, valid_session_key,
-		    valid_access_token, "us-west-2"));
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 12: Thread Safety Tests for Input Validation
-//===----------------------------------------------------------------------===//
 
 TEST_CASE("BoilstreamConnectionState concurrent access is safe", "[input_validation][threading]") {
 	BoilstreamConnectionState state;
@@ -856,37 +424,4 @@ TEST_CASE("BoilstreamConnectionState concurrent access is safe", "[input_validat
 	}
 
 	REQUIRE(completed == NUM_THREADS);
-}
-
-//===----------------------------------------------------------------------===//
-// SECTION 13: Error Message Quality Tests
-//===----------------------------------------------------------------------===//
-
-TEST_CASE_METHOD(InputValidationTestFixture, "Error messages do not leak sensitive information",
-                 "[input_validation][security][error_messages]") {
-	SECTION("Region error does not suggest default values") {
-		try {
-			BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-			                                                 1234567890, 1, valid_session_key, valid_access_token, "");
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			// Error message should NOT suggest fallback values
-			REQUIRE(msg.find("us-east-1") == std::string::npos);
-			REQUIRE(msg.find("default") == std::string::npos);
-		}
-	}
-
-	SECTION("Token error does not expose token value") {
-		try {
-			BoilstreamInputValidationTestAccess::SignRequest(*storage, "GET", "https://api.example.com/secrets", "",
-			                                                 1234567890, 1, valid_session_key, "short", "us-west-2");
-			FAIL("Expected IOException");
-		} catch (const IOException &e) {
-			std::string msg = e.what();
-			// Error should reference "access_token" but not include the actual value
-			REQUIRE(msg.find("access_token") != std::string::npos);
-			// The actual short token value should ideally not appear, but length is OK
-		}
-	}
 }

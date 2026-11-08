@@ -197,24 +197,29 @@ void test_determinism() {
     }
 }
 
-// RFC 4231 test case 1: independent, published HMAC-SHA256 known-answer vector.
-void test_signing_vector(void) {
-    TEST("RFC 4231 HMAC-SHA256 and canonical payload digest");
-    const uint8_t key[20] = { [0 ... 19] = 0x0b };
-    const char expected[] = "sDRMYdjbOFNcqK/OrwvxK4gdwgDJgz2nJuk3bC4yz/c=";
-    OpaqueResult result = aws_sign_canonical_request(key, sizeof(key), "Hi There", 8);
-    ASSERT(result.error == OPAQUE_SUCCESS && result.buffer.len == strlen(expected) &&
-           memcmp(result.buffer.data, expected, strlen(expected)) == 0, "HMAC matches RFC 4231 case 1");
-    opaque_free_buffer(result.buffer);
-    result = aws_sign_canonical_request(NULL, 0, "Hi There", 8);
-    ASSERT(result.error == OPAQUE_INVALID_INPUT, "Null signing key is rejected");
-    const char canonical[] = "GET\n/\n\nhost:example.com\n\nhost\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    result = aws_build_canonical_request("GET", 3, "/", 1, "", 0, "host:example.com\n", 17, "host", 4, NULL, 0);
-    ASSERT(result.error == OPAQUE_SUCCESS && result.buffer.len == strlen(canonical) &&
-           memcmp(result.buffer.data, canonical, strlen(canonical)) == 0, "Canonical request includes known SHA256 empty digest");
-    opaque_free_buffer(result.buffer);
-    result = aws_build_canonical_request("GET", 3, "/", 1, "", 0, "host:example.com\n", 17, "host", 4, NULL, 1);
-    ASSERT(result.error == OPAQUE_INVALID_INPUT, "Null payload with nonzero length is rejected");
+// Known-answer checks against the same production ABI used by the extension.
+void test_refresh_vector(void) {
+    TEST("OPAQUE refresh derivation and SHA-256 identity");
+    uint8_t key[64], refresh[32], identity[32];
+    for (size_t i = 0; i < sizeof(key); ++i) key[i] = (uint8_t)i;
+    const char expected_refresh[] = "870246bc83f0728dac2c1d486834a7eefe1565c6252469c895374fc733828942";
+    const char expected_identity[] = "4cf42b1fbdc10b41302f03978931de2ae6d4581c8531c6b740aa3a5c0043bd33";
+    const char hex[] = "0123456789abcdef";
+    char refresh_hex[65], identity_hex[65];
+    ASSERT(opaque_client_derive_refresh_token(key, sizeof(key), refresh) == 0, "Refresh derivation succeeds");
+    opaque_client_sha256(refresh, sizeof(refresh), identity);
+    for (size_t i = 0; i < 32; ++i) {
+        refresh_hex[2*i] = hex[refresh[i] >> 4];
+        refresh_hex[2*i+1] = hex[refresh[i] & 15];
+        identity_hex[2*i] = hex[identity[i] >> 4];
+        identity_hex[2*i+1] = hex[identity[i] & 15];
+    }
+    refresh_hex[64] = identity_hex[64] = 0;
+    ASSERT(strcmp(refresh_hex, expected_refresh) == 0, "Refresh matches independent HKDF-Expand vector");
+    ASSERT(strcmp(identity_hex, expected_identity) == 0, "Identity matches independent SHA-256 vector");
+    ASSERT(opaque_client_derive_refresh_token(NULL, sizeof(key), refresh) != 0, "Null key rejected");
+    ASSERT(opaque_client_derive_refresh_token(key, 0, refresh) != 0, "Empty key rejected");
+    ASSERT(opaque_client_derive_refresh_token(key, sizeof(key), NULL) != 0, "Null output rejected");
 }
 
 void test_malformed_responses(void) {
@@ -301,7 +306,7 @@ int main() {
     test_empty_password();
     test_multiple_registrations();
     test_determinism();
-    test_signing_vector();
+    test_refresh_vector();
     test_malformed_responses();
     test_application_protocol();
 
