@@ -12,6 +12,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 // Import registration module
 mod registration;
+pub mod application_protocol;
 
 #[cfg(test)]
 mod buffer_tests {

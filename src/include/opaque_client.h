@@ -41,6 +41,16 @@ typedef struct {
 typedef struct RegistrationState RegistrationState;
 typedef struct LoginState LoginState;
 
+// Application protocol handles require exclusive ownership/access. Buffers use
+// opaque_free_buffer. Never retry or reuse a handle after an exchange failure.
+typedef struct ApplicationProtocol ApplicationProtocol;
+OpaqueResult bs_protocol_start(const uint8_t *authority, size_t authority_len, const uint8_t *key,
+                               ApplicationProtocol **output);
+OpaqueError bs_protocol_accept(ApplicationProtocol *handle, const uint8_t *body, size_t len);
+OpaqueResult bs_protocol_seal(ApplicationProtocol *handle, const uint8_t *json, size_t len);
+OpaqueResult bs_protocol_open(ApplicationProtocol *handle, const uint8_t *body, size_t len);
+void bs_protocol_free(ApplicationProtocol *handle);
+
 //===----------------------------------------------------------------------===//
 // Registration Flow
 //===----------------------------------------------------------------------===//

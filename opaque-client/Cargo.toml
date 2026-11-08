@@ -10,6 +10,7 @@ edition = "2021"
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
+boilstream-protocol-client = { path = "../protocol-client" }
 # Upstream RustCrypto migration removes the vulnerable crypto-bigint 0.5 chain.
 # Pin the reviewed source until an upstream release includes this fix.
 opaque-ke = { git = "https://github.com/facebook/opaque-ke", rev = "027abbc91115baa38b70ad3af7f5a22f072f978b" }

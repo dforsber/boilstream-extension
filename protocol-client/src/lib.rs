@@ -19,6 +19,7 @@
 //! ```
 pub mod handshake;
 pub mod handshake_wire;
+pub mod session;
 pub mod wire;
 use aes_gcm::{
     aead::{Aead, Payload},

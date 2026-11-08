@@ -148,7 +148,7 @@ endif()
 
 set(EXTENSION_SOURCES
     src/boilstream_extension.cpp src/boilstream_secret_storage.cpp
-    src/boilstream_grammar.cpp src/opaque_wrapper.cpp)
+    src/boilstream_grammar.cpp src/opaque_wrapper.cpp src/boilstream_protocol.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 # DuckDB's WASM helper links an archive in a POST_BUILD emcc invocation;

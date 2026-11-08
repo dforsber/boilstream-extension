@@ -19,9 +19,12 @@ harness remain in the private repository. Never reuse test entropy in production
 Owned secrets are zeroized where supported; Snow does not guarantee erasure of
 all its internal buffers. There is no complete process-memory erasure guarantee.
 
-This candidate is not yet used by the extension. Product transport/C ABI wiring
-and real authenticated browser coverage remain integration work. Do not disable
-transport protection on its account.
+The integration candidate uses `session::ClientSession` through the client static
+library's C ABI. A session owns handshake, ready and pending-reply states. Failed,
+overlapping or abandoned exchanges close it; a new pinned handshake is required.
+The C++ adapter owns serialization across the HTTP exchange and consumes verified
+body metadata. Loaded native/browser qualification remains in progress; this is
+not a release-ready claim. Keep transport protection enabled.
 
 ```sh
 cargo test --locked --manifest-path protocol-client/Cargo.toml

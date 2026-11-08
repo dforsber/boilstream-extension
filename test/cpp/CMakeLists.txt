@@ -721,3 +721,17 @@ foreach(target IN
   target_include_directories(
     ${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/utf8proc/include)
 endforeach()
+
+# Connection state now owns the real protocol channel rather than header-only
+# signing counters. Compile its adapter in every test that compiles storage or
+# directly exercises the connection state; never substitute a stale archive.
+get_property(boilstream_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS boilstream_test_targets)
+  get_target_property(test_sources ${target} SOURCES)
+  if("${test_sources}" MATCHES "boilstream_secret_storage\\.cpp" OR
+     target STREQUAL "boilstream_connection_state_test" OR
+     target STREQUAL "wasm_lock_ordering_test")
+    target_sources(${target} PRIVATE ../../src/boilstream_protocol.cpp)
+    target_include_directories(${target} PRIVATE ${DUCKDB_SOURCE_DIR}/third_party/yyjson/include)
+  endif()
+endforeach()

@@ -1157,6 +1157,7 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 
 	auto registration = storage->BeginRegistration(context, base_url, email);
 	RegistrationOperationGuard registration_guard(*storage, context, registration.generation);
+	auto protocol = registration.protocol;
 	const auto &cached_totp_uri = registration.totp_uri;
 	if (!cached_totp_uri.empty()) {
 		BOILSTREAM_LOG("RegisterUser: Found cached registration state, returning cached QR code");
@@ -1164,116 +1165,18 @@ static string RegisterUser(ClientContext &context, const FunctionParameters &par
 		return RegistrationQrResult(context, *storage, registration.generation, cached_totp_uri);
 	}
 
-	// Helper: Make unauthenticated HTTP GET request (for public registration APIs)
+	// Helper: Encrypt registration requests after verifying the installation pin
 	// Note: Fails fast on non-2xx status to prevent automatic retries
 	auto http_get = [&](const string &url) -> string {
-		try {
-			auto &db = DatabaseInstance::GetDatabase(context);
-			auto &http_util = HTTPUtil::Get(db);
-			boilstream::ValidateEndpoint(url);
-			auto params = http_util.InitializeParameters(db, url);
-			boilstream::ParamsCleanup wipe_params(params.get());
-			if (!params) {
-				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
-			}
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			headers.Insert("Content-Type", "application/json");
-
-			// Response handlers for capturing body
-			string response_body;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-			auto response_handler = [&](const HTTPResponse &response) {
-				// Don't use response.body - it may be empty when using content_handler
-				return true;
-			};
-			auto content_handler = [&](const_data_ptr_t data, idx_t size) {
-				// Build response body from streamed chunks
-				boilstream::AppendResponse(response_body, reinterpret_cast<const char *>(data), size);
-				return true;
-			};
-
-			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
-			boilstream::RequestCleanup wipe_request(request);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-
-			auto status_code = static_cast<int>(response->status);
-
-			// Check status code and fail fast on errors to prevent retries
-			if (status_code < 200 || status_code >= 300) {
-				BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
-			}
-
-			return string(response_body);
-
-		} catch (const std::exception &e) {
-			BoilstreamRethrowSafe("HTTP GET failed", e);
-		}
+		return protocol->Exchange(DatabaseInstance::GetDatabase(context), "GET", url, "");
 	};
-
-	// Helper: Make unauthenticated HTTP POST request (for public registration APIs)
+	// Helper: Exchange body-encrypted registration requests
 	// Note: Fails fast on non-2xx status to prevent automatic retries
-	// Optional out_headers parameter to capture response headers (e.g., Set-Cookie)
+	// Optional out_headers contains only verified envelope metadata (e.g., Set-Cookie)
 	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		try {
-			auto &db = DatabaseInstance::GetDatabase(context);
-			auto &http_util = HTTPUtil::Get(db);
-			boilstream::ValidateEndpoint(url);
-			auto params = http_util.InitializeParameters(db, url);
-			boilstream::ParamsCleanup wipe_params(params.get());
-			if (!params) {
-				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-			}
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			headers.Insert("Content-Type", "application/json");
-			if (!cookie.empty()) {
-				headers.Insert("Cookie", cookie);
-			}
-
-			// PostRequestInfo stores response in buffer_out member (not via handlers)
-			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-			boilstream::RequestCleanup wipe_request(request);
-			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-			boilstream::CheckResponseSize(request.buffer_out.size());
-
-			// Capture response headers if requested
-			if (out_headers) {
-				boilstream::CopyHeaders(response->headers, *out_headers);
-			}
-
-			// Get response body from buffer_out
-			string response_body = request.buffer_out;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-
-			auto status_code = static_cast<int>(response->status);
-
-			// Check status code and fail fast on errors to prevent retries
-			// Include response body in error for JSON error messages
-			if (status_code < 200 || status_code >= 300) {
-				// Special handling for rate limit / replay protection
-				if (status_code == 429) {
-					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
-				}
-
-				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-			}
-
-			return string(response_body);
-
-		} catch (const std::exception &e) {
-			BoilstreamRethrowSafe("HTTP POST failed", e);
-		}
+		return protocol->Exchange(DatabaseInstance::GetDatabase(context), "POST", url, body, cookie, out_headers);
 	};
-
 	// Step 1: Get CSRF token
 	string csrf_url = base_url + "/auth/csrf";
 	string csrf_response;
@@ -1528,71 +1431,17 @@ static string VerifyMfa(ClientContext &context, const FunctionParameters &params
 	}
 	auto registration = storage->BeginMfaVerification(context);
 	RegistrationOperationGuard registration_guard(*storage, context, registration.generation);
+	auto protocol = registration.protocol;
 	const auto &base_url = registration.base_url;
 	const auto &session_token = registration.session_token;
 
-	// Helper: Make unauthenticated HTTP POST request with cookie
+	// Helper: Exchange body-encrypted MFA requests with the channel-bound cookie
 	// Note: Fails fast on non-2xx status to prevent automatic retries
-	// Optional out_headers parameter to capture response headers
+	// Optional out_headers contains only verified envelope metadata
 	auto http_post = [&](const string &url, const string &body, const string &cookie,
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		try {
-			auto &db = DatabaseInstance::GetDatabase(context);
-			auto &http_util = HTTPUtil::Get(db);
-			boilstream::ValidateEndpoint(url);
-			auto params = http_util.InitializeParameters(db, url);
-			boilstream::ParamsCleanup wipe_params(params.get());
-			if (!params) {
-				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-			}
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			headers.Insert("Content-Type", "application/json");
-			if (!cookie.empty()) {
-				headers.Insert("Cookie", cookie);
-
-			} else {
-				BOILSTREAM_LOG("HTTP POST: No cookie provided");
-			}
-
-			// PostRequestInfo stores response in buffer_out member (not via handlers)
-			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-			boilstream::RequestCleanup wipe_request(request);
-			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-			boilstream::CheckResponseSize(request.buffer_out.size());
-
-			// Capture response headers if requested
-			if (out_headers) {
-				boilstream::CopyHeaders(response->headers, *out_headers);
-			}
-
-			// Get response body from buffer_out
-			string response_body = request.buffer_out;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-
-			auto status_code = static_cast<int>(response->status);
-
-			// Check status code and fail fast on errors to prevent retries
-			if (status_code < 200 || status_code >= 300) {
-				// Special handling for rate limit / replay protection
-				if (status_code == 429) {
-					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
-				}
-
-				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-			}
-
-			return string(response_body);
-
-		} catch (const std::exception &e) {
-			BoilstreamRethrowSafe("HTTP POST failed", e);
-		}
+		return protocol->Exchange(DatabaseInstance::GetDatabase(context), "POST", url, body, cookie, out_headers);
 	};
-
 	// POST /auth/api/mfa/verify-enrollment
 	string verify_url = base_url + "/auth/api/mfa/verify-enrollment";
 
@@ -1732,103 +1581,17 @@ static string Login(ClientContext &context, const FunctionParameters &params) {
 		}
 	}
 
-	// Helper: Make HTTP GET request
+	auto protocol = BoilstreamProtocol::Create(context, base_url);
+
+	// Helper: Exchange body-encrypted login requests
 	auto http_get = [&](const string &url) -> string {
-		try {
-			auto &db = DatabaseInstance::GetDatabase(context);
-			auto &http_util = HTTPUtil::Get(db);
-			boilstream::ValidateEndpoint(url);
-			auto params = http_util.InitializeParameters(db, url);
-			boilstream::ParamsCleanup wipe_params(params.get());
-			if (!params) {
-				throw IOException("HTTP GET failed: Could not initialize HTTP parameters");
-			}
-
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			string response_body;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-			auto response_handler = [&](const HTTPResponse &response) -> bool {
-				return true;
-			};
-			auto content_handler = [&](const_data_ptr_t data, idx_t size) -> bool {
-				boilstream::AppendResponse(response_body, const_char_ptr_cast(data), size);
-				return true;
-			};
-
-			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
-			boilstream::RequestCleanup wipe_request(request);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-
-			if (!response->Success()) {
-				BoilstreamThrowHttpStatus("HTTP GET failed", static_cast<int>(response->status));
-			}
-
-			return string(response_body);
-
-		} catch (const std::exception &e) {
-			BoilstreamRethrowSafe("HTTP GET failed", e);
-		}
+		return protocol->Exchange(DatabaseInstance::GetDatabase(context), "GET", url, "");
 	};
-
 	// Helper: Make HTTP POST request
 	auto http_post = [&](const string &url, const string &body, const string &cookie = "",
 	                     HTTPHeaders *out_headers = nullptr) -> string {
-		try {
-			auto &db = DatabaseInstance::GetDatabase(context);
-			auto &http_util = HTTPUtil::Get(db);
-			boilstream::ValidateEndpoint(url);
-			auto params = http_util.InitializeParameters(db, url);
-			boilstream::ParamsCleanup wipe_params(params.get());
-			if (!params) {
-				throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-			}
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			headers.Insert("Content-Type", "application/json");
-			if (!cookie.empty()) {
-				headers.Insert("Cookie", cookie);
-			}
-
-			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-			boilstream::RequestCleanup wipe_request(request);
-			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-			boilstream::CheckResponseSize(request.buffer_out.size());
-
-			if (out_headers) {
-				boilstream::CopyHeaders(response->headers, *out_headers);
-			}
-
-			string response_body = request.buffer_out;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-
-			auto status_code = static_cast<int>(response->status);
-
-			// Check status code and fail fast on errors to prevent retries
-			if (status_code < 200 || status_code >= 300) {
-				// Special handling for rate limit / replay protection
-				if (status_code == 429) {
-					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
-				}
-
-				// General error handling
-				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-			}
-
-			return string(response_body);
-
-		} catch (const std::exception &e) {
-			BoilstreamRethrowSafe("HTTP POST failed", e);
-		}
+		return protocol->Exchange(DatabaseInstance::GetDatabase(context), "POST", url, body, cookie, out_headers);
 	};
-
 	// Step 1: Get CSRF token
 	string csrf_url = base_url + "/auth/csrf";
 	string csrf_response;
@@ -2275,6 +2038,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register PRAGMA function with PragmaCall to accept parameters
 	// Use temporary LogicalType objects to avoid ODR violations with static const members
+	auto configure_pin = [](ClientContext &context, const FunctionParameters &parameters) {
+		if (parameters.values.size() != 2 || parameters.values[0].IsNull() || parameters.values[1].IsNull()) {
+			throw InvalidInputException("boilstream_server_key requires authority and public key");
+		}
+		BoilstreamProtocol::Configure(context, parameters.values[0].GetValue<string>(),
+		                              parameters.values[1].GetValue<string>());
+	};
+	loader.RegisterFunction(PragmaFunction::PragmaCall("boilstream_server_key", configure_pin,
+	                                                   {LogicalType::VARCHAR, LogicalType::VARCHAR}));
+
 	vector<LogicalType> endpoint_params;
 	endpoint_params.push_back(LogicalType(LogicalTypeId::VARCHAR));
 	auto rest_endpoint =

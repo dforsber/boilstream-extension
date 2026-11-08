@@ -10,6 +10,7 @@
 
 #pragma once
 #include "boilstream_security.hpp"
+#include "boilstream_protocol.hpp"
 
 #include "duckdb/main/client_context_state.hpp"
 #include "boilstream_secret_cache.hpp"
@@ -92,6 +93,8 @@ public:
 	//========================================================================
 	// Per-Connection Authentication State
 	//========================================================================
+
+	shared_ptr<BoilstreamProtocol> protocol;
 
 	//! OPAQUE access token (JWT-like, in-memory only)
 	string access_token;
@@ -245,6 +248,9 @@ public:
 
 	//! Clear session state (on error or logout)
 	void ClearSession() {
+		if (protocol) {
+			protocol->Close();
+		}
 		secret_cache->Close();
 		{
 			lock_guard<mutex> lock(expiration_lock);

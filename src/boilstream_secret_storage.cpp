@@ -95,33 +95,6 @@ namespace duckdb {
 
 static bool ParseManagedCatalogSecretScope(const string &path, string &catalog_id);
 
-// Read BOILSTREAM_INSECURE_TLS env var and, when set to "1"/"true"/"yes",
-// disable TLS certificate verification on the supplied HTTPParams.
-//
-// This is *only* for local-dev work where the boilstream auth server is
-// reachable through a self-signed cert that the host's libcurl trust store
-// can't validate (e.g., macOS where SSL_CERT_FILE / CURL_CA_BUNDLE are
-// silently ignored by the statically-linked OpenSSL backend). On any other
-// platform the proper fix is to put the cert on the system trust path —
-// this knob is intentionally undocumented and intentionally per-process so
-// it can't be accidentally toggled on a deployed binary.
-//
-// Setting both `override_verify_ssl = true` *and* `verify_ssl = false` is
-// what HTTPFSCurlUtil (and the httplib counterpart) checks when deciding
-// whether to call `curl_easy_setopt(..., CURLOPT_SSL_VERIFYPEER, 0L)` /
-// `client->enable_server_certificate_verification(false)`.
-static void MaybeDisableTlsVerificationFromEnv(HTTPParams &params) {
-	const char *env = std::getenv("BOILSTREAM_INSECURE_TLS");
-	if (!env || env[0] == '\0') {
-		return;
-	}
-	const std::string val(env);
-	if (val == "1" || val == "true" || val == "TRUE" || val == "yes" || val == "YES") {
-		params.override_verify_ssl = true;
-		params.verify_ssl = false;
-	}
-}
-
 // Serialize a yyjson mutable doc to string, throwing on allocation failure.
 static string SafeJsonSerialize(yyjson_mut_doc *doc) {
 	boilstream::JsonArena writer_arena;
@@ -828,6 +801,7 @@ void RestApiSecretStorage::PerformOpaqueLogin(ClientContext &context, const stri
 	auto previous = GetSessionForConnection(context.GetConnectionId());
 	auto generation = previous ? previous->authentication_generation.load() : 0;
 	auto pending = make_shared_ptr<BoilstreamConnectionState>(endpoint);
+	pending->protocol = BoilstreamProtocol::Create(context, endpoint);
 	pending->bootstrap_token_hash = token_hash;
 	auto supports_resumption = PerformOpaqueLoginCommon(password, false, *pending);
 	PublishSession(context, std::move(pending), previous, generation, supports_resumption);
@@ -839,6 +813,10 @@ void RestApiSecretStorage::PerformOpaqueResume(ClientContext &context) {
 		throw IOException("Session resumption requires an authenticated connection; log in again");
 	}
 	auto pending = make_shared_ptr<BoilstreamConnectionState>(previous->GetEndpointUrl());
+	if (!previous->protocol) {
+		throw IOException("Missing application channel");
+	}
+	pending->protocol = previous->protocol->Fresh();
 	uint64_t generation;
 	{
 		lock_guard<mutex> lock(previous->session_lock);
@@ -1865,11 +1843,16 @@ public:
 	unique_ptr<BoilstreamRegistrationOutput> output;
 	bool bound = false, ready = false, busy = false, verifying = false;
 	string base_url, email, session_token, totp_uri;
+	shared_ptr<BoilstreamProtocol> protocol;
 	void ClearOutput() {
 		output.reset();
 		output_id = 0;
 	}
 	void ClearEnrollment() {
+		if (protocol) {
+			protocol->Close();
+			protocol.reset();
+		}
 		generation = 0;
 		ready = busy = verifying = false;
 		for (auto value : {&base_url, &email, &session_token, &totp_uri}) {
@@ -1878,6 +1861,10 @@ public:
 		}
 	}
 	void Reset() {
+		if (protocol) {
+			protocol->Close();
+			protocol.reset();
+		}
 		ClearOutput();
 		generation = 0;
 		authentication.reset();
@@ -1909,7 +1896,7 @@ public:
 		}
 	}
 	BoilstreamRegistrationSnapshot Snapshot() const {
-		return {generation, base_url, email, session_token, totp_uri};
+		return {generation, base_url, email, session_token, totp_uri, protocol};
 	}
 	void Check(uint64_t expected) const {
 		if (!bound || !busy || generation != expected || expected == 0) {
@@ -1978,6 +1965,7 @@ BoilstreamRegistrationSnapshot RestApiSecretStorage::BeginRegistration(ClientCon
 	}
 	if (!owner->ready || owner->base_url != base_url || owner->email != email) {
 		owner->Reset();
+		owner->protocol = BoilstreamProtocol::Create(context, base_url);
 		owner->base_url.swap(new_base);
 		owner->email.swap(new_email);
 		owner->bound = true;
@@ -2193,169 +2181,18 @@ string RestApiSecretStorage::HttpGet(const string &url, optional_ptr<CatalogTran
 }
 
 string RestApiSecretStorage::HttpGetWithState(const string &url, BoilstreamConnectionState &conn_state) {
+	if (in_http_operation) {
+		return "";
+	}
+	HttpOperationGuard guard;
+	if (!conn_state.protocol) {
+		throw IOException("Missing pinned application channel");
+	}
 	try {
-		// Prevent recursive lookups during HTTP operations
-		// httpfs may try to look up secrets when making HTTP requests - return empty to avoid infinite loop
-		if (in_http_operation) {
-			return ""; // Return empty - httpfs will proceed without credentials
-		}
-
-		// RAII guard automatically manages flag (exception-safe)
-		HttpOperationGuard guard;
-		BOILSTREAM_LOG("HttpGetWithState: Guard set, in_http_op now TRUE");
-
-		auto &http_util = HTTPUtil::Get(db);
-		BOILSTREAM_LOG("HttpGetWithState: Calling InitializeParameters...");
-		boilstream::ValidateEndpoint(url);
-		auto params = http_util.InitializeParameters(db, url);
-		boilstream::ParamsCleanup wipe_params(params.get());
-		BOILSTREAM_LOG("HttpGetWithState: InitializeParameters returned");
-		if (!params) {
-			BOILSTREAM_LOG("HttpGetWithState EXIT: InitializeParameters FAILED");
-			return "";
-		}
-		MaybeDisableTlsVerificationFromEnv(*params);
-
-		// Retry configuration: 3 retries with short exponential backoff
-		// Total attempts: 4 (1 initial + 3 retries)
-		// Total worst-case delay: 100ms + 200ms + 400ms = 700ms
-		const int MAX_RETRIES = 3;
-		const int BASE_DELAY_MS = 100;
-		string response_body_result;
-		boilstream::WipeOnExit wipe_response_body_result(response_body_result);
-		bool request_sent = false;
-
-		for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			request_sent = true; // Mark that we're attempting to send
-
-			// Build authenticated headers INSIDE retry loop - each attempt needs fresh sequence number
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			vector<uint8_t> current_session_key;
-			boilstream::WipeOnExit wipe_request_key(current_session_key);
-			headers = BuildAuthenticatedHeaders("GET", url, "", conn_state, &current_session_key);
-			const bool has_session_key = true;
-
-			string response_body;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-			HTTPHeaders response_headers_captured(db);
-			boilstream::HeaderCleanup wipe_headers_response_headers_captured(response_headers_captured);
-			auto response_handler = [&](const HTTPResponse &response) {
-				// Don't use response.body - it may be empty when content_handler is used
-				// Capture response headers for signature verification
-				boilstream::CopyHeaders(response.headers, response_headers_captured);
-				return true;
-			};
-			auto content_handler = [&](const_data_ptr_t data, idx_t size) {
-				boilstream::AppendResponse(response_body, reinterpret_cast<const char *>(data), size);
-				return true;
-			};
-
-			GetRequestInfo request(url, headers, *params, response_handler, content_handler);
-			boilstream::RequestCleanup wipe_request(request);
-			BOILSTREAM_LOG("HttpGet: sending request...");
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-
-			// Check if we should retry (only on transient errors)
-			if (response->ShouldRetry() && attempt < MAX_RETRIES) {
-				// Exponential backoff: 100ms, 200ms, 400ms
-				std::this_thread::sleep_for(std::chrono::milliseconds(BASE_DELAY_MS * (1 << attempt)));
-				continue;
-			}
-
-			// Get HTTP status code first
-			auto status_code = static_cast<uint16_t>(response->status);
-
-			if (!response->Success()) {
-				return "";
-			}
-
-			// Verify response signature and decrypt BEFORE checking status code
-			// This ensures error responses are also decrypted before being thrown
-			if (has_session_key) {
-				try {
-					VerifyAuthenticatedResponse(response_body, status_code, response_headers_captured,
-					                            current_session_key);
-					BOILSTREAM_LOG("HttpGet: Response signature verified successfully");
-				} catch (const std::exception &e) {
-					conn_state.ClearSession();
-					BoilstreamRethrowSafe("Response integrity check failed", e);
-				}
-
-				// Check if response is encrypted and decrypt if needed
-				auto header_map = ExtractBoilstreamHeaders(response_headers_captured);
-
-				bool is_encrypted_via_header = IsResponseEncrypted(header_map);
-
-				// Also check JSON body for "encrypted":true (fallback if server doesn't send header)
-				bool is_encrypted_via_body = (response_body.find("\"encrypted\"") != string::npos &&
-				                              response_body.find("\"ciphertext\"") != string::npos);
-
-				if (is_encrypted_via_header || is_encrypted_via_body) {
-					if (is_encrypted_via_body && !is_encrypted_via_header) {
-						BOILSTREAM_LOG("HttpGet: Response is encrypted (detected from JSON body, header missing)");
-					} else {
-						BOILSTREAM_LOG("HttpGet: Response is encrypted (via header)");
-					}
-
-					try {
-						// Try to get cipher suite from header
-						uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
-						if (header_map.find("x-boilstream-cipher") != header_map.end()) {
-							cipher_suite = ParseCipherSuite(header_map);
-						} else {
-							BOILSTREAM_LOG(
-							    "HttpGet: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
-						}
-						response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
-
-					} catch (const std::exception &e) {
-						BoilstreamRethrowSafe("Response decryption failed", e);
-					}
-				} else {
-					BOILSTREAM_LOG("HttpGet: Response is not encrypted (plaintext)");
-				}
-			}
-
-			// Now check status code with decrypted response body
-			// 4xx Client Errors - fail fast, don't retry
-			if (status_code >= 400 && status_code < 500) {
-				BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
-			}
-
-			// 5xx Server Errors - classify for retry decision
-			if (status_code >= 500 && status_code < 600) {
-				// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
-				if (status_code == 501 || status_code == 505) {
-					BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
-				}
-
-				// 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
-				// These are retryable - return empty to trigger retry logic
-				if (attempt < MAX_RETRIES) {
-					continue; // Will retry with exponential backoff
-				} else {
-					// All retries exhausted
-					BoilstreamThrowHttpStatus("HTTP GET failed", status_code);
-				}
-			}
-
-			// 3xx Redirects or other non-2xx
-			if (status_code < 200 || status_code >= 300) {
-				return ""; // Return empty for redirects
-			}
-
-			return string(response_body);
-		}
-
-		BOILSTREAM_LOG("HttpGetWithState EXIT: All retries exhausted");
-		return ""; // All retries exhausted
-
-	} catch (const std::exception &e) {
-		BoilstreamRethrowSafe("HTTP GET failed", e);
+		return conn_state.protocol->Exchange(db, "GET", url, "");
+	} catch (...) {
+		conn_state.ClearSession();
+		throw;
 	}
 }
 
@@ -2370,323 +2207,34 @@ string RestApiSecretStorage::HttpPost(const string &url, const string &body,
 
 string RestApiSecretStorage::HttpPostWithState(const string &url, const string &body,
                                                BoilstreamConnectionState &conn_state, HTTPHeaders *out_headers) {
+	if (in_http_operation) {
+		throw IOException("Recursive application request refused");
+	}
+	HttpOperationGuard guard;
+	if (!conn_state.protocol) {
+		throw IOException("Missing pinned application channel");
+	}
 	try {
-		// Check if URL is empty
-		if (url.empty()) {
-			throw IOException(
-			    "HTTP POST failed: No endpoint URL configured. Use PRAGMA duckdb_secrets_rest_endpoint() first.");
-		}
-
-		// Prevent recursive lookups during HTTP operations
-		if (in_http_operation) {
-			BOILSTREAM_LOG("HttpPostWithState EXIT: BLOCKED by recursion guard");
-			throw IOException("HTTP POST failed: Recursive secret lookup detected");
-		}
-
-		// RAII guard automatically manages flag (exception-safe)
-		HttpOperationGuard guard;
-
-		auto &http_util = HTTPUtil::Get(db);
-		// Initialize parameters with nullptr to avoid looking up secrets (which could recurse)
-		boilstream::ValidateEndpoint(url);
-		auto params = http_util.InitializeParameters(db, url);
-		boilstream::ParamsCleanup wipe_params(params.get());
-		if (!params) {
-			BOILSTREAM_LOG("HttpPostWithState: InitializeParameters FAILED");
-			throw IOException("HTTP POST failed: Could not initialize HTTP parameters");
-		}
-		MaybeDisableTlsVerificationFromEnv(*params);
-		// This layer owns retries: lower-level replays reuse signed sequence numbers.
-		params->retries = 0;
-
-		// One key per logical call, retained across its transport retries. A
-		// body-derived key aliases later independent writes of the same value.
-		const auto idempotency_key = UUID::ToString(UUIDv4::GenerateRandomUUID());
-
-		// Retry configuration: 3 retries with short exponential backoff
-		// Total attempts: 4 (1 initial + 3 retries)
-		// Total worst-case delay: 100ms + 200ms + 400ms = 700ms
-		const int MAX_RETRIES = 3;
-		const int BASE_DELAY_MS = 100;
-		string last_error;
-
-		for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			// Build authenticated headers INSIDE retry loop - each attempt needs fresh sequence number
-			// During OPAQUE login/registration, we don't have a session yet
-			HTTPHeaders headers(db);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			vector<uint8_t> current_session_key;
-			boilstream::WipeOnExit wipe_request_key(current_session_key);
-			bool has_session_key = false;
-			bool is_exchanging_now = false;
-
-			{
-				lock_guard<mutex> lock(conn_state.session_lock);
-				is_exchanging_now = conn_state.is_exchanging;
-				current_session_key = conn_state.session_key;
-				has_session_key = !conn_state.session_key.empty();
-			}
-
-			if (!is_exchanging_now) {
-				// Normal API request - add authenticated headers
-				headers = BuildAuthenticatedHeaders("POST", url, body, conn_state, &current_session_key);
-				has_session_key = true;
-			}
-
-			// Add idempotency key (same for all retries - prevents duplicate operations)
-			headers.Insert("Idempotency-Key", idempotency_key);
-
-			PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-			boilstream::RequestCleanup wipe_request(request);
-			boilstream::WipeOnExit wipe_buffer_out(request.buffer_out);
-			request.try_request = true; // Return failures to the authenticated retry loop.
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-			boilstream::CheckResponseSize(request.buffer_out.size());
-
-			// Check if we should retry (only on transient errors)
-			if (response->ShouldRetry() && attempt < MAX_RETRIES) {
-				last_error = "HTTP transport request failed";
-				// Exponential backoff: 100ms, 200ms, 400ms
-				std::this_thread::sleep_for(std::chrono::milliseconds(BASE_DELAY_MS * (1 << attempt)));
-				continue;
-			}
-
-			// Get HTTP status code
-			auto status_code = static_cast<uint16_t>(response->status);
-
-			// Capture response headers if requested
-			if (out_headers) {
-				boilstream::CopyHeaders(response->headers, *out_headers);
-			}
-
-			// Verify response signature and decrypt BEFORE checking status code
-			// This ensures error responses are also decrypted before being thrown
-			if (has_session_key) {
-				try {
-					VerifyAuthenticatedResponse(request.buffer_out, status_code, response->headers,
-					                            current_session_key);
-					BOILSTREAM_LOG("HttpPost: Response signature verified successfully");
-				} catch (const std::exception &e) {
-					conn_state.ClearSession();
-					BoilstreamRethrowSafe("Response integrity check failed", e);
-				}
-
-				// Check if response is encrypted and decrypt if needed
-				auto header_map = ExtractBoilstreamHeaders(response->headers);
-
-				// Debug: Log all received headers
-
-				// Check for encryption via header OR body (WASM doesn't always expose headers)
-				bool is_encrypted = IsResponseEncrypted(header_map);
-
-				// Fallback: Check if response body has {"encrypted":true,...} format
-				if (!is_encrypted && !request.buffer_out.empty() && request.buffer_out[0] == '{') {
-					// Try to parse as JSON to check for encrypted field
-					boilstream::JsonArena doc_arena;
-					auto doc = doc_arena.Read(request.buffer_out.c_str(), request.buffer_out.size(), 0);
-					if (doc) {
-						yyjson_val *root = yyjson_doc_get_root(doc);
-						if (root && yyjson_is_obj(root)) {
-							yyjson_val *encrypted_val = yyjson_obj_get(root, "encrypted");
-							if (encrypted_val && yyjson_is_bool(encrypted_val) && yyjson_get_bool(encrypted_val)) {
-								is_encrypted = true;
-								BOILSTREAM_LOG(
-								    "HttpPost: Detected encryption from response body (headers unavailable in WASM)");
-							}
-						}
-						yyjson_doc_free(doc);
-					}
-				}
-
-				if (is_encrypted) {
-					BOILSTREAM_LOG("HttpPost: Response is encrypted, decrypting...");
-					try {
-						// Try to get cipher suite from header
-						uint16_t cipher_suite = 0x0001; // Default to AES-256-GCM
-						if (header_map.find("x-boilstream-cipher") != header_map.end()) {
-							cipher_suite = ParseCipherSuite(header_map);
-						} else {
-							BOILSTREAM_LOG(
-							    "HttpPost: X-Boilstream-Cipher header missing, defaulting to 0x0001 (AES-256-GCM)");
-						}
-						request.buffer_out = DecryptResponse(request.buffer_out, current_session_key, cipher_suite);
-
-					} catch (const std::exception &e) {
-						BoilstreamRethrowSafe("Response decryption failed", e);
-					}
-				} else {
-					BOILSTREAM_LOG("HttpPost: Response is not encrypted (plaintext)");
-				}
-			}
-
-			// Now check status code with decrypted response body
-			// 4xx Client Errors - fail fast, don't retry
-			if (status_code >= 400 && status_code < 500) {
-				// Special handling for rate limit errors
-				if (status_code == 429) {
-					BoilstreamThrowHttpStatus("HTTP POST failed", 429);
-				}
-
-				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-			}
-
-			// 5xx Server Errors - classify for retry decision
-			if (status_code >= 500 && status_code < 600) {
-				// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
-				if (status_code == 501 || status_code == 505) {
-					BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-				}
-
-				// 500, 502, 503, 504 - retryable server errors
-				if (attempt < MAX_RETRIES) {
-					last_error = "HTTP " + std::to_string(status_code) + " server error";
-					continue; // Will retry with exponential backoff
-				}
-				// Fall through to throw after all retries
-			}
-
-			// Non-2xx status (including exhausted 5xx retries)
-			if (status_code < 200 || status_code >= 300) {
-				BoilstreamThrowHttpStatus("HTTP POST failed", status_code);
-			}
-
-			return request.buffer_out;
-		}
-
-		// All retries exhausted
-		BOILSTREAM_LOG("HttpPostWithState EXIT: All retries exhausted");
-		throw IOException("HTTP POST failed after " + std::to_string(MAX_RETRIES + 1) + " attempts: " + last_error);
-
-	} catch (const std::exception &e) {
-		BoilstreamRethrowSafe("HTTP POST failed", e);
+		return conn_state.protocol->Exchange(db, "POST", url, body, "", out_headers);
+	} catch (...) {
+		conn_state.ClearSession();
+		throw;
 	}
 }
 
 void RestApiSecretStorage::HttpDelete(const string &url, BoilstreamConnectionState &conn_state) {
+	if (in_http_operation) {
+		throw IOException("Recursive application request refused");
+	}
+	HttpOperationGuard guard;
+	if (!conn_state.protocol) {
+		throw IOException("Missing pinned application channel");
+	}
 	try {
-		// Prevent recursive lookups during HTTP operations
-		if (in_http_operation) {
-			BOILSTREAM_LOG("HttpDelete: BLOCKED by recursion guard");
-			throw IOException("HTTP DELETE failed: Recursive secret lookup detected");
-		}
-
-		// RAII guard automatically manages flag (exception-safe)
-		HttpOperationGuard guard;
-
-		auto &http_util = HTTPUtil::Get(db);
-		boilstream::ValidateEndpoint(url);
-		auto params = http_util.InitializeParameters(db, url);
-		boilstream::ParamsCleanup wipe_params(params.get());
-		if (!params) {
-			throw IOException("HTTP DELETE failed: Could not initialize HTTP parameters");
-		}
-		MaybeDisableTlsVerificationFromEnv(*params);
-
-		// Retry configuration: 3 retries with short exponential backoff
-		// Total attempts: 4 (1 initial + 3 retries)
-		// Total worst-case delay: 100ms + 200ms + 400ms = 700ms
-		const int MAX_RETRIES = 3;
-		const int BASE_DELAY_MS = 100;
-		string last_error;
-
-		for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			// Build authenticated headers INSIDE retry loop - each attempt needs fresh sequence number
-			vector<uint8_t> current_session_key;
-			boilstream::WipeOnExit wipe_request_key(current_session_key);
-			HTTPHeaders headers = BuildAuthenticatedHeaders("DELETE", url, "", conn_state, &current_session_key);
-			boilstream::HeaderCleanup wipe_headers_headers(headers);
-			const bool has_session_key = true;
-
-			DeleteRequestInfo request(url, headers, *params);
-			boilstream::RequestCleanup wipe_request(request);
-			params->follow_location = false;
-			auto response = http_util.Request(request);
-			boilstream::ResponseCleanup wipe_http_response(*response);
-			boilstream::CheckResponseSize(response->body.size());
-
-			// Check if we should retry (only on transient errors)
-			if (response->ShouldRetry() && attempt < MAX_RETRIES) {
-				last_error = "HTTP transport request failed";
-				// Exponential backoff: 100ms, 200ms, 400ms
-				std::this_thread::sleep_for(std::chrono::milliseconds(BASE_DELAY_MS * (1 << attempt)));
-				continue;
-			}
-
-			if (!response->Success()) {
-				BoilstreamThrowHttpStatus("HTTP DELETE failed", static_cast<int>(response->status));
-			}
-
-			// Get HTTP status code
-			auto status_code = static_cast<uint16_t>(response->status);
-
-			// Store response body (may be decrypted below)
-			string response_body = response->body;
-			boilstream::WipeOnExit wipe_response_body(response_body);
-
-			// Verify response signature and decrypt BEFORE checking status code
-			// This ensures error responses are also decrypted before being thrown
-			if (has_session_key) {
-				try {
-					VerifyAuthenticatedResponse(response_body, status_code, response->headers, current_session_key);
-					BOILSTREAM_LOG("HttpDelete: Response signature verified successfully");
-				} catch (const std::exception &e) {
-					conn_state.ClearSession();
-					BoilstreamRethrowSafe("Response integrity check failed", e);
-				}
-
-				// Check if response is encrypted and decrypt if needed
-				auto header_map = ExtractBoilstreamHeaders(response->headers);
-				if (IsResponseEncrypted(header_map)) {
-					BOILSTREAM_LOG("HttpDelete: Response is encrypted, decrypting...");
-					try {
-						uint16_t cipher_suite = ParseCipherSuite(header_map);
-						response_body = DecryptResponse(response_body, current_session_key, cipher_suite);
-
-					} catch (const std::exception &e) {
-						BoilstreamRethrowSafe("Response decryption failed", e);
-					}
-				} else {
-					BOILSTREAM_LOG("HttpDelete: Response is not encrypted (plaintext)");
-				}
-			}
-
-			// Now check status code with decrypted response body
-			// 4xx Client Errors (except 404) - fail fast, don't retry
-			if (status_code >= 400 && status_code < 500 && status_code != 404) {
-				BoilstreamThrowHttpStatus("HTTP DELETE failed", status_code);
-			}
-
-			// 5xx Server Errors - classify for retry decision
-			if (status_code >= 500 && status_code < 600) {
-				// 501 Not Implemented, 505 HTTP Version Not Supported - don't retry
-				if (status_code == 501 || status_code == 505) {
-					BoilstreamThrowHttpStatus("HTTP DELETE failed", status_code);
-				}
-
-				// 500, 502, 503, 504 - retryable server errors
-				if (attempt < MAX_RETRIES) {
-					last_error = "HTTP " + std::to_string(status_code) + " server error";
-					continue; // Will retry with exponential backoff
-				}
-				// Fall through to throw after all retries
-			}
-
-			// Non-2xx status (except 404, including exhausted 5xx retries)
-			if (status_code < 200 || (status_code >= 300 && status_code != 404)) {
-				BoilstreamThrowHttpStatus("HTTP DELETE failed", status_code);
-			}
-
-			return; // Success
-		}
-
-		// All retries exhausted
-		throw IOException("HTTP DELETE failed after " + std::to_string(MAX_RETRIES + 1) + " attempts: " + last_error);
-
-	} catch (const std::exception &e) {
-		BoilstreamRethrowSafe("HTTP DELETE failed", e);
+		conn_state.protocol->Exchange(db, "DELETE", url, "");
+	} catch (...) {
+		conn_state.ClearSession();
+		throw;
 	}
 }
 
