@@ -7,8 +7,9 @@
 <button id="run">Run tests</button>
 <pre id="result" role="status">Ready</pre>
 <script type="module">
-  import { runSuite } from './suite.js';
+  import { runSuite, runProtocolScenario } from './suite.js';
   window.runSuite = runSuite;
+  window.runProtocolScenario = runProtocolScenario;
   document.querySelector('#run').onclick = async () => {
     const button = document.querySelector('#run');
     const result = document.querySelector('#result');

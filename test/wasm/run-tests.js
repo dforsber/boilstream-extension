@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { readFile, access, appendFile } from 'node:fs/promises';
-import { startAuthFixture } from './auth-fixture.js';
+import { createUntrustedPeer } from './untrusted-peer.js';
 import { chromium } from 'playwright';
-import { dirname, join } from 'node:path';
-import { wasmBuildInputs, verifyWasmBuild } from './build-inputs.js';
+import { ensureWasmBuild } from './ensure-build.js';
 import { startServer, baseline, artifactPath } from './server.js';
 
-const authenticated = process.argv.includes('--authenticated');
+assert(!process.argv.includes('--authenticated'), 'Use the private real-server coordinator with real-server.js for authenticated qualification');
 async function summary(message) {
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, message + '\n');
 }
@@ -16,26 +15,19 @@ assert(variants.length > 0 && variants.every(v => baseline.variants.includes(v))
 const pkg = JSON.parse(await readFile(new URL('./node_modules/@duckdb/duckdb-wasm/package.json', import.meta.url), 'utf8'));
 assert.equal(pkg.version, baseline.packageVersion, 'Run npm ci to install the exact baseline');
 for (const variant of variants) {
+  ensureWasmBuild(variant);
   try { await access(artifactPath(variant)); }
   catch { throw new Error(`Missing ${artifactPath(variant)}; run ./build-wasm-fixed.sh ${variant} from the repository root`); }
-  let receipt;
-  try { receipt = JSON.parse(await readFile(join(dirname(artifactPath(variant)), 'boilstream.build.json'), 'utf8')); }
-  catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`Missing ${variant} build receipt; run ./build-wasm-fixed.sh ${variant}`);
-    throw error;
-  }
-  verifyWasmBuild(await readFile(artifactPath(variant)), receipt, await wasmBuildInputs(baseline, variant));
 }
 await import('./prepare-compatibility.js');
-const auth = await startAuthFixture();
+const auth = createUntrustedPeer();
 let server, url, browser;
 try {
   ({ server, url } = await startServer(0, auth));
   browser = await chromium.launch({ headless: true });
-  const hardDeadline = setTimeout(() => { console.error('Browser test process exceeded its cleanup deadline'); process.exit(1); }, 250_000 * variants.length);
-  hardDeadline.unref();
   for (const variant of variants) {
     const context = await browser.newContext();
+    await context.exposeFunction('untrustedHandshakeCount', () => auth.counts.handshake);
     if (process.env.WASM_TRACE) context.on('request', request => console.log(request.url()));
     const unexpected = [];
     let absentQuack = 0;
@@ -81,37 +73,27 @@ try {
     const before = { ...auth.counts };
     let compatibilityTimer;
     const compatibility = await Promise.race([
-      page.evaluate(({ variant, authenticated }) => window.runSuite(variant, message => window.reportTest(message),
-        { quack: true, authenticated, authTransportProbe: !authenticated }), { variant, authenticated }),
+      page.evaluate(variant => window.runSuite(variant, message => window.reportTest(message),
+        { quack: true, untrustedPeer: true }), variant),
       new Promise((_, reject) => { compatibilityTimer = setTimeout(() => reject(new Error(`${variant} Quack compatibility exceeded 90s`)), 90_000); compatibilityTimer.unref(); }),
     ]).finally(() => clearTimeout(compatibilityTimer));
     assert.deepEqual(unexpected, [], 'Quack compatibility caused unexpected network access or browser errors');
     assert.equal(compatibility.quackCompatibility, 'supported', 'Quack compatibility is mandatory');
     console.log(JSON.stringify({ ...compatibility, protocol: auth.counts, mode: 'core-quack' }));
     auth.assertHealthy();
-    if (authenticated) {
-      assert.equal(auth.counts.faults - before.faults, 5, 'Every forged response must reach the browser');
-      assert(auth.counts.finish - before.finish >= 8, 'Real authentication and recovery must complete');
-      assert(auth.counts.secrets - before.secrets >= 8, 'Bootstrap must fetch authenticated secrets');
-      assert(auth.counts.catalogs - before.catalogs >= 20, 'Catalog and isolation checks must reach the authority');
-      await summary(`- ${variant}: strict authenticated browser qualification passed.`);
-    } else {
-      assert.equal(auth.counts.login - before.login, 1, 'Transport probe must send OPAQUE start');
-      assert.equal(auth.counts.finish - before.finish, 1, 'Transport probe must complete real OPAQUE');
-      assert.equal(auth.counts.encrypted - before.encrypted, 1, 'Transport probe must receive a signed encrypted reply');
-      assert.equal(auth.counts.requests - before.requests, 0, 'Failed authentication must publish no usable session');
-      const blocker = `${variant}: **Successful authenticated browser coverage is BLOCKED.** The pinned host drops POST response headers. The passing test proves rejection without publishing a session, not successful login.`;
-      console.log(`[${variant}] BLOCKED successful authenticated coverage: baseline POST discards response headers; run npm run test:authenticated`);
-      await summary(`- ${blocker} Run npm run test:authenticated after correcting the host. See test/wasm/WASM_TEST_STATUS.md.`);
-    }
+    assert.equal(auth.counts.handshake - before.handshake, 1, 'Forged peer must receive exactly one handshake');
+    assert.equal(auth.counts.application - before.application, 0, 'No application message may precede server proof');
+    await summary(`- ${variant}: public client rejection and Quack compatibility passed. Full authenticated qualification requires the private real-server gate.`);
     await context.close();
   }
 } catch (error) {
-  console.error("Authenticated fixture progress:", auth.counts);
+  console.error("Untrusted-peer fixture progress:", auth.counts);
   auth.assertHealthy();
   throw error;
 } finally {
   await browser?.close();
-  await auth.close();
-  if (server) await new Promise(resolve => server.close(resolve));
+  if (server) {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
 }

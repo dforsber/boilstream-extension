@@ -120,3 +120,58 @@ contains environment and reserve-controller invocation. Do not use subagents.
   actual native test and real-router revocation test PASS as recorded above.
 - Disk free23GiB internal,1.2TiB external. All commands in this checkpoint terminal.
   No full browser/release-green claim; remaining work and final reviews unchanged.
+
+2026-11-08 loaded-browser and CI harness checkpoint (owner codex-root):
+- Actual private-server qualification now PASS on native, WASM EH and pthread.
+  Both browser variants use the exact2.0 baseline plus compatible Quack. Their
+  proxy uses plaintext loopback, strips all security response headers and checks
+  that application traffic is encrypted. Missing/wrong pins, one-use bootstrap,
+  secret create/list/delete, other-tenant exclusion, concurrent connection ownership,
+  tamper rejection/no retry, unknown mutation outcome reconciliation via a healthy
+  sibling, and actual database revocation all pass.
+- Fixed a production bug found by these tests: explicit boilstream_secrets() used
+  the WASM cache, which omits credentials without known expiry. It now fetches an
+  authenticated remote snapshot using the captured connection owner on native and
+  WASM. Generic WASM SecretManager callbacks remain cache-only to avoid recursion.
+  Native/EH/pthread rebuilds and real-server regressions PASS. Private combined
+  make test-application-protocol-clients:4 passed,0 failed,0 ignored (99.13s), log
+  ../logs/loaded-client-gate.log under the private candidate parent. No server key
+  or server implementation added to the public repository.
+- Public browser CI migrated off the obsolete expected POST-header failure.
+  Public tests verify missing pins cause no traffic, exactly one forged proof
+  reaches the verifier, and no application request or identity is published.
+  Real-browser EH73 /pthread74 compatibility checks PASS; native adversarial
+  check PASS. Logs browser-public-eh-migration.log, browser-public-threads-migration.log
+  and native-untrusted-peer.log. Positive auth remains a mandatory private release
+  gate, not an assertion inferred from these public rejection checks.
+- Removed obsolete header-protocol browser fixture and its unused Rust peer.
+  Prior account replacement/catalog-resumption oracles that never passed on WASM
+  remain explicit gaps requiring actual-server coverage; removing obsolete code
+  does not close those requirements. Six legacy C++ suites remain to migrate.
+- Browser runners now invoke ordinary incremental CMake/Cargo before loading
+  artifacts, including the private-driver path. Removed BoilStream source hash
+  inventories/receipts and forced cleans. Existing Ninja/Make trees are supported;
+  wrong-source and wrong-platform cache controls reject before compilation (log
+  wasm-build-selection.log). Community make targets unchanged. Quack's older
+  source-build receipt machinery is separate remaining harness debt.
+- Harness14 tests PASS after removing the obsolete receipt test; shell/JS syntax
+  and Git whitespace checks PASS. Driver cleanup now unwinds browser/server rather
+  than process.exit from a whole-run timer; per-operation deadlines remain.
+- Incremental reviews (not final release reviews): security—private fixture keys
+  stay private, no forged HTTP metadata grants identity, real401 closes sessions;
+  test quality—actual encrypted mutation commits once despite rejected reply,
+  sibling verifies the effect, negative cases check wire counts; compatibility—
+  actual2.0 EH/pthread/native, compatible Quack, normal CMake/Cargo dependency
+  tracking and unchanged community entry points. Old gaps are not relabeled passes.
+- Still required: six C++ suite migrations, registration/MFA/resumption/account
+  replacement and catalog/remote Quack coverage, obsolete production wire cleanup,
+  C++ dependency review, release gates, remote CI verification and final3 reviews.
+  No main merge/publication/full-GitHub-green claim. Disk remains23GiB internal,
+  1.2TiB external with8/50GiB reserve guards. No subagents used.
+- Native harness follow-up: both private preflight and public adversarial entrypoint
+  update the full selected native CMake tree so host/static objects cannot remain
+  stale after a loadable-only build. Private preflight requires the selected CLI
+  to belong to that same tree. The new run rebuilt the changed static extension
+  object; actual-server native and public adversarial cases both PASS afterwards.
+  Logs private loaded-native-host-refresh.log and public native-untrusted-peer-refresh.log.
+  Private checkpoint pushed at18fb89cdb, clean; production Rust pins unchanged.

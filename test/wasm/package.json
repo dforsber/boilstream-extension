@@ -9,7 +9,7 @@
     "test:browser": "node run-tests.js",
     "test:compatibility": "node run-tests.js",
     "serve": "node server.js",
-    "test:authenticated": "node run-tests.js --authenticated"
+    "test:authenticated": "node real-server.js"
   },
   "devDependencies": {
     "@duckdb/duckdb-wasm": "1.33.1-dev114.0",

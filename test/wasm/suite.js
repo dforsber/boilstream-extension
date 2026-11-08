@@ -1,5 +1,6 @@
+export { runProtocolScenario } from './protocol-scenario.js';
 import * as duckdb from '@duckdb/duckdb-wasm/dist/duckdb-browser.mjs';
-import { runAuthenticatedTests, runAuthTransportProbe } from './authenticated.js';
+import { runUntrustedPeerTests } from './untrusted-scenario.js';
 import { runSqlTests } from './sql-runner.js';
 
 function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -90,8 +91,7 @@ export async function runSuite(variant, report = () => {}, options = {}) {
       assert((await connection.query('SELECT 42 AS answer')).toArray()[0].answer === 42, 'Connection unusable after rejection');
       passed += 3;
     }
-    if (options.authTransportProbe) passed += await runAuthTransportProbe(connect, report);
-    if (options.authenticated) passed += await runAuthenticatedTests(connect, report);
+    if (options.untrustedPeer) passed += await runUntrustedPeerTests(connect, report);
     // Wrong extension content must cause a hard load failure, not a warning/pass.
     await rejects(c, `LOAD '${location.origin}/fixtures/corrupt.duckdb_extension.wasm'`, /metadata|magic|invalid.*extension/i);
     passed++;

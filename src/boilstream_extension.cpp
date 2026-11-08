@@ -422,12 +422,11 @@ static unique_ptr<GlobalTableFunctionState> BoilstreamSecretsInit(ClientContext 
 	vector<SecretEntry> secrets;
 	try {
 		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-#ifdef __EMSCRIPTEN__
-		// In WASM, use GetCachedSecrets to avoid stack overflow (AllSecrets returns empty in WASM)
-		secrets = storage->GetCachedSecrets(transaction);
-#else
-		secrets = storage->AllSecrets(transaction);
-#endif
+		// This explicit SQL query must fetch the authenticated server snapshot.
+		// The generic SecretManager callback stays cache-only on WASM to avoid
+		// recursive HTTP lookups. Reusing that callback here omitted credentials
+		// without an expiry and could hide later server-side revocation.
+		secrets = storage->FetchAllSecretsFromServer(transaction, secret_owner);
 	} catch (const std::exception &e) {
 		BoilstreamRethrowSafe("Failed to fetch secrets from boilstream storage", e);
 	}

@@ -48,8 +48,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Verify the authenticated browser fixture against the native client
-        run: node test/wasm/check-native-auth-fixture.js
+      - name: Reject missing pins and forged server proof in the native client
+        run: node test/wasm/check-native-untrusted-peer.js
       - name: Run every native SQL test without optional dependency skips
         run: |
           platform=$(build/release/duckdb -csv -noheader -c 'PRAGMA platform;')

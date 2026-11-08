@@ -30,7 +30,7 @@ npm run test:compatibility --prefix test/wasm
 
 The build requires the Emscripten and Rust versions in `baseline.json`, plus
 the `wasm32-unknown-emscripten` target. It rejects source/toolchain mismatches and
-propagates build failures. The qualification helper starts each variant from fresh build output; the browser runner checks source and artifact hashes against the completed build receipt. Direct community make targets remain available and unchanged in purpose. It never restores old artifacts or changes metadata to
+propagates build failures. The helper and browser runners update the selected CMake tree incrementally before loading its output. CMake checks C++ dependencies and Cargo checks Rust inputs, including the protocol client. Existing Ninja and Makefile trees are supported; source paths and WASM platform must match. No forced clean or source-hash receipt is required. Direct community make targets remain available and unchanged in purpose. It never restores old artifacts or changes metadata to
 make an incompatible binary appear compatible.
 
 For one platform, use `WASM_VARIANTS=wasm_eh npm test --prefix test/wasm` (or
@@ -67,36 +67,48 @@ proxy authentication traffic.
 - Both single-threaded and threaded workers, with deadlines and worker cleanup.
 - Server path traversal rejection, byte ranges, and cross-origin isolation headers.
 
-CI also executes 26 base / 27 threaded Rust WASM FFI assertions using the same archive linked into
+CI also executes 34 base / 35 threaded Rust WASM FFI assertions using the same archive linked into
 each extension, including RFC 4231 HMAC and malformed OPAQUE response checks.
 See [`../../opaque-client/test-wasm/README.md`](../../opaque-client/test-wasm/README.md).
 
-Browser execution is hermetic: unrecognized external requests fail. Preparation downloads the EH Quack artifact and verifies its pinned SHA256; the threaded artifact must be freshly built with scripts/build-quack-wasm.sh and match its input/output receipt before being served locally. The unavailable-dependency case is separate. The default browser lane also performs a real OPAQUE exchange and proves that
-login fails closed when this baseline drops POST response headers. It prints
-`BLOCKED successful authenticated coverage`, and this must not be read as a
-successful authentication qualification.
+Browser execution is hermetic: unrecognized external requests fail. Preparation
+verifies the pinned EH Quack download and the source-built threaded Quack's shared
+memory compatibility. The public lane rejects missing pins and a forged server
+proof before any application credentials can be sent. It does not contain server
+crypto or imply successful authentication coverage.
 
-Run the strict local qualification separately:
+## Actual-server qualification
+
+The private server coordinator starts the real router, database, OPAQUE handlers
+and autonomous fixtures, then invokes:
 
 ```sh
-WASM_VARIANTS=wasm_eh npm run test:authenticated --prefix test/wasm
-WASM_VARIANTS=wasm_threads npm run test:authenticated --prefix test/wasm
-node test/wasm/check-native-auth-fixture.js
+node test/wasm/real-server.js wasm_eh
+node test/wasm/real-server.js wasm_threads
 ```
 
-The first two commands currently exit nonzero on the pinned host. The last is a
-native positive control requiring `make release` and installed matching HTTPFS
-and Quack; it proves that the fixture's OPAQUE, signatures and AES-GCM envelopes
-are accepted by the actual client. CI runs this positive control in the native
-security workflow. The peer is rebuilt through Cargo on each run, uses the
-existing locked dependencies, and exchanges only ephemeral fixture credentials
-over private stdio. No production accounts or private server modules are used.
+These commands are drivers, not standalone fixture servers. Activate the pinned
+Emscripten SDK first; each driver incrementally updates the selected client build.
+The first stdin line must be JSON containing `authority` (plaintext loopback
+origin), `pin`, `wrongPin` (64 hex characters), `password` and `siblingPassword`
+(synthetic one-use bootstraps for the same fixture identity). No installation
+private key is sent to this public driver. When stdout emits
+`{"control":"revoke"}`, the private coordinator revokes that user's actual database
+sessions and replies on stdin with `{"revoked":true}`. The final stdout JSON
+contains `result`; all compilation and diagnostic output goes to stderr.
 
-The strict browser suite includes account replacement, two-connection isolation,
-forged/missing/stale signatures, encrypted-body corruption and closed-connection
-isolation. Those cases after the first login remain **unqualified** until the
-host is corrected. On a corrected baseline, remove the expected-failure transport
-probe and make this strict suite mandatory. Browser email/password/MFA handlers,
-refresh-token resumption, managed credential vending and a live remote Quack
-query still require additional integration coverage. Native tests are
-complementary and do not fill those browser gaps. See `WASM_TEST_STATUS.md`.
+The browser proxy strips response security headers and verifies application
+traffic is encrypted. Tests exercise authentication, secret CRUD, tenant
+exclusion, concurrent connections, tamper rejection without retry, unknown
+mutation outcome reconciliation and live revocation. The private Make target
+`test-application-protocol-clients` requires native and both browser variants;
+`test-application-protocol-release` adds dependency audit and standalone transport
+checks. Missing inputs fail rather than silently skipping coverage.
+
+The public native adversarial test is
+`node test/wasm/check-native-untrusted-peer.js`, requiring a current native build
+and matching installed HTTPFS. Successful native authentication is tested by the
+private coordinator, against the actual server.
+
+See [WASM_TEST_STATUS.md](WASM_TEST_STATUS.md) for current evidence and remaining
+coverage gaps. Public CI alone does not qualify a coordinated client/server release.
