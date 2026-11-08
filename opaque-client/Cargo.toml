@@ -26,10 +26,9 @@ serde_json = "1.0"
 [dev-dependencies]
 hex = "0.4.3"
 
-# WASM-specific dependencies
+# Entropy backend for the raw client C ABI on wasm32-unknown-unknown
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
-wasm-bindgen = "0.2"
 
 [profile.release]
 opt-level = 3

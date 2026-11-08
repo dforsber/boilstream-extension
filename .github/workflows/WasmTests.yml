@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  wasm-bindgen:
+  wasm-client-compile:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

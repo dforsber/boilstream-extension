@@ -14,7 +14,7 @@ in a stable opaque-ke release; retain the immutable Git pin until one is qualifi
 Protocol remains Ristretto255 / SHA-512 / TripleDH / Identity KSF. The updated
 client API requires entropy during login finish. rand 0.10 SysRng supplies OS
 entropy on native/Emscripten and getrandom 0.4's wasm_js backend for the standalone
-wasm-bindgen target. AES-GCM's unused RNG default feature is disabled; its AES
+wasm32-unknown-unknown target. AES-GCM's unused RNG default feature is disabled; its AES
 implementation and allocation-based decrypt API remain enabled. Our request
 signing and encryption SHA256/HMAC/HKDF primitives stay on their prior versions.
 

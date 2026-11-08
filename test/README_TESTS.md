@@ -9,6 +9,10 @@ workers for both `wasm_eh` and `wasm_threads`. It also runs the compatible share
 SQL corpus. `session_lifecycle_test` below is a native executable and does not
 replace browser testing. Rust WASM FFI vectors run separately against the same
 archive linked into each extension.
+Native and WASM clients use the same Rust C ABI. The `wasm-client-compile` CI job
+checks the raw client library on `wasm32-unknown-unknown`; it does not claim a
+standalone JavaScript authentication API. Browser EH/pthread jobs exercise the
+actual DuckDB extension through SQL.
 
 ## SQL tests (`test/sql/`)
 
